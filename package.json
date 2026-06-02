@@ -1,0 +1,29 @@
+{
+  "name": "ai-servant-cli",
+  "version": "0.0.1",
+  "description": "AI servant CLI — enhances developer and coding-agent workflows.",
+  "type": "module",
+  "private": true,
+  "bin": {
+    "servant": "./src/index.ts"
+  },
+  "scripts": {
+    "dev": "bun run src/index.ts",
+    "start": "bun run src/index.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test",
+    "lint": "biome check .",
+    "format": "biome format --write ."
+  },
+  "dependencies": {
+    "citty": "^0.1.6"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^1.9.4",
+    "@types/bun": "latest"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  },
+  "trustedDependencies": ["@biomejs/biome"]
+}
