@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { mkdtemp, rm, stat } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -68,6 +68,23 @@ describe("ensureWorkspaceDir", () => {
 
   test("rejects invalid names before touching the filesystem", async () => {
     await expect(ensureWorkspaceDir("../evil")).rejects.toThrow();
+  });
+
+  test("writes a CLAUDE.md pointer that imports the servant-root CLAUDE.md", async () => {
+    const name = `claude-md-${process.pid}-${Date.now()}`;
+    const dir = await ensureWorkspaceDir(name);
+    const body = await readFile(join(dir, "CLAUDE.md"), "utf8");
+    expect(body).toBe("@../../CLAUDE.md\n");
+  });
+
+  test("restores the CLAUDE.md pointer if it has been tampered with", async () => {
+    const name = `claude-md-restore-${process.pid}-${Date.now()}`;
+    const dir = await ensureWorkspaceDir(name);
+    const path = join(dir, "CLAUDE.md");
+    await writeFile(path, "tampered");
+    await ensureWorkspaceDir(name);
+    const body = await readFile(path, "utf8");
+    expect(body).toBe("@../../CLAUDE.md\n");
   });
 });
 

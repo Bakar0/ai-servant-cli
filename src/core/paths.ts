@@ -22,3 +22,11 @@ export function configPath(): string {
 export function discoveryCachePath(): string {
   return join(aiServantRoot(), ".cache", "repo-discovery.json");
 }
+
+export function claudeDir(): string {
+  return join(aiServantRoot(), ".claude");
+}
+
+export function claudeCommandsDir(): string {
+  return join(claudeDir(), "commands");
+}

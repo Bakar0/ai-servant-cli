@@ -1,16 +1,12 @@
+import { shellSingleQuote } from "../core/shell.ts";
 import type { OpenTabOptions, TerminalDriver } from "./types.ts";
 
 function escapeAppleScriptString(value: string): string {
   return value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
 }
 
-function escapeShellSingleQuoted(value: string): string {
-  // Wrap in single quotes; close, escape the single quote, reopen.
-  return `'${value.replace(/'/g, `'\\''`)}'`;
-}
-
 function buildAppleScript(cwd: string, command: string): string {
-  const shellCommand = `cd ${escapeShellSingleQuoted(cwd)} && clear && ${command}`;
+  const shellCommand = `cd ${shellSingleQuote(cwd)} && clear && ${command}`;
   const asCommand = escapeAppleScriptString(shellCommand);
   return `
 tell application "iTerm"

@@ -1,7 +1,11 @@
 import { existsSync } from "node:fs";
-import { mkdir } from "node:fs/promises";
-import { relative, resolve, sep } from "node:path";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { join, relative, resolve, sep } from "node:path";
 import { workspacePath, workspacesRoot } from "./paths.ts";
+
+// Imports the servant-root CLAUDE.md so Claude Code picks up workspace conventions
+// without needing parent-dir traversal to reach `~/.ai_servant/CLAUDE.md`.
+const WORKSPACE_CLAUDE_MD = "@../../CLAUDE.md\n";
 
 const VALID_NAME = /^[A-Za-z0-9][A-Za-z0-9_.-]*$/;
 
@@ -24,6 +28,16 @@ export async function ensureWorkspaceDir(name: string): Promise<string> {
   assertValidWorkspaceName(name);
   const dir = workspacePath(name);
   await mkdir(dir, { recursive: true });
+  const claudeMdPath = join(dir, "CLAUDE.md");
+  let existing: string | null = null;
+  try {
+    existing = await readFile(claudeMdPath, "utf8");
+  } catch {
+    // missing, will write
+  }
+  if (existing !== WORKSPACE_CLAUDE_MD) {
+    await writeFile(claudeMdPath, WORKSPACE_CLAUDE_MD);
+  }
   return dir;
 }
 

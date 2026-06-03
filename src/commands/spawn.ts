@@ -1,5 +1,6 @@
 import { defineCommand } from "citty";
 import { DEFAULT_AGENT, getAgent } from "../agents/index.ts";
+import { ensureServantAssets } from "../core/claude-setup.ts";
 import { ensureWorkspaceDir, resolveWorkspaceName } from "../core/workspace.ts";
 import { detectTerminal, getDriver } from "../terminals/index.ts";
 
@@ -28,12 +29,20 @@ export const spawnCommand = defineCommand({
       default: DEFAULT_AGENT,
       description: `Coding agent to launch (default: ${DEFAULT_AGENT}).`,
     },
+    prompt: {
+      type: "string",
+      required: false,
+      alias: "p",
+      description:
+        "Initial prompt delivered to the agent as its first user message. Use to kick off a delegated task (e.g. point the agent at a brief file).",
+    },
   },
   async run({ args }) {
+    await ensureServantAssets();
     const workspace = await resolveWorkspaceName(args.workspace);
     const cwd = await ensureWorkspaceDir(workspace);
     const agent = getAgent(args.agent);
-    const command = agent.launchCommand(cwd);
+    const command = agent.launchCommand(cwd, { prompt: args.prompt });
     const driver = args.terminal ? getDriver(args.terminal) : await detectTerminal();
 
     await driver.openTab({ cwd, command, title: workspace });
