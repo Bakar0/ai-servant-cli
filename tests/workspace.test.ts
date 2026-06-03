@@ -1,12 +1,26 @@
-import { afterAll, describe, expect, test } from "bun:test";
-import { rm, stat } from "node:fs/promises";
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { mkdtemp, rm, stat } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { workspacePath } from "../src/core/paths.ts";
-import {
-  assertValidWorkspaceName,
-  detectWorkspaceNameFromCwd,
-  ensureWorkspaceDir,
-} from "../src/core/workspace.ts";
+
+let tmpRoot: string;
+const originalEnv = process.env.AI_SERVANT_ROOT;
+
+beforeAll(async () => {
+  tmpRoot = await mkdtemp(join(tmpdir(), "servant-ws-test-"));
+  process.env.AI_SERVANT_ROOT = tmpRoot;
+});
+
+afterAll(async () => {
+  if (originalEnv === undefined) Reflect.deleteProperty(process.env, "AI_SERVANT_ROOT");
+  else process.env.AI_SERVANT_ROOT = originalEnv;
+  await rm(tmpRoot, { recursive: true, force: true });
+});
+
+const { assertValidWorkspaceName, detectWorkspaceNameFromCwd, ensureWorkspaceDir } = await import(
+  "../src/core/workspace.ts"
+);
+const { workspacePath, workspacesRoot } = await import("../src/core/paths.ts");
 
 describe("assertValidWorkspaceName", () => {
   test("accepts simple alphanumeric names", () => {
@@ -41,13 +55,10 @@ describe("assertValidWorkspaceName", () => {
 describe("ensureWorkspaceDir", () => {
   const testName = `test-${process.pid}-${Date.now()}`;
 
-  afterAll(async () => {
-    await rm(workspacePath(testName), { recursive: true, force: true });
-  });
-
-  test("creates the workspace directory under ~/.ai_servant and is idempotent", async () => {
+  test("creates the workspace directory under workspaces root and is idempotent", async () => {
     const dir1 = await ensureWorkspaceDir(testName);
     expect(dir1).toBe(workspacePath(testName));
+    expect(dir1.startsWith(workspacesRoot())).toBe(true);
     const s = await stat(dir1);
     expect(s.isDirectory()).toBe(true);
 
@@ -61,13 +72,13 @@ describe("ensureWorkspaceDir", () => {
 });
 
 describe("detectWorkspaceNameFromCwd", () => {
-  const root = "/Users/me/.ai_servant";
+  const root = "/Users/me/.ai_servant/workspaces";
 
-  test("returns name when cwd is exactly ~/.ai_servant/<name>", () => {
+  test("returns name when cwd is exactly <workspaces-root>/<name>", () => {
     expect(detectWorkspaceNameFromCwd(join(root, "foo"), root)).toBe("foo");
   });
 
-  test("returns name for any depth under ~/.ai_servant/<name>", () => {
+  test("returns name for any depth under <workspaces-root>/<name>", () => {
     expect(detectWorkspaceNameFromCwd(join(root, "foo", "src", "lib"), root)).toBe("foo");
   });
 

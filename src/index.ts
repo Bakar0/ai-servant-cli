@@ -1,5 +1,6 @@
 #!/usr/bin/env bun
 import { defineCommand, runMain } from "citty";
+import { repoCommand } from "./commands/repo/index.ts";
 import { spawnCommand } from "./commands/spawn.ts";
 
 const main = defineCommand({
@@ -10,6 +11,7 @@ const main = defineCommand({
   },
   subCommands: {
     spawn: spawnCommand,
+    repo: repoCommand,
   },
 });
 

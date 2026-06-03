@@ -1,54 +1,13 @@
-import { existsSync } from "node:fs";
 import { defineCommand } from "citty";
 import { DEFAULT_AGENT, getAgent } from "../agents/index.ts";
-import { aiServantRoot, workspacePath } from "../core/paths.ts";
-import {
-  assertValidWorkspaceName,
-  detectWorkspaceNameFromCwd,
-  ensureWorkspaceDir,
-} from "../core/workspace.ts";
-import { getCurrentCmuxWorkspaceTitle } from "../terminals/cmux.ts";
+import { ensureWorkspaceDir, resolveWorkspaceName } from "../core/workspace.ts";
 import { detectTerminal, getDriver } from "../terminals/index.ts";
-
-async function resolveWorkspaceName(provided: string | undefined): Promise<string> {
-  if (provided) return provided;
-
-  const root = aiServantRoot();
-  const fromCwd = detectWorkspaceNameFromCwd(process.cwd(), root);
-  if (fromCwd) return fromCwd;
-
-  const inCmux = Boolean(process.env.CMUX_WORKSPACE_ID);
-  let cmuxTitle: string | null = null;
-  if (inCmux) {
-    cmuxTitle = await getCurrentCmuxWorkspaceTitle();
-    if (cmuxTitle) {
-      try {
-        assertValidWorkspaceName(cmuxTitle);
-        if (existsSync(workspacePath(cmuxTitle))) return cmuxTitle;
-      } catch {
-        // fall through to error
-      }
-    }
-  }
-
-  const tried = [`cwd ${process.cwd()} is not under ${root}/<name>`];
-  if (!inCmux) {
-    tried.push("cmux workspace identity: not running inside cmux");
-  } else if (cmuxTitle === null) {
-    tried.push("cmux workspace identity: could not resolve current cmux workspace");
-  } else {
-    tried.push(`cmux workspace "${cmuxTitle}": no matching folder at ${workspacePath(cmuxTitle)}`);
-  }
-  throw new Error(
-    `Could not auto-detect workspace. Tried:\n  - ${tried.join("\n  - ")}\nPass --workspace <name> explicitly.`,
-  );
-}
 
 export const spawnCommand = defineCommand({
   meta: {
     name: "spawn",
     description:
-      "Create a workspace folder under ~/.ai_servant/<name> and open a new terminal tab running a coding agent in it.",
+      "Create a workspace folder under ~/.ai_servant/workspaces/<name> and open a new terminal tab running a coding agent in it.",
   },
   args: {
     workspace: {
@@ -56,7 +15,7 @@ export const spawnCommand = defineCommand({
       required: false,
       alias: "w",
       description:
-        "Workspace name (folder under ~/.ai_servant). If omitted, auto-detected from cwd or current cmux workspace.",
+        "Workspace name (folder under ~/.ai_servant/workspaces). If omitted, auto-detected from cwd or current cmux workspace.",
     },
     terminal: {
       type: "string",
