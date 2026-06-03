@@ -1,4 +1,5 @@
 import { mkdir } from "node:fs/promises";
+import { relative, resolve, sep } from "node:path";
 import { workspacePath } from "./paths.ts";
 
 const VALID_NAME = /^[A-Za-z0-9][A-Za-z0-9_.-]*$/;
@@ -23,4 +24,17 @@ export async function ensureWorkspaceDir(name: string): Promise<string> {
   const dir = workspacePath(name);
   await mkdir(dir, { recursive: true });
   return dir;
+}
+
+export function detectWorkspaceNameFromCwd(cwd: string, root: string): string | null {
+  const rel = relative(resolve(root), resolve(cwd));
+  if (!rel || rel.startsWith("..") || rel.startsWith(sep)) return null;
+  const first = rel.split(sep)[0];
+  if (!first) return null;
+  try {
+    assertValidWorkspaceName(first);
+  } catch {
+    return null;
+  }
+  return first;
 }

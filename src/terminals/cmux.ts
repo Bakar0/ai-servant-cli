@@ -94,6 +94,21 @@ async function addSurfaceToWorkspace(workspaceRef: string, command: string): Pro
   assertOk(sendResult, "send");
 }
 
+export async function getCurrentCmuxWorkspaceTitle(): Promise<string | null> {
+  const id = process.env.CMUX_WORKSPACE_ID;
+  if (!id) return null;
+  const result = await runCmux(["workspace", "list", "--json"]);
+  if (result.exitCode !== 0) return null;
+  let parsed: { workspaces?: Array<{ ref: string; title: string }> };
+  try {
+    parsed = JSON.parse(result.stdout);
+  } catch {
+    return null;
+  }
+  const found = parsed.workspaces?.find((w) => w.ref === id || w.ref.endsWith(`:${id}`));
+  return found?.title ?? null;
+}
+
 export const cmuxDriver: TerminalDriver = {
   name: "cmux",
   async openTab({ cwd, command, title }: OpenTabOptions): Promise<void> {

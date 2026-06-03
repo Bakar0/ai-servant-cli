@@ -1,7 +1,12 @@
 import { afterAll, describe, expect, test } from "bun:test";
 import { rm, stat } from "node:fs/promises";
+import { join } from "node:path";
 import { workspacePath } from "../src/core/paths.ts";
-import { assertValidWorkspaceName, ensureWorkspaceDir } from "../src/core/workspace.ts";
+import {
+  assertValidWorkspaceName,
+  detectWorkspaceNameFromCwd,
+  ensureWorkspaceDir,
+} from "../src/core/workspace.ts";
 
 describe("assertValidWorkspaceName", () => {
   test("accepts simple alphanumeric names", () => {
@@ -52,5 +57,34 @@ describe("ensureWorkspaceDir", () => {
 
   test("rejects invalid names before touching the filesystem", async () => {
     await expect(ensureWorkspaceDir("../evil")).rejects.toThrow();
+  });
+});
+
+describe("detectWorkspaceNameFromCwd", () => {
+  const root = "/Users/me/.ai_servant";
+
+  test("returns name when cwd is exactly ~/.ai_servant/<name>", () => {
+    expect(detectWorkspaceNameFromCwd(join(root, "foo"), root)).toBe("foo");
+  });
+
+  test("returns name for any depth under ~/.ai_servant/<name>", () => {
+    expect(detectWorkspaceNameFromCwd(join(root, "foo", "src", "lib"), root)).toBe("foo");
+  });
+
+  test("returns null when cwd is the root itself", () => {
+    expect(detectWorkspaceNameFromCwd(root, root)).toBeNull();
+  });
+
+  test("returns null when cwd is outside the root", () => {
+    expect(detectWorkspaceNameFromCwd("/Users/me/other/place", root)).toBeNull();
+  });
+
+  test("returns null when the first segment is not a valid workspace name", () => {
+    expect(detectWorkspaceNameFromCwd(join(root, ".hidden", "x"), root)).toBeNull();
+    expect(detectWorkspaceNameFromCwd(join(root, "-flag"), root)).toBeNull();
+  });
+
+  test("resolves relative paths", () => {
+    expect(detectWorkspaceNameFromCwd(`${root}/foo/./bar`, root)).toBe("foo");
   });
 });
