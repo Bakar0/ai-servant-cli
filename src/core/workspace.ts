@@ -1,11 +1,29 @@
 import { existsSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { join, relative, resolve, sep } from "node:path";
+import { dirname, join, relative, resolve, sep } from "node:path";
 import { workspacePath, workspacesRoot } from "./paths.ts";
 
 // Imports the servant-root CLAUDE.md so Claude Code picks up workspace conventions
 // without needing parent-dir traversal to reach `~/.ai_servant/CLAUDE.md`.
 const WORKSPACE_CLAUDE_MD = "@../../CLAUDE.md\n";
+
+// Scaffold files seeded once when a workspace is created. Only written if missing
+// so user edits are never clobbered. Layout matches `~/.ai_servant/CLAUDE.md`.
+const SCAFFOLD_FILES: ReadonlyArray<readonly [string, string]> = [
+  ["CONTEXT.md", "# Context\n\nShared language / domain glossary for this workspace.\n"],
+  ["briefs/INDEX.md", "# Briefs\n"],
+  ["context/INDEX.md", "# Context\n"],
+];
+
+async function writeIfMissing(path: string, body: string): Promise<void> {
+  try {
+    await readFile(path);
+    return;
+  } catch {
+    // missing, will write
+  }
+  await writeFile(path, body);
+}
 
 const VALID_NAME = /^[A-Za-z0-9][A-Za-z0-9_.-]*$/;
 
@@ -37,6 +55,11 @@ export async function ensureWorkspaceDir(name: string): Promise<string> {
   }
   if (existing !== WORKSPACE_CLAUDE_MD) {
     await writeFile(claudeMdPath, WORKSPACE_CLAUDE_MD);
+  }
+  for (const [rel, body] of SCAFFOLD_FILES) {
+    const full = join(dir, rel);
+    await mkdir(dirname(full), { recursive: true });
+    await writeIfMissing(full, body);
   }
   return dir;
 }

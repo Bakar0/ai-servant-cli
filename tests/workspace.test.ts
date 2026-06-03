@@ -86,6 +86,33 @@ describe("ensureWorkspaceDir", () => {
     const body = await readFile(path, "utf8");
     expect(body).toBe("@../../CLAUDE.md\n");
   });
+
+  test("scaffolds CONTEXT.md, briefs/INDEX.md, and context/INDEX.md", async () => {
+    const name = `scaffold-${process.pid}-${Date.now()}`;
+    const dir = await ensureWorkspaceDir(name);
+
+    const contextMd = await readFile(join(dir, "CONTEXT.md"), "utf8");
+    expect(contextMd).toContain("# Context");
+
+    const briefsIndex = await readFile(join(dir, "briefs", "INDEX.md"), "utf8");
+    expect(briefsIndex).toContain("# Briefs");
+
+    const contextIndex = await readFile(join(dir, "context", "INDEX.md"), "utf8");
+    expect(contextIndex).toContain("# Context");
+  });
+
+  test("does not overwrite scaffold files that the user has edited", async () => {
+    const name = `scaffold-preserve-${process.pid}-${Date.now()}`;
+    const dir = await ensureWorkspaceDir(name);
+
+    const briefsIndex = join(dir, "briefs", "INDEX.md");
+    await writeFile(briefsIndex, "# Briefs\n\n- existing entry\n");
+
+    await ensureWorkspaceDir(name);
+
+    const body = await readFile(briefsIndex, "utf8");
+    expect(body).toBe("# Briefs\n\n- existing entry\n");
+  });
 });
 
 describe("detectWorkspaceNameFromCwd", () => {
