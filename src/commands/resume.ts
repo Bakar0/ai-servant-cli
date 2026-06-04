@@ -40,7 +40,12 @@ export const resumeCommand = defineCommand({
     terminal: {
       type: "string",
       required: false,
-      description: "Terminal to use: cmux | iterm (default: auto-detect).",
+      description: "Terminal to use when --new-tab is set: cmux | iterm (default: auto-detect).",
+    },
+    "new-tab": {
+      type: "boolean",
+      required: false,
+      description: "Open a new terminal tab instead of running claude in the current tab.",
     },
     prompt: {
       type: "string",
@@ -85,23 +90,46 @@ export const resumeCommand = defineCommand({
 
     const explicitWs = args.workspace as string | undefined;
     const workspaceTitle = resolveWorkspaceTitle(explicitWs, launchCwd);
-
-    const command = buildResumeCommand(sessionId, args.prompt as string | undefined);
+    const prompt = args.prompt as string | undefined;
 
     if (workspaceTitle && isUnderWorkspacesRoot(launchCwd)) {
       await ensureWorkspaceDir(workspaceTitle);
     }
     await ensureServantAssets();
 
-    const terminalName = args.terminal as string | undefined;
-    const driver = terminalName ? getDriver(terminalName) : await detectTerminal();
-    await driver.openTab({ cwd: launchCwd, command, title: workspaceTitle ?? undefined });
+    const newTab = args["new-tab"] === true;
+    if (newTab) {
+      const terminalName = args.terminal as string | undefined;
+      const driver = terminalName ? getDriver(terminalName) : await detectTerminal();
+      const command = buildResumeCommand(sessionId, prompt);
+      await driver.openTab({ cwd: launchCwd, command, title: workspaceTitle ?? undefined });
+      console.log(
+        `servant: resumed session ${sessionId.slice(0, 8)} in ${driver.name} workspace "${workspaceTitle ?? launchCwd}" at ${launchCwd}`,
+      );
+      return;
+    }
 
-    console.log(
-      `servant: resumed session ${sessionId.slice(0, 8)} in ${driver.name} workspace "${workspaceTitle ?? launchCwd}" at ${launchCwd}`,
-    );
+    const exitCode = await runClaudeInPlace(sessionId, launchCwd, prompt);
+    if (exitCode !== 0) process.exit(exitCode);
   },
 });
+
+async function runClaudeInPlace(
+  sessionId: string,
+  cwd: string,
+  prompt: string | undefined,
+): Promise<number> {
+  const args = ["--resume", sessionId];
+  const trimmed = prompt?.trim();
+  if (trimmed) args.push(trimmed);
+  const proc = Bun.spawn(["claude", ...args], {
+    cwd,
+    stdin: "inherit",
+    stdout: "inherit",
+    stderr: "inherit",
+  });
+  return await proc.exited;
+}
 
 export function buildResumeCommand(id: string, prompt?: string): string {
   const base = `claude --resume ${shellSingleQuote(id)}`;

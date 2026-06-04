@@ -1,5 +1,4 @@
 import { type ClaudeSessionMeta, listWorkspaceSessions } from "../core/claude-session.ts";
-import { type CmuxLiveState, readCmuxLiveStates } from "../core/cmux-sessions.ts";
 
 export interface PickSessionOpts {
   workspaceName?: string;
@@ -23,11 +22,7 @@ export async function pickSession(opts: PickSessionOpts = {}): Promise<string | 
     );
   }
 
-  const liveStates = await readCmuxLiveStates();
-
-  const lines = sessions.map(
-    (s) => `${s.sessionId}\t${formatListLine(s, liveStates.get(s.sessionId))}`,
-  );
+  const lines = sessions.map((s) => `${s.sessionId}\t${formatListLine(s)}`);
 
   const previewCmd = `${shellQuote(process.execPath)} ${shellQuote(servantEntry())} resume --preview {1}`;
 
@@ -62,26 +57,10 @@ export async function pickSession(opts: PickSessionOpts = {}): Promise<string | 
   return sessionId ?? null;
 }
 
-export function formatListLine(meta: ClaudeSessionMeta, live: CmuxLiveState | undefined): string {
-  const id = meta.sessionId.slice(0, 8);
-  const state = stateLabel(live);
+export function formatListLine(meta: ClaudeSessionMeta): string {
   const age = relativeAge(meta.mtimeMs);
-  const message = (meta.firstUserMessage ?? "(no user message)").replace(/\s+/g, " ").slice(0, 80);
-  return `${id}  ${pad(state, 8)}  ${pad(age, 4)}  ${message}`;
-}
-
-function stateLabel(live: CmuxLiveState | undefined): string {
-  if (!live) return "stored";
-  switch (live.agentLifecycle) {
-    case "running":
-      return "running";
-    case "idle":
-      return "idle";
-    case "needsInput":
-      return "waiting";
-    default:
-      return live.isRestorable ? "stored" : "stored";
-  }
+  const message = (meta.firstUserMessage ?? "(no user message)").replace(/\s+/g, " ").slice(0, 120);
+  return `${pad(age, 4)}  ${message}`;
 }
 
 function pad(s: string, width: number): string {

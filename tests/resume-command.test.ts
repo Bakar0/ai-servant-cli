@@ -168,14 +168,16 @@ describe("resume command (non-interactive)", () => {
 
     const unregister = __registerDriverForTesting("fake", fakeDriver);
     try {
-      await runCommand(resumeCommand, { rawArgs: [...rawArgs, "--terminal", "fake"] });
+      await runCommand(resumeCommand, {
+        rawArgs: [...rawArgs, "--new-tab", "--terminal", "fake"],
+      });
     } finally {
       unregister();
     }
     return captured;
   }
 
-  test("happy path: resolves cwd, builds command, opens tab", async () => {
+  test("--new-tab: resolves cwd, builds command, opens tab", async () => {
     const id = "abcd1234-2222-3333-4444-555555555555";
     const launchCwd = join(aiServantRoot, "workspaces", "happy");
     await writeSimpleSession(launchCwd, id);
@@ -187,7 +189,7 @@ describe("resume command (non-interactive)", () => {
     expect(captured?.title).toBe("happy");
   });
 
-  test("appends --prompt as a positional arg to claude", async () => {
+  test("--new-tab + --prompt appends a positional arg to claude", async () => {
     const id = "abcd5678-2222-3333-4444-555555555555";
     const launchCwd = join(aiServantRoot, "workspaces", "with-prompt");
     await writeSimpleSession(launchCwd, id);
