@@ -9,9 +9,20 @@ const DRIVERS: Record<TerminalName, TerminalDriver> = {
   iterm: itermDriver,
 };
 
+const testDrivers = new Map<string, TerminalDriver>();
+
 export function getDriver(name: string): TerminalDriver {
+  const test = testDrivers.get(name);
+  if (test) return test;
   if (name === "cmux" || name === "iterm") return DRIVERS[name];
   throw new Error(`Unknown terminal "${name}". Supported: cmux, iterm.`);
+}
+
+export function __registerDriverForTesting(name: string, driver: TerminalDriver): () => void {
+  testDrivers.set(name, driver);
+  return () => {
+    testDrivers.delete(name);
+  };
 }
 
 export interface DetectEnv {

@@ -78,7 +78,15 @@ export function detectWorkspaceNameFromCwd(cwd: string, root: string): string | 
   return first;
 }
 
-export async function resolveWorkspaceName(provided: string | undefined): Promise<string> {
+export async function resolveWorkspaceName(provided: string | undefined): Promise<string>;
+export async function resolveWorkspaceName(
+  provided: string | undefined,
+  opts: { allowUnresolved: true },
+): Promise<string | null>;
+export async function resolveWorkspaceName(
+  provided: string | undefined,
+  opts?: { allowUnresolved?: boolean },
+): Promise<string | null> {
   if (provided) {
     assertValidWorkspaceName(provided);
     return provided;
@@ -102,6 +110,8 @@ export async function resolveWorkspaceName(provided: string | undefined): Promis
       }
     }
   }
+
+  if (opts?.allowUnresolved) return null;
 
   const tried = [`cwd ${process.cwd()} is not under ${root}/<name>`];
   if (!inCmux) {

@@ -53,3 +53,17 @@ describe("cmux.extractSurfaceRef", () => {
     expect(() => cmuxTesting.extractSurfaceRef("ok\n")).toThrow(/surface ref/);
   });
 });
+
+describe("cmux.buildSurfaceSendPayload", () => {
+  test("prefixes the command with `cd <cwd> &&` so new surfaces start in the right dir", () => {
+    expect(cmuxTesting.buildSurfaceSendPayload("/Users/me/work", "claude --resume abc")).toBe(
+      `cd '/Users/me/work' && claude --resume abc`,
+    );
+  });
+
+  test("single-quotes paths containing quotes", () => {
+    expect(cmuxTesting.buildSurfaceSendPayload("/Users/o'brien/x", "claude")).toBe(
+      `cd '/Users/o'\\''brien/x' && claude`,
+    );
+  });
+});

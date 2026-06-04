@@ -1,3 +1,4 @@
+import { shellSingleQuote } from "../core/shell.ts";
 import type { OpenTabOptions, TerminalDriver } from "./types.ts";
 
 interface CmuxWorkspace {
@@ -76,7 +77,11 @@ async function createWorkspace(name: string, cwd: string, command: string): Prom
   assertOk(result, "new-workspace");
 }
 
-async function addSurfaceToWorkspace(workspaceRef: string, command: string): Promise<void> {
+async function addSurfaceToWorkspace(
+  workspaceRef: string,
+  cwd: string,
+  command: string,
+): Promise<void> {
   const surfaceResult = await runCmux([
     "new-surface",
     "--workspace",
@@ -88,7 +93,11 @@ async function addSurfaceToWorkspace(workspaceRef: string, command: string): Pro
   ]);
   assertOk(surfaceResult, "new-surface");
   const surfaceRef = extractSurfaceRef(surfaceResult.stdout);
-  const sendResult = await runCmux(["send", "--surface", surfaceRef, `${command}\n`], {
+  // New surfaces in an existing workspace start in $HOME — cd into the workspace cwd first so
+  // commands like `claude --resume <id>` run with the right working directory (claude looks up
+  // its session by the encoded cwd).
+  const wrapped = buildSurfaceSendPayload(cwd, command);
+  const sendResult = await runCmux(["send", "--surface", surfaceRef, `${wrapped}\n`], {
     stripCallerContext: true,
   });
   assertOk(sendResult, "send");
@@ -115,11 +124,15 @@ export const cmuxDriver: TerminalDriver = {
     const workspaceName = title ?? cwd;
     const existing = await findWorkspaceByTitle(workspaceName);
     if (existing) {
-      await addSurfaceToWorkspace(existing.ref, command);
+      await addSurfaceToWorkspace(existing.ref, cwd, command);
     } else {
       await createWorkspace(workspaceName, cwd, command);
     }
   },
 };
 
-export const __testing = { extractSurfaceRef };
+function buildSurfaceSendPayload(cwd: string, command: string): string {
+  return `cd ${shellSingleQuote(cwd)} && ${command}`;
+}
+
+export const __testing = { extractSurfaceRef, buildSurfaceSendPayload };
