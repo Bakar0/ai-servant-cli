@@ -198,7 +198,12 @@ export const repoAddCommand = defineCommand({
       if (track) {
         await addWorktree(repo.path, worktreePath, { branch, track: true });
       } else {
-        await addWorktree(repo.path, worktreePath, { branch, base });
+        // Branch from the remote-tracking ref (just fetched) rather than the local base,
+        // which may be stale. Fall back to local base if --no-fetch was passed and there's
+        // no remote-tracking ref yet.
+        const baseRef =
+          !skipFetch || (await remoteBranchExists(repo.path, base)) ? `origin/${base}` : base;
+        await addWorktree(repo.path, worktreePath, { branch, base: baseRef });
       }
 
       console.log(`servant: created worktree at ${worktreePath}`);
