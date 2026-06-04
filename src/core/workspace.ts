@@ -12,6 +12,7 @@ const WORKSPACE_CLAUDE_MD = "@../../CLAUDE.md\n";
 const SCAFFOLD_FILES: ReadonlyArray<readonly [string, string]> = [
   ["CONTEXT.md", "# Context\n\nShared language / domain glossary for this workspace.\n"],
   ["briefs/INDEX.md", "# Briefs\n"],
+  ["plans/INDEX.md", "# Plans\n"],
   ["context/INDEX.md", "# Context\n"],
 ];
 

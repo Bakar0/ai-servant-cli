@@ -87,7 +87,7 @@ describe("ensureWorkspaceDir", () => {
     expect(body).toBe("@../../CLAUDE.md\n");
   });
 
-  test("scaffolds CONTEXT.md, briefs/INDEX.md, and context/INDEX.md", async () => {
+  test("scaffolds CONTEXT.md, briefs/INDEX.md, plans/INDEX.md, and context/INDEX.md", async () => {
     const name = `scaffold-${process.pid}-${Date.now()}`;
     const dir = await ensureWorkspaceDir(name);
 
@@ -96,6 +96,9 @@ describe("ensureWorkspaceDir", () => {
 
     const briefsIndex = await readFile(join(dir, "briefs", "INDEX.md"), "utf8");
     expect(briefsIndex).toContain("# Briefs");
+
+    const plansIndex = await readFile(join(dir, "plans", "INDEX.md"), "utf8");
+    expect(plansIndex).toContain("# Plans");
 
     const contextIndex = await readFile(join(dir, "context", "INDEX.md"), "utf8");
     expect(contextIndex).toContain("# Context");

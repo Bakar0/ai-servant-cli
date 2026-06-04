@@ -10,6 +10,9 @@ You are running inside a **servant workspace** at `~/.ai_servant/workspaces/<nam
   briefs/
     INDEX.md              # list of briefs + status + one-line summary
     <YYYY-MM-DD-HHMM>-<slug>.md   # an Agent Brief (the contract for one delegated task)
+  plans/
+    INDEX.md              # list of plans + status + one-line summary
+    <YYYY-MM-DD-HHMM>-<slug>.md   # an implementation plan (phases / sequencing)
   context/
     INDEX.md              # list of context docs + when each applies
     adr-NNN-<slug>.md     # architecture decision records
@@ -17,8 +20,18 @@ You are running inside a **servant workspace** at `~/.ai_servant/workspaces/<nam
 ```
 
 - **Briefs are contracts.** Each brief is a self-contained spec for one delegated task. The brief — not the spawning prompt — is the source of truth.
-- **`CONTEXT.md`** holds the workspace's shared language: domain terms and ubiquitous vocabulary that briefs and ADRs reference.
-- **`context/`** holds reusable reference docs. Briefs link to them via relative paths like `../context/adr-001-jwt-rotation.md`.
+- **Plans are working scaffolds.** A plan captures procedural sequencing — phases, milestones, investigation steps — for work whose *how* is non-trivial. Plans pair with the brief they implement via backlinks; you will edit a plan as execution reveals reality.
+- **`CONTEXT.md`** holds the workspace's shared language: domain terms and ubiquitous vocabulary that briefs, plans, and ADRs reference.
+- **`context/`** holds reusable reference docs. Briefs and plans link to them via relative paths like `../context/adr-001-jwt-rotation.md`.
+
+## Where artifacts go
+
+All servant artifacts — briefs, plans, ADRs, context docs — live in **this workspace**, never in the repo you are working on. The repo holds code; the workspace holds the cross-session reasoning around the code.
+
+- **DO** write to `<workspace>/plans/<YYYY-MM-DD-HHMM>-<slug>.md` and update `<workspace>/plans/INDEX.md`.
+- **DO NOT** write to `<repo>/docs/plans/`, `<repo>/.scratch/`, `<repo>/PLAN.md`, or any path inside the repo you are editing.
+
+This applies even when a planning skill or slash command (e.g. `/plan`, `planning`) would default to writing inside the repo — override the default and write into `<workspace>/plans/` instead, then append an entry to `plans/INDEX.md`. If the plan implements a specific brief, link the brief from the plan and link the plan from the brief.
 
 ## If you were spawned to execute a brief
 
@@ -46,4 +59,4 @@ Briefs describe **what**, not **how**. Behavioral, not procedural.
 
 ## Delegating onward
 
-To hand a piece of work to a fresh sub-agent in this workspace, use the `/delegate` slash command. It writes a new Agent Brief into `briefs/`, updates the INDEX files, then runs `servant spawn --prompt "Read briefs/<file>.md and execute the Agent Brief."` (which opens a new tab in this same workspace).
+To hand a piece of work to a fresh servant in this workspace, use the `/delegate` slash command. It writes a new Agent Brief into `briefs/`, updates the INDEX files, then runs `servant spawn --prompt "Read briefs/<file>.md and execute the Agent Brief."` (which opens a new tab in this same workspace).

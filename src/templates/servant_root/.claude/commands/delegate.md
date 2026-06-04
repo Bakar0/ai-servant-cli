@@ -1,11 +1,11 @@
 ---
-description: Distill the current session into an Agent Brief and spawn a sub-agent in this workspace to execute it.
+description: Distill the current session into an Agent Brief and spawn a servant in this workspace to execute it.
 argument-hint: [one-line goal]
 ---
 
 # /delegate
 
-Hand a piece of work from this session off to a fresh sub-agent running in a new tab of the **same servant workspace**. You write an Agent Brief (the contract) and any reusable context files; the sub-agent reads the brief and executes.
+Hand a piece of work from this session off to a fresh servant running in a new tab of the **same workspace** in your Servantry. You write an Agent Brief (the contract) and any reusable context files; the servant reads the brief and executes.
 
 The optional argument `$ARGUMENTS` is a one-line seed goal. If absent, infer the goal from the current session.
 
@@ -82,9 +82,9 @@ Describe what should happen after the work is complete. Be specific about edge c
 Brief principles (from mattpocock):
 
 - **Durability over precision.** Describe interfaces, types, and behavioral contracts. Do NOT reference file paths or line numbers — they go stale.
-- **Behavioral, not procedural.** Describe WHAT the system should do, not HOW to implement it. The sub-agent will explore the codebase fresh.
+- **Behavioral, not procedural.** Describe WHAT the system should do, not HOW to implement it. The servant will explore the codebase fresh.
 - **Complete acceptance criteria.** Each item independently verifiable.
-- **Explicit scope boundaries.** Prevents the sub-agent from gold-plating.
+- **Explicit scope boundaries.** Prevents the servant from gold-plating.
 
 ### 4. Update / write reusable context
 
@@ -92,7 +92,7 @@ If the brief depends on terms or decisions that recur across delegations, captur
 
 - New domain terms → add to `CONTEXT.md` (create if missing).
 - Architectural decisions made during this session → write `context/adr-<NNN>-<slug>.md` with `# Title`, `**Decision:**`, `**Reason:**`, `**Consequences:**`. NNN is the next monotonic number.
-- System overviews / explanations the sub-agent will need → write `context/<topic>.md`.
+- System overviews / explanations the servant will need → write `context/<topic>.md`.
 
 Link each context doc from the brief's "Context" section.
 
@@ -107,7 +107,7 @@ After writing the brief and any context, update:
 
 Create either INDEX.md with a `# Briefs` / `# Context` heading if it doesn't exist.
 
-### 6. Spawn the sub-agent
+### 6. Spawn the servant
 
 Run:
 
