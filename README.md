@@ -30,6 +30,10 @@ servant repo add [repo-hint] --workspace my-task --branch topic/x
 
 servant repo list --workspace my-task
 servant repo rm <repo>@<branch> --workspace my-task
+
+# Re-attach to a previous Claude Code session in the current tab.
+# With no id, opens an fzf picker over this workspace's session history.
+servant resume [session-id] [--prompt "continue"] [--new-tab]
 ```
 
 Run any command with `--help` for full flag list.
