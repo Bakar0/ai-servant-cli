@@ -3,6 +3,7 @@ import { defineCommand, runMain } from "citty";
 import { repoCommand } from "./commands/repo/index.ts";
 import { resumeCommand } from "./commands/resume.ts";
 import { spawnCommand } from "./commands/spawn.ts";
+import { statuslineCommand } from "./commands/statusline.ts";
 
 const main = defineCommand({
   meta: {
@@ -14,6 +15,7 @@ const main = defineCommand({
     spawn: spawnCommand,
     repo: repoCommand,
     resume: resumeCommand,
+    statusline: statuslineCommand,
   },
 });
 

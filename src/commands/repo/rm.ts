@@ -1,10 +1,10 @@
 import { existsSync } from "node:fs";
-import { readdir, rmdir } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { rm } from "node:fs/promises";
+import { resolve } from "node:path";
 import { defineCommand } from "citty";
 import { removeWorktree, repoCommonDir } from "../../core/git.ts";
-import { workspacePath } from "../../core/paths.ts";
 import { resolveWorkspaceName } from "../../core/workspace.ts";
+import { worktreePath } from "../../core/worktree-naming.ts";
 
 function parseTarget(spec: string): { repo: string; branch: string } {
   const at = spec.indexOf("@");
@@ -12,12 +12,6 @@ function parseTarget(spec: string): { repo: string; branch: string } {
     throw new Error(`Target must be <repo>@<branch>. Got: "${spec}"`);
   }
   return { repo: spec.slice(0, at), branch: spec.slice(at + 1) };
-}
-
-async function removeIfEmpty(dir: string): Promise<void> {
-  if (!existsSync(dir)) return;
-  const entries = await readdir(dir);
-  if (entries.length === 0) await rmdir(dir);
 }
 
 export const repoRmCommand = defineCommand({
@@ -29,7 +23,7 @@ export const repoRmCommand = defineCommand({
     target: {
       type: "positional",
       required: true,
-      description: "Target as <repo>@<branch> (branch is required).",
+      description: "Target as <repo>@<branch>. Resolves to repos/<repo>__<branch>/.",
     },
     workspace: {
       type: "string",
@@ -48,24 +42,21 @@ export const repoRmCommand = defineCommand({
     const workspace = await resolveWorkspaceName(args.workspace);
     const { repo, branch } = parseTarget(args.target);
 
-    const repoSubdir = join(workspacePath(workspace), "repos", repo);
-    const worktreePath = join(repoSubdir, branch);
-    if (!existsSync(worktreePath)) {
-      throw new Error(`Worktree not found at ${worktreePath}`);
+    const targetPath = worktreePath(workspace, repo, branch);
+    if (!existsSync(targetPath)) {
+      throw new Error(`Worktree not found at ${targetPath}`);
     }
 
-    const common = await repoCommonDir(worktreePath);
-    const sourceRepo = resolve(worktreePath, common, "..");
-    await removeWorktree(sourceRepo, worktreePath, { force: Boolean(args.force) });
+    const common = await repoCommonDir(targetPath);
+    const sourceRepo = resolve(targetPath, common, "..");
+    await removeWorktree(sourceRepo, targetPath, { force: Boolean(args.force) });
 
-    // Walk back up and remove empty parents inside repos/<repo>/.
-    let dir = worktreePath;
-    while (dir.startsWith(repoSubdir) && dir !== repoSubdir) {
-      await removeIfEmpty(dir);
-      dir = resolve(dir, "..");
+    // `git worktree remove` already removes the directory, but if it left anything behind
+    // (e.g. untracked files with --force), tidy up.
+    if (existsSync(targetPath)) {
+      await rm(targetPath, { recursive: true, force: true });
     }
-    await removeIfEmpty(repoSubdir);
 
-    console.log(`servant: removed worktree ${worktreePath}`);
+    console.log(`servant: removed worktree ${targetPath}`);
   },
 });

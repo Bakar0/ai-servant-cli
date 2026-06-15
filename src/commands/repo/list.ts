@@ -3,13 +3,8 @@ import { readdir } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { defineCommand } from "citty";
 import { listWorktrees, repoCommonDir } from "../../core/git.ts";
-import { workspacePath } from "../../core/paths.ts";
 import { resolveWorkspaceName } from "../../core/workspace.ts";
-
-async function safeReaddir(dir: string): Promise<string[]> {
-  if (!existsSync(dir)) return [];
-  return await readdir(dir);
-}
+import { parseWorktreeDirName, reposRoot } from "../../core/worktree-naming.ts";
 
 export const repoListCommand = defineCommand({
   meta: {
@@ -26,59 +21,46 @@ export const repoListCommand = defineCommand({
   },
   async run({ args }) {
     const workspace = await resolveWorkspaceName(args.workspace);
-    const reposRoot = join(workspacePath(workspace), "repos");
+    const root = reposRoot(workspace);
 
-    const repoDirs = await safeReaddir(reposRoot);
-    if (repoDirs.length === 0) {
-      console.log(`servant: no worktrees under ${reposRoot}`);
+    if (!existsSync(root)) {
+      console.log(`servant: no worktrees under ${root}`);
       return;
     }
 
-    type Entry = { repoDir: string; worktreePath: string; branch?: string };
+    const entries = await readdir(root);
+    type Entry = { worktreePath: string; branch?: string };
     const grouped = new Map<string, Entry[]>();
 
-    for (const repoDir of repoDirs) {
-      const repoSubdir = join(reposRoot, repoDir);
-      const branches = await safeReaddir(repoSubdir);
-      for (const branchSeg1 of branches) {
-        const branchDir = join(repoSubdir, branchSeg1);
-        // worktree path is the deepest dir that is a real git worktree; with branches like
-        // "feature/x" the path is two levels deep, so walk one extra level.
-        const candidates = [branchDir];
-        const nested = await safeReaddir(branchDir);
-        for (const sub of nested) {
-          candidates.push(join(branchDir, sub));
-        }
-
-        for (const candidate of candidates) {
-          if (!existsSync(join(candidate, ".git"))) continue;
-          try {
-            const common = await repoCommonDir(candidate);
-            const sourceRepo = resolve(candidate, common, "..");
-            const trees = await listWorktrees(sourceRepo);
-            const match = trees.find((t) => t.path === candidate);
-            const list = grouped.get(repoDir) ?? [];
-            list.push({
-              repoDir,
-              worktreePath: candidate,
-              ...(match?.branch ? { branch: match.branch } : {}),
-            });
-            grouped.set(repoDir, list);
-          } catch {
-            // ignore unreadable worktrees
-          }
-        }
+    for (const name of entries) {
+      const parsed = parseWorktreeDirName(name);
+      if (!parsed) continue;
+      const candidate = join(root, name);
+      if (!existsSync(join(candidate, ".git"))) continue;
+      try {
+        const common = await repoCommonDir(candidate);
+        const sourceRepo = resolve(candidate, common, "..");
+        const trees = await listWorktrees(sourceRepo);
+        const match = trees.find((t) => t.path === candidate);
+        const list = grouped.get(parsed.repoSubdir) ?? [];
+        list.push({
+          worktreePath: candidate,
+          ...(match?.branch ? { branch: match.branch } : { branch: parsed.branch }),
+        });
+        grouped.set(parsed.repoSubdir, list);
+      } catch {
+        // ignore unreadable worktrees
       }
     }
 
     if (grouped.size === 0) {
-      console.log(`servant: no worktrees under ${reposRoot}`);
+      console.log(`servant: no worktrees under ${root}`);
       return;
     }
 
-    for (const [repoDir, entries] of grouped) {
+    for (const [repoDir, list] of grouped) {
       console.log(`${repoDir}:`);
-      for (const e of entries) {
+      for (const e of list) {
         const tag = e.branch ? `  [${e.branch}]` : "";
         console.log(`  ${e.worktreePath}${tag}`);
       }

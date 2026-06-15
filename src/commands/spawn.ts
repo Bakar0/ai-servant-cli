@@ -3,6 +3,7 @@ import { DEFAULT_AGENT, getAgent } from "../agents/index.ts";
 import { ensureServantAssets } from "../core/claude-setup.ts";
 import { ensureWorkspaceDir, resolveWorkspaceName } from "../core/workspace.ts";
 import { detectTerminal, getDriver } from "../terminals/index.ts";
+import { addReposInteractive } from "./repo/add.ts";
 
 export const spawnCommand = defineCommand({
   meta: {
@@ -36,11 +37,51 @@ export const spawnCommand = defineCommand({
       description:
         "Initial prompt delivered to the agent as its first user message. Use to kick off a delegated task (e.g. point the agent at a brief file).",
     },
+    repo: {
+      type: "boolean",
+      required: false,
+      alias: "r",
+      default: false,
+      description:
+        "Before opening the tab, interactively pick local repo(s) and add a git worktree per selection under the workspace (same picker as `servant repo add`).",
+    },
+    branch: {
+      type: "string",
+      required: false,
+      alias: "b",
+      description:
+        "With -r: override the auto-generated branch name. Defaults to <workspace>-<shortid>.",
+    },
+    base: {
+      type: "string",
+      required: false,
+      description: "With -r: base ref to branch from (defaults to each repo's default branch).",
+    },
+    track: {
+      type: "boolean",
+      required: false,
+      default: false,
+      description:
+        "With -r: track the same-named remote branch on origin instead of branching from base.",
+    },
   },
   async run({ args }) {
     await ensureServantAssets();
     const workspace = await resolveWorkspaceName(args.workspace);
     const cwd = await ensureWorkspaceDir(workspace);
+
+    // Add repos in the current TTY *before* opening the tab, so the worktrees exist
+    // under the workspace by the time the agent starts there. The picker is interactive,
+    // so it must run here rather than inside the freshly-spawned tab.
+    if (args.repo) {
+      await addReposInteractive({
+        workspace,
+        branch: args.branch,
+        base: args.base,
+        track: Boolean(args.track),
+      });
+    }
+
     const agent = getAgent(args.agent);
     const command = agent.launchCommand(cwd, { prompt: args.prompt });
     const driver = args.terminal ? getDriver(args.terminal) : await detectTerminal();

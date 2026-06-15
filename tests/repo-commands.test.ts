@@ -67,11 +67,11 @@ const { repoRmCommand } = await import("../src/commands/repo/rm.ts");
 const { runCommand } = await import("citty");
 
 describe("repo add (non-interactive)", () => {
-  test("creates a worktree from the default base when a single repo matches", async () => {
+  test("creates a worktree from the default base with an explicit branch", async () => {
     await runCommand(repoAddCommand, {
-      rawArgs: ["alpha", "--workspace", WS, "--branch", "topic/new", "--no-fetch"],
+      rawArgs: ["alpha", "--workspace", WS, "--branch", "topic-new", "--no-fetch"],
     });
-    const wt = join(aiServantRootDir, "workspaces", WS, "repos", "alpha", "topic/new");
+    const wt = join(aiServantRootDir, "workspaces", WS, "repos", "alpha__topic-new");
     expect(existsSync(wt)).toBe(true);
     expect(existsSync(join(wt, ".git"))).toBe(true);
     expect(existsSync(join(wt, "README.md"))).toBe(true);
@@ -80,7 +80,7 @@ describe("repo add (non-interactive)", () => {
   test("refuses if branch already exists locally", async () => {
     await expect(
       runCommand(repoAddCommand, {
-        rawArgs: ["alpha", "--workspace", WS, "--branch", "topic/new", "--no-fetch"],
+        rawArgs: ["alpha", "--workspace", WS, "--branch", "topic-new", "--no-fetch"],
       }),
     ).rejects.toThrow(/already exists/i);
   });
@@ -91,6 +91,29 @@ describe("repo add (non-interactive)", () => {
         rawArgs: ["zzz-no-such", "--workspace", WS, "--branch", "x", "--no-fetch"],
       }),
     ).rejects.toThrow(/No repos found/i);
+  });
+
+  test("rejects branch overrides containing '/' or the divider", async () => {
+    await expect(
+      runCommand(repoAddCommand, {
+        rawArgs: ["alpha", "--workspace", WS, "--branch", "feature/x", "--no-fetch"],
+      }),
+    ).rejects.toThrow(/must not contain "\/"/);
+    await expect(
+      runCommand(repoAddCommand, {
+        rawArgs: ["alpha", "--workspace", WS, "--branch", "foo__bar", "--no-fetch"],
+      }),
+    ).rejects.toThrow(/reserved as the worktree divider/);
+  });
+
+  test("auto-generates a <workspace>-<shortid> branch when --branch is omitted", async () => {
+    await runCommand(repoAddCommand, {
+      rawArgs: ["alpha", "--workspace", WS, "--no-fetch"],
+    });
+    const { readdir } = await import("node:fs/promises");
+    const reposDir = join(aiServantRootDir, "workspaces", WS, "repos");
+    const names = await readdir(reposDir);
+    expect(names.some((n) => /^alpha__ws1-[0-9a-z]{4}$/.test(n))).toBe(true);
   });
 });
 
@@ -108,7 +131,7 @@ describe("repo list", () => {
     }
     const joined = lines.join("\n");
     expect(joined).toContain("alpha:");
-    expect(joined).toMatch(/topic\/new/);
+    expect(joined).toMatch(/topic-new/);
   });
 });
 
@@ -119,13 +142,11 @@ describe("repo rm", () => {
     ).rejects.toThrow(/<repo>@<branch>/);
   });
 
-  test("removes the worktree and cleans up empty parents", async () => {
+  test("removes the worktree directory", async () => {
     await runCommand(repoRmCommand, {
-      rawArgs: ["alpha@topic/new", "--workspace", WS, "--force"],
+      rawArgs: ["alpha@topic-new", "--workspace", WS, "--force"],
     });
-    const wt = join(aiServantRootDir, "workspaces", WS, "repos", "alpha", "topic/new");
+    const wt = join(aiServantRootDir, "workspaces", WS, "repos", "alpha__topic-new");
     expect(existsSync(wt)).toBe(false);
-    // alpha/ should also be gone since it's empty
-    expect(existsSync(join(aiServantRootDir, "workspaces", WS, "repos", "alpha"))).toBe(false);
   });
 });

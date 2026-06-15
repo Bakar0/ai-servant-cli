@@ -30,3 +30,15 @@ export function claudeDir(): string {
 export function claudeCommandsDir(): string {
   return join(claudeDir(), "commands");
 }
+
+export function userClaudeDir(): string {
+  return join(homedir(), ".claude");
+}
+
+export function userClaudeSettingsPath(): string {
+  return join(userClaudeDir(), "settings.json");
+}
+
+export function statuslineScriptPath(): string {
+  return join(aiServantRoot(), "claude", "statusline.sh");
+}

@@ -7,7 +7,7 @@ export const repoCommand = defineCommand({
   meta: {
     name: "repo",
     description:
-      "Manage git worktrees of local clones under workspaces/<ws>/repos/<repo>/<branch>/.",
+      "Manage git worktrees of local clones under workspaces/<ws>/repos/<repo>__<branch>/.",
   },
   subCommands: {
     add: repoAddCommand,
