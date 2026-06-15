@@ -4,15 +4,21 @@ import { dirname, join } from "node:path";
 import { configPath } from "./paths.ts";
 
 export type Config = {
+  /** Schema version. Bump when the shape changes so `init` can migrate older files. */
+  version: number;
   repoSearchRoots: string[];
   scanMaxDepth: number;
 };
 
-const DEFAULT_SEARCH_ROOTS = ["~/private", "~/code"];
-const DEFAULT_SCAN_MAX_DEPTH = 4;
+/** Current config schema version. */
+export const CONFIG_VERSION = 1;
+
+export const DEFAULT_SEARCH_ROOTS = ["~"];
+export const DEFAULT_SCAN_MAX_DEPTH = 4;
 
 export function defaultConfig(): Config {
   return {
+    version: CONFIG_VERSION,
     repoSearchRoots: [...DEFAULT_SEARCH_ROOTS],
     scanMaxDepth: DEFAULT_SCAN_MAX_DEPTH,
   };
@@ -28,6 +34,9 @@ function coerce(raw: unknown): Config {
   const cfg = defaultConfig();
   if (raw && typeof raw === "object") {
     const obj = raw as Record<string, unknown>;
+    if (typeof obj.version === "number" && Number.isFinite(obj.version)) {
+      cfg.version = Math.max(1, Math.floor(obj.version));
+    }
     if (Array.isArray(obj.repoSearchRoots)) {
       const roots = obj.repoSearchRoots.filter((s): s is string => typeof s === "string");
       if (roots.length > 0) cfg.repoSearchRoots = roots;
@@ -62,4 +71,19 @@ export async function saveConfig(cfg: Config): Promise<void> {
 
 export function resolvedSearchRoots(cfg: Config): string[] {
   return cfg.repoSearchRoots.map(expandHome);
+}
+
+/**
+ * Gate for commands that depend on a configured root. The presence of `config.json`
+ * is the single "is this set up?" signal — it's user-owned and never auto-created
+ * (deterministic assets self-heal separately on spawn/resume). Throws a clear,
+ * actionable error when missing so the user runs `servant init` once.
+ */
+export async function requireInit(): Promise<Config> {
+  if (!(await configExists())) {
+    throw new Error(
+      `servant: not initialized — run \`servant init\` first.\n  Expected config at ${configPath()}`,
+    );
+  }
+  return loadConfig();
 }

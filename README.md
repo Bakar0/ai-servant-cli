@@ -16,16 +16,20 @@ bun install
     └── repos/<repo>/<branch>/  git worktree of your local clone
 ```
 
-Override the root with `AI_SERVANT_ROOT` (handy for tests).
+Override the root with `--root <path>` on any command (handy for throwaway/test setups).
 
 ## Commands
 
 ```bash
+# One-time setup: create ~/.ai_servant, write config.json, sync assets,
+# and optionally install the Claude Code status line. Idempotent.
+servant init
+
 # Open a new terminal tab in a workspace, running a coding agent.
 servant spawn --workspace my-task
 
 # Pick local repo(s) and create a worktree of <branch> for each.
-# First run prompts for search roots (defaults: ~/private, ~/code).
+# Searches the dirs in config.json (default: ~). Edit config.json to narrow.
 servant repo add [repo-hint] --workspace my-task --branch topic/x
 
 servant repo list --workspace my-task

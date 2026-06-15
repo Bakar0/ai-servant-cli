@@ -2,29 +2,28 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
+import { setRootOverride } from "../src/core/paths.ts";
 
 let tmpRoot: string;
-const originalEnv = process.env.AI_SERVANT_ROOT;
 
 beforeAll(async () => {
   tmpRoot = await mkdtemp(join(tmpdir(), "servant-cfg-test-"));
-  process.env.AI_SERVANT_ROOT = tmpRoot;
+  setRootOverride(tmpRoot);
 });
 
 afterAll(async () => {
-  if (originalEnv === undefined) Reflect.deleteProperty(process.env, "AI_SERVANT_ROOT");
-  else process.env.AI_SERVANT_ROOT = originalEnv;
+  setRootOverride(null);
   await rm(tmpRoot, { recursive: true, force: true });
 });
 
-const { defaultConfig, expandHome, loadConfig, saveConfig, resolvedSearchRoots } = await import(
-  "../src/core/config.ts"
-);
+const { CONFIG_VERSION, defaultConfig, expandHome, loadConfig, saveConfig, resolvedSearchRoots } =
+  await import("../src/core/config.ts");
 
 describe("defaultConfig", () => {
   test("returns expected defaults", () => {
     const cfg = defaultConfig();
-    expect(cfg.repoSearchRoots).toEqual(["~/private", "~/code"]);
+    expect(cfg.version).toBe(CONFIG_VERSION);
+    expect(cfg.repoSearchRoots).toEqual(["~"]);
     expect(cfg.scanMaxDepth).toBe(4);
   });
 });
@@ -53,14 +52,32 @@ describe("load/save round trip", () => {
   });
 
   test("saveConfig + loadConfig preserves values", async () => {
-    const cfg = { repoSearchRoots: ["~/code", "/abs/repos"], scanMaxDepth: 6 };
+    const cfg = {
+      version: CONFIG_VERSION,
+      repoSearchRoots: ["~/code", "/abs/repos"],
+      scanMaxDepth: 6,
+    };
     await saveConfig(cfg);
     const loaded = await loadConfig();
     expect(loaded).toEqual(cfg);
   });
 
+  test("loadConfig backfills version on legacy files missing it", async () => {
+    await Bun.write(
+      join(tmpRoot, "config.json"),
+      JSON.stringify({ repoSearchRoots: ["~/x"], scanMaxDepth: 3 }),
+    );
+    const loaded = await loadConfig();
+    expect(loaded.version).toBe(CONFIG_VERSION);
+    expect(loaded.repoSearchRoots).toEqual(["~/x"]);
+  });
+
   test("resolvedSearchRoots expands ~ in loaded values", async () => {
-    await saveConfig({ repoSearchRoots: ["~/code", "/abs/repos"], scanMaxDepth: 4 });
+    await saveConfig({
+      version: CONFIG_VERSION,
+      repoSearchRoots: ["~/code", "/abs/repos"],
+      scanMaxDepth: 4,
+    });
     const loaded = await loadConfig();
     const resolved = resolvedSearchRoots(loaded);
     expect(resolved).toEqual([join(homedir(), "code"), "/abs/repos"]);

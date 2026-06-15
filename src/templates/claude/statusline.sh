@@ -16,7 +16,7 @@ dir=$(echo "$input" | jq -r '.workspace.current_dir')
 # ---------- Servant workspace detection ----------
 workspace=""
 current_worktree_dir=""
-servant_root="${AI_SERVANT_ROOT:-$HOME/.ai_servant}"
+servant_root="$HOME/.ai_servant"
 servant_workspaces="$servant_root/workspaces"
 if [[ "$dir" == "$servant_workspaces"/* ]]; then
   rest="${dir#$servant_workspaces/}"

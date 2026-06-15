@@ -1,6 +1,7 @@
 import { existsSync } from "node:fs";
 import { readdir } from "node:fs/promises";
 import { defineCommand } from "citty";
+import { requireInit } from "../../core/config.ts";
 import {
   addWorktree,
   detectDefaultBranch,
@@ -8,6 +9,7 @@ import {
   localBranchExists,
   remoteBranchExists,
 } from "../../core/git.ts";
+import { applyRootOverride } from "../../core/paths.ts";
 import { type DiscoveredRepo, discoverRepos } from "../../core/repo-discovery.ts";
 import { ensureWorkspaceDir, resolveWorkspaceName } from "../../core/workspace.ts";
 import {
@@ -20,7 +22,6 @@ import {
 } from "../../core/worktree-naming.ts";
 import { pickMultipleFromList } from "../../ui/picker.ts";
 import { promptText } from "../../ui/prompts.ts";
-import { ensureConfigInteractive } from "./first-run.ts";
 
 function isInteractive(): boolean {
   return Boolean(process.stdin.isTTY);
@@ -118,8 +119,14 @@ export const repoAddCommand = defineCommand({
       default: false,
       description: "Force a rescan of repo search roots (ignore the discovery cache).",
     },
+    root: {
+      type: "string",
+      required: false,
+      description: "Servant root directory (default: ~/.ai_servant). For throwaway/test setups.",
+    },
   },
   async run({ args }) {
+    applyRootOverride(args.root);
     const workspace = await resolveWorkspaceName(args.workspace);
     await ensureWorkspaceDir(workspace);
     await addReposInteractive({
@@ -164,7 +171,7 @@ export type AddReposOptions = {
 export async function addReposInteractive(opts: AddReposOptions): Promise<void> {
   const { workspace } = opts;
 
-  const config = await ensureConfigInteractive();
+  const config = await requireInit();
   const repos = await discoverRepos(config, { refresh: Boolean(opts.refresh) });
   const selected = await selectRepos(repos, opts.repoHint);
 

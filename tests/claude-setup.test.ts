@@ -2,18 +2,17 @@ import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:tes
 import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { setRootOverride } from "../src/core/paths.ts";
 
 let tmpRoot: string;
-const originalEnv = process.env.AI_SERVANT_ROOT;
 
 beforeAll(async () => {
   tmpRoot = await mkdtemp(join(tmpdir(), "servant-claude-setup-"));
-  process.env.AI_SERVANT_ROOT = tmpRoot;
+  setRootOverride(tmpRoot);
 });
 
 afterAll(async () => {
-  if (originalEnv === undefined) Reflect.deleteProperty(process.env, "AI_SERVANT_ROOT");
-  else process.env.AI_SERVANT_ROOT = originalEnv;
+  setRootOverride(null);
   await rm(tmpRoot, { recursive: true, force: true });
 });
 

@@ -1,5 +1,6 @@
 #!/usr/bin/env bun
 import { defineCommand, runMain } from "citty";
+import { initCommand } from "./commands/init.ts";
 import { repoCommand } from "./commands/repo/index.ts";
 import { resumeCommand } from "./commands/resume.ts";
 import { spawnCommand } from "./commands/spawn.ts";
@@ -12,6 +13,7 @@ const main = defineCommand({
     description: "AI servant CLI — enhances developer and coding-agent workflows.",
   },
   subCommands: {
+    init: initCommand,
     spawn: spawnCommand,
     repo: repoCommand,
     resume: resumeCommand,

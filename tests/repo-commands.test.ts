@@ -4,6 +4,7 @@ import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { $ } from "bun";
+import { setRootOverride } from "../src/core/paths.ts";
 
 let scratch: string;
 let aiServantRootDir: string;
@@ -11,8 +12,6 @@ let codeRoot: string;
 let originRepo: string;
 let cloneRepo: string;
 const WS = "ws1";
-
-const originalEnv = process.env.AI_SERVANT_ROOT;
 
 async function git(repo: string, ...args: string[]) {
   const proc = await $`git -C ${repo} ${args}`.nothrow().quiet();
@@ -48,16 +47,15 @@ beforeAll(async () => {
   await git(cloneRepo, "config", "user.name", "Test");
   await git(cloneRepo, "remote", "set-head", "origin", "main");
 
-  process.env.AI_SERVANT_ROOT = aiServantRootDir;
+  setRootOverride(aiServantRootDir);
 
   // Seed config so discovery uses codeRoot
   const { saveConfig } = await import("../src/core/config.ts");
-  await saveConfig({ repoSearchRoots: [codeRoot], scanMaxDepth: 4 });
+  await saveConfig({ version: 1, repoSearchRoots: [codeRoot], scanMaxDepth: 4 });
 });
 
 afterAll(async () => {
-  if (originalEnv === undefined) Reflect.deleteProperty(process.env, "AI_SERVANT_ROOT");
-  else process.env.AI_SERVANT_ROOT = originalEnv;
+  setRootOverride(null);
   await rm(scratch, { recursive: true, force: true });
 });
 

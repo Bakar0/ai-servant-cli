@@ -3,6 +3,7 @@ import { rm } from "node:fs/promises";
 import { resolve } from "node:path";
 import { defineCommand } from "citty";
 import { removeWorktree, repoCommonDir } from "../../core/git.ts";
+import { applyRootOverride } from "../../core/paths.ts";
 import { resolveWorkspaceName } from "../../core/workspace.ts";
 import { worktreePath } from "../../core/worktree-naming.ts";
 
@@ -37,8 +38,14 @@ export const repoRmCommand = defineCommand({
       default: false,
       description: "Force removal even with uncommitted changes.",
     },
+    root: {
+      type: "string",
+      required: false,
+      description: "Servant root directory (default: ~/.ai_servant). For throwaway/test setups.",
+    },
   },
   async run({ args }) {
+    applyRootOverride(args.root);
     const workspace = await resolveWorkspaceName(args.workspace);
     const { repo, branch } = parseTarget(args.target);
 

@@ -8,7 +8,7 @@ import {
 } from "../core/claude-session.ts";
 import { ensureServantAssets } from "../core/claude-setup.ts";
 import { type CmuxLiveState, readCmuxLiveStates } from "../core/cmux-sessions.ts";
-import { workspacesRoot } from "../core/paths.ts";
+import { applyRootOverride, workspacesRoot } from "../core/paths.ts";
 import { shellSingleQuote } from "../core/shell.ts";
 import {
   detectWorkspaceNameFromCwd,
@@ -59,8 +59,14 @@ export const resumeCommand = defineCommand({
       required: false,
       description: "(internal) Render the preview pane for a session id and exit.",
     },
+    root: {
+      type: "string",
+      required: false,
+      description: "Servant root directory (default: ~/.ai_servant). For throwaway/test setups.",
+    },
   },
   async run({ args }) {
+    applyRootOverride(args.root);
     if (typeof args.preview === "string" && args.preview.length > 0) {
       await renderPreviewToStdout(args.preview);
       return;

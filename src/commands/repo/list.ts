@@ -3,6 +3,7 @@ import { readdir } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { defineCommand } from "citty";
 import { listWorktrees, repoCommonDir } from "../../core/git.ts";
+import { applyRootOverride } from "../../core/paths.ts";
 import { resolveWorkspaceName } from "../../core/workspace.ts";
 import { parseWorktreeDirName, reposRoot } from "../../core/worktree-naming.ts";
 
@@ -18,8 +19,14 @@ export const repoListCommand = defineCommand({
       alias: "w",
       description: "Workspace name. If omitted, auto-detected.",
     },
+    root: {
+      type: "string",
+      required: false,
+      description: "Servant root directory (default: ~/.ai_servant). For throwaway/test setups.",
+    },
   },
   async run({ args }) {
+    applyRootOverride(args.root);
     const workspace = await resolveWorkspaceName(args.workspace);
     const root = reposRoot(workspace);
 

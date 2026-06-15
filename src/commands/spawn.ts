@@ -1,6 +1,8 @@
 import { defineCommand } from "citty";
 import { DEFAULT_AGENT, getAgent } from "../agents/index.ts";
 import { ensureServantAssets } from "../core/claude-setup.ts";
+import { requireInit } from "../core/config.ts";
+import { applyRootOverride } from "../core/paths.ts";
 import { ensureWorkspaceDir, isGoalUnfilled, resolveWorkspaceName } from "../core/workspace.ts";
 import { detectTerminal, getDriver } from "../terminals/index.ts";
 import { addReposInteractive } from "./repo/add.ts";
@@ -70,8 +72,15 @@ export const spawnCommand = defineCommand({
       description:
         "With -r: track the same-named remote branch on origin instead of branching from base.",
     },
+    root: {
+      type: "string",
+      required: false,
+      description: "Servant root directory (default: ~/.ai_servant). For throwaway/test setups.",
+    },
   },
   async run({ args }) {
+    applyRootOverride(args.root);
+    await requireInit();
     await ensureServantAssets();
     const workspace = await resolveWorkspaceName(args.workspace);
     const cwd = await ensureWorkspaceDir(workspace);

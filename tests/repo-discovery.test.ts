@@ -3,12 +3,12 @@ import { mkdir, mkdtemp, realpath, rm, stat, utimes } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { $ } from "bun";
+import { setRootOverride } from "../src/core/paths.ts";
 
 let scratch: string;
 let aiServantRootDir: string;
 let codeRoot: string;
 let privateRoot: string;
-const originalEnv = process.env.AI_SERVANT_ROOT;
 
 async function makeFakeRepo(path: string) {
   await mkdir(join(path, ".git"), { recursive: true });
@@ -33,12 +33,11 @@ beforeAll(async () => {
   // Nested under aiServantRootDir — must be excluded
   await makeFakeRepo(join(aiServantRootDir, "workspaces", "ws1", "repos", "shadow", "main"));
 
-  process.env.AI_SERVANT_ROOT = aiServantRootDir;
+  setRootOverride(aiServantRootDir);
 });
 
 afterAll(async () => {
-  if (originalEnv === undefined) Reflect.deleteProperty(process.env, "AI_SERVANT_ROOT");
-  else process.env.AI_SERVANT_ROOT = originalEnv;
+  setRootOverride(null);
   await rm(scratch, { recursive: true, force: true });
 });
 
@@ -50,6 +49,7 @@ function names(repos: { name: string }[]): string[] {
 
 describe("discoverRepos", () => {
   const config = {
+    version: 1,
     repoSearchRoots: [] as string[],
     scanMaxDepth: 4,
   };

@@ -2,11 +2,11 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { setRootOverride } from "../src/core/paths.ts";
 
 let scratch: string;
 let aiServantRoot: string;
 let claudeProjectsRoot: string;
-const originalAiServantRoot = process.env.AI_SERVANT_ROOT;
 const originalClaudeRoot = process.env.CLAUDE_PROJECTS_ROOT;
 
 beforeAll(async () => {
@@ -15,16 +15,12 @@ beforeAll(async () => {
   claudeProjectsRoot = join(scratch, ".claude", "projects");
   await mkdir(aiServantRoot, { recursive: true });
   await mkdir(claudeProjectsRoot, { recursive: true });
-  process.env.AI_SERVANT_ROOT = aiServantRoot;
+  setRootOverride(aiServantRoot);
   process.env.CLAUDE_PROJECTS_ROOT = claudeProjectsRoot;
 });
 
 afterAll(async () => {
-  if (originalAiServantRoot === undefined) {
-    Reflect.deleteProperty(process.env, "AI_SERVANT_ROOT");
-  } else {
-    process.env.AI_SERVANT_ROOT = originalAiServantRoot;
-  }
+  setRootOverride(null);
   if (originalClaudeRoot === undefined) {
     Reflect.deleteProperty(process.env, "CLAUDE_PROJECTS_ROOT");
   } else {
