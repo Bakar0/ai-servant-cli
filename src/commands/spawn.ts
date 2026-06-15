@@ -1,9 +1,15 @@
 import { defineCommand } from "citty";
 import { DEFAULT_AGENT, getAgent } from "../agents/index.ts";
 import { ensureServantAssets } from "../core/claude-setup.ts";
-import { ensureWorkspaceDir, resolveWorkspaceName } from "../core/workspace.ts";
+import { ensureWorkspaceDir, isGoalUnfilled, resolveWorkspaceName } from "../core/workspace.ts";
 import { detectTerminal, getDriver } from "../terminals/index.ts";
 import { addReposInteractive } from "./repo/add.ts";
+
+// First message for an agent spawned into a workspace whose goal isn't defined yet
+// (and no task was given): have it define GOAL.md before anything else. Phrased as
+// natural language (not a bare `/goal`) so it reliably triggers the command.
+const GOAL_BOOTSTRAP_PROMPT =
+  "This servant workspace has no goal defined yet. Run the /goal command to interview me and define the workspace's GOAL.md before doing anything else.";
 
 export const spawnCommand = defineCommand({
   meta: {
@@ -69,6 +75,9 @@ export const spawnCommand = defineCommand({
     await ensureServantAssets();
     const workspace = await resolveWorkspaceName(args.workspace);
     const cwd = await ensureWorkspaceDir(workspace);
+    // Whether the workspace still needs its goal defined. Checked after scaffolding so a
+    // brand-new workspace reads its placeholder; true regardless of `-r` or prior spawns.
+    const goalUnfilled = await isGoalUnfilled(workspace);
 
     // Add repos in the current TTY *before* opening the tab, so the worktrees exist
     // under the workspace by the time the agent starts there. The picker is interactive,
@@ -83,7 +92,12 @@ export const spawnCommand = defineCommand({
     }
 
     const agent = getAgent(args.agent);
-    const command = agent.launchCommand(cwd, { prompt: args.prompt });
+    // If the caller gave a real task, run it. A blank prompt counts as no task — e.g.
+    // `-repo` parses as the short-flag cluster `-r -e -p -o`, setting `-p` to "".
+    const task = args.prompt?.trim() ? args.prompt : undefined;
+    // Otherwise, if the workspace goal isn't defined yet, kick the agent off by defining it.
+    const prompt = task ?? (goalUnfilled ? GOAL_BOOTSTRAP_PROMPT : undefined);
+    const command = agent.launchCommand(cwd, { prompt });
     const driver = args.terminal ? getDriver(args.terminal) : await detectTerminal();
 
     await driver.openTab({ cwd, command, title: workspace });

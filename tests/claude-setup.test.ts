@@ -36,6 +36,16 @@ describe("ensureServantAssets", () => {
     expect(body).toContain("argument-hint");
   });
 
+  test("creates .claude/commands/goal.md under the servant root", async () => {
+    await ensureServantAssets();
+    const target = join(claudeCommandsDir(), "goal.md");
+    const s = await stat(target);
+    expect(s.isFile()).toBe(true);
+    const body = await readFile(target, "utf8");
+    expect(body).toContain("GOAL.md");
+    expect(body).toContain("servant:goal:unfilled");
+  });
+
   test("creates CLAUDE.md at the servant root with workspace conventions", async () => {
     await ensureServantAssets();
     const target = join(aiServantRoot(), "CLAUDE.md");

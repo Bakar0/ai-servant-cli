@@ -111,3 +111,119 @@ describe("spawn -r", () => {
     expect(existsSync(join(aiServantRootDir, "workspaces", ws, "repos"))).toBe(false);
   });
 });
+
+describe("spawn goal bootstrap", () => {
+  function captureTabs() {
+    const tabs: OpenTabOptions[] = [];
+    const fakeDriver: TerminalDriver = {
+      name: "faketerm",
+      async openTab(opts) {
+        tabs.push(opts);
+      },
+    };
+    return { tabs, unregister: __registerDriverForTesting("faketerm", fakeDriver) };
+  }
+
+  test("a brand-new workspace launches the agent with the /goal bootstrap prompt", async () => {
+    const ws = "goalboot";
+    const { tabs, unregister } = captureTabs();
+    try {
+      await runCommand(spawnCommand, { rawArgs: ["-w", ws, "--terminal", "faketerm"] });
+    } finally {
+      unregister();
+    }
+    expect(tabs).toHaveLength(1);
+    expect(tabs[0]?.command).toContain("/goal");
+  });
+
+  test("a blank --prompt does not suppress the goal bootstrap", async () => {
+    const ws = "goalboot-blank";
+    const { tabs, unregister } = captureTabs();
+    try {
+      await runCommand(spawnCommand, {
+        rawArgs: ["-w", ws, "--terminal", "faketerm", "-p", ""],
+      });
+    } finally {
+      unregister();
+    }
+    expect(tabs).toHaveLength(1);
+    expect(tabs[0]?.command).toContain("/goal");
+  });
+
+  test("`-repo` (clustered short flags) still triggers the goal bootstrap", async () => {
+    const ws = "goalboot-repo";
+    const { tabs, unregister } = captureTabs();
+    try {
+      // `-repo` parses as `-r -e -p -o`: repo picker runs and `-p` is "" — the agent
+      // should still be asked to define the goal, not launched with an empty prompt.
+      await runCommand(spawnCommand, { rawArgs: ["-w", ws, "-repo", "--terminal", "faketerm"] });
+    } finally {
+      unregister();
+    }
+    expect(tabs).toHaveLength(1);
+    expect(tabs[0]?.command).toContain("/goal");
+  });
+
+  test("an explicit --prompt wins over the goal bootstrap", async () => {
+    const ws = "goalboot-prompt";
+    const { tabs, unregister } = captureTabs();
+    try {
+      await runCommand(spawnCommand, {
+        rawArgs: ["-w", ws, "--terminal", "faketerm", "-p", "do the task"],
+      });
+    } finally {
+      unregister();
+    }
+    expect(tabs).toHaveLength(1);
+    expect(tabs[0]?.command).toContain("do the task");
+    expect(tabs[0]?.command).not.toContain("/goal");
+  });
+
+  test("re-spawning while the goal is still unfilled keeps offering /goal", async () => {
+    const ws = "goalboot-unfilled";
+    // First spawn creates the workspace (gets the bootstrap prompt).
+    {
+      const { unregister } = captureTabs();
+      try {
+        await runCommand(spawnCommand, { rawArgs: ["-w", ws, "--terminal", "faketerm"] });
+      } finally {
+        unregister();
+      }
+    }
+    // The user never defined the goal, so GOAL.md still has the marker — spawn again,
+    // and the agent is still asked to run /goal.
+    const { tabs, unregister } = captureTabs();
+    try {
+      await runCommand(spawnCommand, { rawArgs: ["-w", ws, "--terminal", "faketerm"] });
+    } finally {
+      unregister();
+    }
+    expect(tabs).toHaveLength(1);
+    expect(tabs[0]?.command).toContain("/goal");
+  });
+
+  test("once the goal is defined, spawning no longer triggers /goal", async () => {
+    const ws = "goalboot-defined";
+    {
+      const { unregister } = captureTabs();
+      try {
+        await runCommand(spawnCommand, { rawArgs: ["-w", ws, "--terminal", "faketerm"] });
+      } finally {
+        unregister();
+      }
+    }
+    // Simulate the user having defined the goal: GOAL.md no longer carries the marker.
+    await writeFile(
+      join(aiServantRootDir, "workspaces", ws, "GOAL.md"),
+      "# Goal\n\n## Mission\nShip the thing.\n",
+    );
+    const { tabs, unregister } = captureTabs();
+    try {
+      await runCommand(spawnCommand, { rawArgs: ["-w", ws, "--terminal", "faketerm"] });
+    } finally {
+      unregister();
+    }
+    expect(tabs).toHaveLength(1);
+    expect(tabs[0]?.command).not.toContain("/goal");
+  });
+});

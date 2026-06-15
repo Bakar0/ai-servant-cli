@@ -3,13 +3,36 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { workspacePath, workspacesRoot } from "./paths.ts";
 
-// Imports the servant-root CLAUDE.md so Claude Code picks up workspace conventions
+// Imports the servant-root CLAUDE.md (workspace conventions) plus the workspace's
+// own GOAL.md (its intent / north star) so Claude Code auto-loads both every session
 // without needing parent-dir traversal to reach `~/.ai_servant/CLAUDE.md`.
-const WORKSPACE_CLAUDE_MD = "@../../CLAUDE.md\n";
+const WORKSPACE_CLAUDE_MD = "@../../CLAUDE.md\n@GOAL.md\n";
+
+// Marker embedded in the placeholder GOAL.md. Its presence means the workspace's
+// goal has not been defined yet; `/goal` removes it once the user approves a goal.
+export const GOAL_UNFILLED_MARKER = "servant:goal:unfilled";
+
+// Placeholder GOAL.md. Intent-only (mission / KPIs / out-of-scope); architecture
+// decisions live in context/ ADRs, operating instructions in CLAUDE.md.
+const GOAL_PLACEHOLDER = `# Goal
+
+> [!NOTE]
+> Not yet defined. Run \`/goal\` to fill this in. <!-- ${GOAL_UNFILLED_MARKER} -->
+
+## Mission
+_The guiding beacon: what this workspace is about, and why. One or two sentences — not a spec._
+
+## KPIs / success signals
+_Concrete, verifiable signals that it's working (a behavior works, a test passes, a number moves)._
+
+## Out of scope
+_Anything explicitly NOT part of this workspace._
+`;
 
 // Scaffold files seeded once when a workspace is created. Only written if missing
 // so user edits are never clobbered. Layout matches `~/.ai_servant/CLAUDE.md`.
 const SCAFFOLD_FILES: ReadonlyArray<readonly [string, string]> = [
+  ["GOAL.md", GOAL_PLACEHOLDER],
   ["CONTEXT.md", "# Context\n\nShared language / domain glossary for this workspace.\n"],
   ["briefs/INDEX.md", "# Briefs\n"],
   ["plans/INDEX.md", "# Plans\n"],
@@ -63,6 +86,19 @@ export async function ensureWorkspaceDir(name: string): Promise<string> {
     await writeIfMissing(full, body);
   }
   return dir;
+}
+
+// True when the workspace's goal has not been defined yet (GOAL.md still carries the
+// unfilled marker, or is missing). Drives whether a freshly spawned agent is asked to
+// run `/goal` first. Independent of how the workspace was created (e.g. with `-r`).
+export async function isGoalUnfilled(name: string): Promise<boolean> {
+  const path = join(workspacePath(name), "GOAL.md");
+  try {
+    const body = await readFile(path, "utf8");
+    return body.includes(GOAL_UNFILLED_MARKER);
+  } catch {
+    return true;
+  }
 }
 
 export function detectWorkspaceNameFromCwd(cwd: string, root: string): string | null {

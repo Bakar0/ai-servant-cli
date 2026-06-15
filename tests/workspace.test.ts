@@ -17,9 +17,8 @@ afterAll(async () => {
   await rm(tmpRoot, { recursive: true, force: true });
 });
 
-const { assertValidWorkspaceName, detectWorkspaceNameFromCwd, ensureWorkspaceDir } = await import(
-  "../src/core/workspace.ts"
-);
+const { assertValidWorkspaceName, detectWorkspaceNameFromCwd, ensureWorkspaceDir, isGoalUnfilled } =
+  await import("../src/core/workspace.ts");
 const { workspacePath, workspacesRoot } = await import("../src/core/paths.ts");
 
 describe("assertValidWorkspaceName", () => {
@@ -70,11 +69,21 @@ describe("ensureWorkspaceDir", () => {
     await expect(ensureWorkspaceDir("../evil")).rejects.toThrow();
   });
 
-  test("writes a CLAUDE.md pointer that imports the servant-root CLAUDE.md", async () => {
+  test("writes a CLAUDE.md pointer that imports the servant-root CLAUDE.md and GOAL.md", async () => {
     const name = `claude-md-${process.pid}-${Date.now()}`;
     const dir = await ensureWorkspaceDir(name);
     const body = await readFile(join(dir, "CLAUDE.md"), "utf8");
-    expect(body).toBe("@../../CLAUDE.md\n");
+    expect(body).toBe("@../../CLAUDE.md\n@GOAL.md\n");
+  });
+
+  test("upgrades an old single-import CLAUDE.md pointer to also import GOAL.md", async () => {
+    const name = `claude-md-upgrade-${process.pid}-${Date.now()}`;
+    const dir = await ensureWorkspaceDir(name);
+    const path = join(dir, "CLAUDE.md");
+    await writeFile(path, "@../../CLAUDE.md\n");
+    await ensureWorkspaceDir(name);
+    const body = await readFile(path, "utf8");
+    expect(body).toBe("@../../CLAUDE.md\n@GOAL.md\n");
   });
 
   test("restores the CLAUDE.md pointer if it has been tampered with", async () => {
@@ -84,7 +93,28 @@ describe("ensureWorkspaceDir", () => {
     await writeFile(path, "tampered");
     await ensureWorkspaceDir(name);
     const body = await readFile(path, "utf8");
-    expect(body).toBe("@../../CLAUDE.md\n");
+    expect(body).toBe("@../../CLAUDE.md\n@GOAL.md\n");
+  });
+
+  test("scaffolds an intent-only GOAL.md placeholder with the unfilled marker", async () => {
+    const name = `goal-${process.pid}-${Date.now()}`;
+    const dir = await ensureWorkspaceDir(name);
+    const goal = await readFile(join(dir, "GOAL.md"), "utf8");
+    expect(goal).toContain("# Goal");
+    expect(goal).toContain("servant:goal:unfilled");
+    expect(goal).toContain("## Mission");
+    expect(goal).toContain("## KPIs / success signals");
+    expect(goal).toContain("## Out of scope");
+  });
+
+  test("does not overwrite a GOAL.md the user has filled in", async () => {
+    const name = `goal-preserve-${process.pid}-${Date.now()}`;
+    const dir = await ensureWorkspaceDir(name);
+    const path = join(dir, "GOAL.md");
+    await writeFile(path, "# Goal\n\n## Mission\nShip the thing.\n");
+    await ensureWorkspaceDir(name);
+    const body = await readFile(path, "utf8");
+    expect(body).toBe("# Goal\n\n## Mission\nShip the thing.\n");
   });
 
   test("scaffolds CONTEXT.md, briefs/INDEX.md, plans/INDEX.md, and context/INDEX.md", async () => {
@@ -115,6 +145,19 @@ describe("ensureWorkspaceDir", () => {
 
     const body = await readFile(briefsIndex, "utf8");
     expect(body).toBe("# Briefs\n\n- existing entry\n");
+  });
+});
+
+describe("isGoalUnfilled", () => {
+  test("true for a missing workspace, true for a fresh placeholder, false once filled", async () => {
+    const name = `goal-state-${process.pid}-${Date.now()}`;
+    expect(await isGoalUnfilled(name)).toBe(true); // no workspace yet
+
+    const dir = await ensureWorkspaceDir(name);
+    expect(await isGoalUnfilled(name)).toBe(true); // placeholder still has the marker
+
+    await writeFile(join(dir, "GOAL.md"), "# Goal\n\n## Mission\nShip it.\n");
+    expect(await isGoalUnfilled(name)).toBe(false); // marker gone
   });
 });
 

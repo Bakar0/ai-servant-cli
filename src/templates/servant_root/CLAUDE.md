@@ -6,6 +6,7 @@ You are running inside a **servant workspace** at `~/.ai_servant/workspaces/<nam
 
 ```
 <workspace>/
+  GOAL.md                 # the workspace's intent / north star (auto-loaded every session)
   CONTEXT.md              # shared language / domain glossary (workspace-wide)
   briefs/
     INDEX.md              # list of briefs + status + one-line summary
@@ -21,8 +22,25 @@ You are running inside a **servant workspace** at `~/.ai_servant/workspaces/<nam
 
 - **Briefs are contracts.** Each brief is a self-contained spec for one delegated task. The brief — not the spawning prompt — is the source of truth.
 - **Plans are working scaffolds.** A plan captures procedural sequencing — phases, milestones, investigation steps — for work whose *how* is non-trivial. Plans pair with the brief they implement via backlinks; you will edit a plan as execution reveals reality.
+- **`GOAL.md`** holds the workspace's intent — what it's ultimately for. See "The workspace goal" below.
 - **`CONTEXT.md`** holds the workspace's shared language: domain terms and ubiquitous vocabulary that briefs, plans, and ADRs reference.
 - **`context/`** holds reusable reference docs. Briefs and plans link to them via relative paths like `../context/adr-001-jwt-rotation.md`.
+
+## The workspace goal
+
+`GOAL.md` at the workspace root is the **north star** for everyone working here — its intent:
+what we're building and why, who it's for, what "done" looks like, and what's out of scope. The
+workspace `CLAUDE.md` imports it, so it is **already in your context every session**. Let it
+guide scope and priority decisions; if a request conflicts with it, surface that.
+
+- **Offer, don't block.** If the loaded `GOAL.md` still carries the `servant:goal:unfilled`
+  marker, the goal hasn't been defined yet. Briefly offer to run `/goal` to define it — but if
+  the user gives you a task, just do the task. Never gate work on defining the goal.
+- **Changes need approval.** `GOAL.md` only changes by direct user approval. Never edit it
+  silently — propose the change and let the user confirm. The `/goal` command handles the
+  interview and writes only after sign-off.
+- Keep it intent-only: design decisions belong in `context/` ADRs, operating instructions here
+  in `CLAUDE.md` — `GOAL.md` should not duplicate either.
 
 ## Where artifacts go
 
@@ -60,3 +78,5 @@ Briefs describe **what**, not **how**. Behavioral, not procedural.
 ## Delegating onward
 
 To hand a piece of work to a fresh servant in this workspace, use the `/delegate` slash command. It writes a new Agent Brief into `briefs/`, updates the INDEX files, then runs `servant spawn --prompt "Read briefs/<file>.md and execute the Agent Brief."` (which opens a new tab in this same workspace).
+
+To define or amend the workspace's intent, use the `/goal` slash command — it interviews the user and writes `GOAL.md` only after approval.
