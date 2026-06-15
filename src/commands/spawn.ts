@@ -9,9 +9,9 @@ import { addReposInteractive } from "./repo/add.ts";
 
 // First message for an agent spawned into a workspace whose goal isn't defined yet
 // (and no task was given): have it define GOAL.md before anything else. Phrased as
-// natural language (not a bare `/goal`) so it reliably triggers the command.
+// natural language (not a bare `/servant:goal`) so it reliably triggers the command.
 const GOAL_BOOTSTRAP_PROMPT =
-  "This servant workspace has no goal defined yet. Run the /goal command to interview me and define the workspace's GOAL.md before doing anything else.";
+  "This servant workspace has no goal defined yet. Run the /servant:goal command to interview me and define the workspace's GOAL.md before doing anything else.";
 
 export const spawnCommand = defineCommand({
   meta: {

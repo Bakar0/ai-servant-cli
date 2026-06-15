@@ -47,7 +47,9 @@ describe("runInit", () => {
     const cfg = await loadConfig();
     expect(cfg.repoSearchRoots).toEqual(["~"]);
     expect(await Bun.file(join(scratch, "CLAUDE.md")).exists()).toBe(true);
-    expect(await Bun.file(join(scratch, ".claude", "commands", "goal.md")).exists()).toBe(true);
+    expect(
+      await Bun.file(join(scratch, ".claude", "commands", "servant", "goal.md")).exists(),
+    ).toBe(true);
   });
 
   test("is idempotent — a second run preserves existing config", async () => {

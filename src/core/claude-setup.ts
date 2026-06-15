@@ -1,8 +1,15 @@
-import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { dirname, join, relative } from "node:path";
-import { aiServantRoot } from "./paths.ts";
+import { aiServantRoot, claudeCommandsDir } from "./paths.ts";
 
 const TEMPLATES_DIR = new URL("../templates/servant_root/", import.meta.url).pathname;
+
+// Slash commands used to live flat at `.claude/commands/<name>.md` (un-prefixed `/goal`,
+// `/delegate`). They are now namespaced under `commands/servant/` so they surface as
+// `/servant:goal` / `/servant:delegate`. The sync below never deletes, so on upgrade the
+// stale flat copies would linger and shadow the namespaced ones with duplicate commands.
+// Remove the specific legacy files we know we shipped.
+const LEGACY_FLAT_COMMANDS = ["goal.md", "delegate.md"];
 
 async function listTemplateFiles(root: string): Promise<string[]> {
   const out: string[] = [];
@@ -41,5 +48,14 @@ export async function ensureServantAssets(): Promise<void> {
     if (existing?.equals(incoming)) continue;
     await mkdir(dirname(dest), { recursive: true });
     await writeFile(dest, incoming);
+  }
+  await removeLegacyFlatCommands();
+}
+
+/** Delete pre-namespace flat command files so upgraded installs don't keep duplicate commands. */
+async function removeLegacyFlatCommands(): Promise<void> {
+  const dir = claudeCommandsDir();
+  for (const name of LEGACY_FLAT_COMMANDS) {
+    await rm(join(dir, name), { force: true });
   }
 }

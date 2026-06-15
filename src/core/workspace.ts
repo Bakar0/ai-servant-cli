@@ -9,7 +9,7 @@ import { workspacePath, workspacesRoot } from "./paths.ts";
 const WORKSPACE_CLAUDE_MD = "@../../CLAUDE.md\n@GOAL.md\n";
 
 // Marker embedded in the placeholder GOAL.md. Its presence means the workspace's
-// goal has not been defined yet; `/goal` removes it once the user approves a goal.
+// goal has not been defined yet; `/servant:goal` removes it once the user approves a goal.
 export const GOAL_UNFILLED_MARKER = "servant:goal:unfilled";
 
 // Placeholder GOAL.md. Intent-only (mission / KPIs / out-of-scope); architecture
@@ -17,7 +17,7 @@ export const GOAL_UNFILLED_MARKER = "servant:goal:unfilled";
 const GOAL_PLACEHOLDER = `# Goal
 
 > [!NOTE]
-> Not yet defined. Run \`/goal\` to fill this in. <!-- ${GOAL_UNFILLED_MARKER} -->
+> Not yet defined. Run \`/servant:goal\` to fill this in. <!-- ${GOAL_UNFILLED_MARKER} -->
 
 ## Mission
 _The guiding beacon: what this workspace is about, and why. One or two sentences — not a spec._
@@ -90,7 +90,7 @@ export async function ensureWorkspaceDir(name: string): Promise<string> {
 
 // True when the workspace's goal has not been defined yet (GOAL.md still carries the
 // unfilled marker, or is missing). Drives whether a freshly spawned agent is asked to
-// run `/goal` first. Independent of how the workspace was created (e.g. with `-r`).
+// run `/servant:goal` first. Independent of how the workspace was created (e.g. with `-r`).
 export async function isGoalUnfilled(name: string): Promise<boolean> {
   const path = join(workspacePath(name), "GOAL.md");
   try {

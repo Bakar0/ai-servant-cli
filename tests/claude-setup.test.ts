@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setRootOverride } from "../src/core/paths.ts";
@@ -25,9 +25,9 @@ const { ensureServantAssets } = await import("../src/core/claude-setup.ts");
 const { aiServantRoot, claudeDir, claudeCommandsDir } = await import("../src/core/paths.ts");
 
 describe("ensureServantAssets", () => {
-  test("creates .claude/commands/delegate.md under the servant root", async () => {
+  test("creates .claude/commands/servant/delegate.md under the servant root", async () => {
     await ensureServantAssets();
-    const target = join(claudeCommandsDir(), "delegate.md");
+    const target = join(claudeCommandsDir(), "servant", "delegate.md");
     const s = await stat(target);
     expect(s.isFile()).toBe(true);
     const body = await readFile(target, "utf8");
@@ -35,9 +35,9 @@ describe("ensureServantAssets", () => {
     expect(body).toContain("argument-hint");
   });
 
-  test("creates .claude/commands/goal.md under the servant root", async () => {
+  test("creates .claude/commands/servant/goal.md under the servant root", async () => {
     await ensureServantAssets();
-    const target = join(claudeCommandsDir(), "goal.md");
+    const target = join(claudeCommandsDir(), "servant", "goal.md");
     const s = await stat(target);
     expect(s.isFile()).toBe(true);
     const body = await readFile(target, "utf8");
@@ -58,7 +58,7 @@ describe("ensureServantAssets", () => {
 
   test("is idempotent and resyncs when content drifts", async () => {
     await ensureServantAssets();
-    const target = join(claudeCommandsDir(), "delegate.md");
+    const target = join(claudeCommandsDir(), "servant", "delegate.md");
     const original = await readFile(target, "utf8");
 
     // user / drift modifies the file
@@ -67,6 +67,23 @@ describe("ensureServantAssets", () => {
     await ensureServantAssets();
     const restored = await readFile(target, "utf8");
     expect(restored).toBe(original);
+  });
+
+  test("removes pre-namespace flat command files on upgrade", async () => {
+    // Simulate an install made before commands were namespaced under servant/.
+    const commands = claudeCommandsDir();
+    await mkdir(commands, { recursive: true });
+    const legacyGoal = join(commands, "goal.md");
+    const legacyDelegate = join(commands, "delegate.md");
+    await writeFile(legacyGoal, "old /goal");
+    await writeFile(legacyDelegate, "old /delegate");
+
+    await ensureServantAssets();
+
+    expect(await Bun.file(legacyGoal).exists()).toBe(false);
+    expect(await Bun.file(legacyDelegate).exists()).toBe(false);
+    expect(await Bun.file(join(commands, "servant", "goal.md")).exists()).toBe(true);
+    expect(await Bun.file(join(commands, "servant", "delegate.md")).exists()).toBe(true);
   });
 
   test("places .claude/ as a sibling of workspaces/ under the servant root", async () => {

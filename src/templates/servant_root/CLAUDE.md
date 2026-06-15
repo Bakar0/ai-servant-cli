@@ -34,10 +34,10 @@ workspace `CLAUDE.md` imports it, so it is **already in your context every sessi
 guide scope and priority decisions; if a request conflicts with it, surface that.
 
 - **Offer, don't block.** If the loaded `GOAL.md` still carries the `servant:goal:unfilled`
-  marker, the goal hasn't been defined yet. Briefly offer to run `/goal` to define it — but if
+  marker, the goal hasn't been defined yet. Briefly offer to run `/servant:goal` to define it — but if
   the user gives you a task, just do the task. Never gate work on defining the goal.
 - **Changes need approval.** `GOAL.md` only changes by direct user approval. Never edit it
-  silently — propose the change and let the user confirm. The `/goal` command handles the
+  silently — propose the change and let the user confirm. The `/servant:goal` command handles the
   interview and writes only after sign-off.
 - Keep it intent-only: design decisions belong in `context/` ADRs, operating instructions here
   in `CLAUDE.md` — `GOAL.md` should not duplicate either.
@@ -77,6 +77,6 @@ Briefs describe **what**, not **how**. Behavioral, not procedural.
 
 ## Delegating onward
 
-To hand a piece of work to a fresh servant in this workspace, use the `/delegate` slash command. It writes a new Agent Brief into `briefs/`, updates the INDEX files, then runs `servant spawn --prompt "Read briefs/<file>.md and execute the Agent Brief."` (which opens a new tab in this same workspace).
+To hand a piece of work to a fresh servant in this workspace, use the `/servant:delegate` slash command. It writes a new Agent Brief into `briefs/`, updates the INDEX files, then runs `servant spawn --prompt "Read briefs/<file>.md and execute the Agent Brief."` (which opens a new tab in this same workspace).
 
-To define or amend the workspace's intent, use the `/goal` slash command — it interviews the user and writes `GOAL.md` only after approval.
+To define or amend the workspace's intent, use the `/servant:goal` slash command — it interviews the user and writes `GOAL.md` only after approval.

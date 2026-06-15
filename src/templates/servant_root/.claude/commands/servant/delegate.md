@@ -3,7 +3,7 @@ description: Distill the current session into an Agent Brief and spawn a servant
 argument-hint: [one-line goal]
 ---
 
-# /delegate
+# /servant:delegate
 
 Hand a piece of work from this session off to a fresh servant running in a new tab of the **same workspace** in your Servantry. You write an Agent Brief (the contract) and any reusable context files; the servant reads the brief and executes.
 

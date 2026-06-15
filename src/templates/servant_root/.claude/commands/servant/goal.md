@@ -3,7 +3,7 @@ description: Interview the user to define (or amend) this workspace's GOAL.md �
 argument-hint: [one-line goal]
 ---
 
-# /goal
+# /servant:goal
 
 Define the **goal** of this servant workspace: a short `GOAL.md` at the workspace root that every
 agent here auto-loads. Think of the mission as a **guiding beacon** the servants steer by while
@@ -12,7 +12,7 @@ a couple of KPIs. It says *what this workspace is about* and *how we'll know it'
 **not** operating instructions (those live in `CLAUDE.md`) or architecture/design (those are ADRs
 in `context/`). Don't duplicate either; link out instead.
 
-The goal is a **living direction** — it can be re-run with `/goal` and updated as things evolve.
+The goal is a **living direction** — it can be re-run with `/servant:goal` and updated as things evolve.
 
 The optional argument `$ARGUMENTS` is a one-line seed for the goal. If present, treat it as the
 user's answer to the opening question below and skip straight to the follow-ups.
@@ -91,4 +91,4 @@ link to an ADR in `context/` if design context matters.
 
 Only after explicit approval, write `GOAL.md` with the `servant:goal:unfilled` marker removed.
 Then tell the user the goal is set, that every agent in this workspace auto-loads it, and that
-they can run `/goal` again anytime to update it as things evolve.
+they can run `/servant:goal` again anytime to update it as things evolve.
