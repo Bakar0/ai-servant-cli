@@ -56,7 +56,12 @@ describe("runInit", () => {
     await runInit({ root: scratch, yes: true, interactive: false, output: sink() });
     // Hand-edit the config, then re-run: values must survive (no clobber).
     const { saveConfig, CONFIG_VERSION } = await import("../src/core/config.ts");
-    await saveConfig({ version: CONFIG_VERSION, repoSearchRoots: ["~/work"], scanMaxDepth: 7 });
+    await saveConfig({
+      version: CONFIG_VERSION,
+      repoSearchRoots: ["~/work"],
+      scanMaxDepth: 7,
+      showTips: true,
+    });
     await runInit({ root: scratch, yes: true, interactive: false, output: sink() });
     const cfg = await loadConfig();
     expect(cfg.repoSearchRoots).toEqual(["~/work"]);
@@ -65,7 +70,12 @@ describe("runInit", () => {
 
   test("--force overwrites config with defaults", async () => {
     const { saveConfig, CONFIG_VERSION } = await import("../src/core/config.ts");
-    await saveConfig({ version: CONFIG_VERSION, repoSearchRoots: ["~/work"], scanMaxDepth: 7 });
+    await saveConfig({
+      version: CONFIG_VERSION,
+      repoSearchRoots: ["~/work"],
+      scanMaxDepth: 7,
+      showTips: true,
+    });
     await runInit({ root: scratch, yes: true, force: true, interactive: false, output: sink() });
     const cfg = await loadConfig();
     expect(cfg.repoSearchRoots).toEqual(["~"]);

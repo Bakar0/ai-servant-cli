@@ -46,7 +46,7 @@ beforeAll(async () => {
   setRootOverride(aiServantRootDir);
 
   const { saveConfig } = await import("../src/core/config.ts");
-  await saveConfig({ version: 1, repoSearchRoots: [codeRoot], scanMaxDepth: 4 });
+  await saveConfig({ version: 1, repoSearchRoots: [codeRoot], scanMaxDepth: 4, showTips: true });
 });
 
 afterAll(async () => {

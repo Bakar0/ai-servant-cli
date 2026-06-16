@@ -52,6 +52,7 @@ describe("discoverRepos", () => {
     version: 1,
     repoSearchRoots: [] as string[],
     scanMaxDepth: 4,
+    showTips: true,
   };
 
   test("finds repos in configured roots and excludes anything under aiServantRoot", async () => {

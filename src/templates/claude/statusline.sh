@@ -115,38 +115,61 @@ window_k=$((window / 1000))
 model=$(echo "$input" | jq -r '.model.display_name' | awk '{print tolower($1)}')
 session_line="${model} · ${used_k}k/${window_k}k · ${percent}%"
 
+# ---------- Rotating tip ----------
+# A gray hint reminding the user what servant can do, echoing Claude Code's own
+# "※" tip style. Cycles by a wall-clock window so it advances over time but stays
+# stable within a window (not jumpy mid-turn). Hide it by setting
+# "showTips": false in ~/.ai_servant/config.json.
+tip_line=""
+show_tips="true"
+config_file="$servant_root/config.json"
+if [ -f "$config_file" ]; then
+  [ "$(jq -r '.showTips' "$config_file" 2>/dev/null)" = "false" ] && show_tips="false"
+fi
+if [ "$show_tips" = "true" ]; then
+  tips=(
+    "/servant:goal — define what this workspace is for"
+    "/servant:delegate — hand a task to a worker agent in a new tab"
+    "/servant:fine-tune — tailor servant's instructions to how you work"
+    "servant spawn -w fix-login-bug -r — workspace for a task, pick repos to mount"
+    "servant memories — browse your knowledge base in a picker"
+    "servant resume — re-attach to an earlier session"
+    "hide these tips: set \"showTips\": false in ~/.ai_servant/config.json"
+  )
+  count=${#tips[@]}
+  idx=$(( ($(date +%s) / 30) % count ))
+  tip_line=$' \033[2m※ tip: '"${tips[$idx]}"$'\033[0m'
+fi
+
 # ---------- Render ----------
+lines=()
 if [ -n "$workspace" ]; then
   # Multi-line: session header on first line, then one row per worktree.
-  printf ' %s' "$session_line"
-  if [ ${#worktree_entries[@]} -gt 0 ]; then
-    printf '\n'
-    render_entry() {
-      local sub="$1" br="$2" is_cur="$3"
-      local wt_path="$ws_repos_dir/${sub}__${br}"
-      local marker="   "
-      [ "$is_cur" = "true" ] && marker=" ▸ "
-      compute_git "$wt_path"
-      lookup_pr "$sub" "$GIT_BRANCH" "$wt_path"
-      local line="${marker}${sub} ⎇ ${GIT_BRANCH}"
-      [ -n "$GIT_STATS" ] && line="${line} · ${GIT_STATS}"
-      [ -n "$PR" ] && line="${line} · #${PR}"
-      printf '%s\n' "$line"
-    }
-    # First pass: current
-    for e in "${worktree_entries[@]}"; do
-      IFS='|' read -r sub br is_cur <<< "$e"
-      [ "$is_cur" = "true" ] || continue
-      render_entry "$sub" "$br" "true"
-    done
-    # Second pass: siblings
-    for e in "${worktree_entries[@]}"; do
-      IFS='|' read -r sub br is_cur <<< "$e"
-      [ "$is_cur" = "true" ] && continue
-      render_entry "$sub" "$br" "false"
-    done
-    # Strip trailing newline from last render_entry — Claude trims trailing whitespace anyway.
-  fi
+  lines+=(" ${session_line}")
+  render_entry() {
+    local sub="$1" br="$2" is_cur="$3"
+    local wt_path="$ws_repos_dir/${sub}__${br}"
+    local marker="   "
+    [ "$is_cur" = "true" ] && marker=" ▸ "
+    compute_git "$wt_path"
+    lookup_pr "$sub" "$GIT_BRANCH" "$wt_path"
+    local line="${marker}${sub} ⎇ ${GIT_BRANCH}"
+    [ -n "$GIT_STATS" ] && line="${line} · ${GIT_STATS}"
+    [ -n "$PR" ] && line="${line} · #${PR}"
+    lines+=("$line")
+  }
+  # First pass: current
+  for e in "${worktree_entries[@]}"; do
+    IFS='|' read -r sub br is_cur <<< "$e"
+    [ "$is_cur" = "true" ] || continue
+    render_entry "$sub" "$br" "true"
+  done
+  # Second pass: siblings
+  for e in "${worktree_entries[@]}"; do
+    IFS='|' read -r sub br is_cur <<< "$e"
+    [ "$is_cur" = "true" ] && continue
+    render_entry "$sub" "$br" "false"
+  done
 else
   # Outside servant workspace — session on top, repo line below.
   compute_git "$dir"
@@ -169,5 +192,16 @@ else
   [ -n "$GIT_WT" ] && repo_line="${repo_line} · ${GIT_WT}"
   [ -n "$GIT_STATS" ] && repo_line="${repo_line} · ${GIT_STATS}"
   [ -n "$PR" ] && repo_line="${repo_line} · #${PR}"
-  printf ' %s\n%s' "$session_line" "$repo_line"
+  lines+=(" ${session_line}")
+  lines+=("$repo_line")
 fi
+
+[ -n "$tip_line" ] && lines+=("$tip_line")
+
+# Join with newlines; no trailing newline (Claude trims it anyway).
+out=""
+for i in "${!lines[@]}"; do
+  [ "$i" -gt 0 ] && out="${out}"$'\n'
+  out="${out}${lines[$i]}"
+done
+printf '%s' "$out"

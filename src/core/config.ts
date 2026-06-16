@@ -8,6 +8,8 @@ export type Config = {
   version: number;
   repoSearchRoots: string[];
   scanMaxDepth: number;
+  /** Show the rotating servant tip in the status line. Set false to hide it. */
+  showTips: boolean;
 };
 
 /** Current config schema version. */
@@ -21,6 +23,7 @@ export function defaultConfig(): Config {
     version: CONFIG_VERSION,
     repoSearchRoots: [...DEFAULT_SEARCH_ROOTS],
     scanMaxDepth: DEFAULT_SCAN_MAX_DEPTH,
+    showTips: true,
   };
 }
 
@@ -43,6 +46,9 @@ function coerce(raw: unknown): Config {
     }
     if (typeof obj.scanMaxDepth === "number" && Number.isFinite(obj.scanMaxDepth)) {
       cfg.scanMaxDepth = Math.max(1, Math.floor(obj.scanMaxDepth));
+    }
+    if (typeof obj.showTips === "boolean") {
+      cfg.showTips = obj.showTips;
     }
   }
   return cfg;

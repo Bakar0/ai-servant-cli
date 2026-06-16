@@ -26,11 +26,15 @@ async function readJsonObject(path: string): Promise<Record<string, unknown>> {
 /** A representative rendering of the status line, shown before offering to install it. */
 export const STATUSLINE_EXAMPLE = [
   "The servant status line replaces Claude Code's bottom status bar with your",
-  "model + token usage and one line per repo (branch · git stats · PR). Preview:",
+  "model + token usage and one line per repo (branch · git stats · PR), plus a",
+  "rotating gray tip reminding you what servant can do. Preview:",
   "",
   "     opus · 102k/200k · 12%",
   "   ▸ api ⎇ feat-login · ✎3 +1 · #482",
   "     web ⎇ feat-login · clean",
+  "     ※ tip: servant spawn -w fix-login-bug -r — workspace for a task, pick repos",
+  "",
+  'Hide the tip anytime: set "showTips": false in ~/.ai_servant/config.json.',
   "",
 ].join("\n");
 

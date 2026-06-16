@@ -25,6 +25,7 @@ describe("defaultConfig", () => {
     expect(cfg.version).toBe(CONFIG_VERSION);
     expect(cfg.repoSearchRoots).toEqual(["~"]);
     expect(cfg.scanMaxDepth).toBe(4);
+    expect(cfg.showTips).toBe(true);
   });
 });
 
@@ -56,10 +57,20 @@ describe("load/save round trip", () => {
       version: CONFIG_VERSION,
       repoSearchRoots: ["~/code", "/abs/repos"],
       scanMaxDepth: 6,
+      showTips: false,
     };
     await saveConfig(cfg);
     const loaded = await loadConfig();
     expect(loaded).toEqual(cfg);
+  });
+
+  test("loadConfig defaults showTips to true when absent", async () => {
+    await Bun.write(
+      join(tmpRoot, "config.json"),
+      JSON.stringify({ repoSearchRoots: ["~/x"], scanMaxDepth: 3 }),
+    );
+    const loaded = await loadConfig();
+    expect(loaded.showTips).toBe(true);
   });
 
   test("loadConfig backfills version on legacy files missing it", async () => {
@@ -77,6 +88,7 @@ describe("load/save round trip", () => {
       version: CONFIG_VERSION,
       repoSearchRoots: ["~/code", "/abs/repos"],
       scanMaxDepth: 4,
+      showTips: true,
     });
     const loaded = await loadConfig();
     const resolved = resolvedSearchRoots(loaded);
