@@ -13,6 +13,7 @@ import {
   setMarker,
   writeDrainStatus,
 } from "../core/extract-queue.ts";
+import { readOverlayBody } from "../core/fine-tune.ts";
 import { commitKnowledge, reconcileAllIndexes } from "../core/knowledge.ts";
 import { applyRootOverride, knowledgeRoot, workspacesRoot } from "../core/paths.ts";
 import { detectWorkspaceNameFromCwd } from "../core/workspace.ts";
@@ -159,6 +160,8 @@ export async function runDrain(
   let processed = 0;
   let firstError: string | undefined;
   const summaries: string[] = [];
+  // User's memory-extraction fine-tune overlay, applied to every job this drain.
+  const fineTuneOverlay = await readOverlayBody("memory-extraction");
   try {
     const jobs = dedupeJobs(await readJobs());
     await clearQueue();
@@ -171,6 +174,7 @@ export async function runDrain(
           transcriptPath: job.transcript_path,
           fromTurn,
           cwd: job.cwd,
+          fineTuneOverlay,
         });
         const summary = (await runner(job, prompt)) || "";
         if (summary) summaries.push(summary);

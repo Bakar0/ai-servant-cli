@@ -1,5 +1,6 @@
 import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { dirname, join, relative } from "node:path";
+import { composeAssetForRel, isFineTuneAsset } from "./fine-tune.ts";
 import { aiServantRoot, claudeCommandsDir } from "./paths.ts";
 
 const TEMPLATES_DIR = new URL("../templates/servant_root/", import.meta.url).pathname;
@@ -31,6 +32,10 @@ async function listTemplateFiles(root: string): Promise<string[]> {
  * (`.claude/commands/*.md`). Existing files are overwritten only when content
  * has changed; missing files are created. Idempotent and cheap to run on every
  * spawn so users automatically pick up template updates.
+ *
+ * For tunable assets (see `fine-tune.ts`), the user's overlay is appended to the
+ * bundled base before the comparison, so the base keeps updating while the overlay
+ * survives. Composition is deterministic, so the "overwrite only on change" check holds.
  */
 export async function ensureServantAssets(): Promise<void> {
   const target = aiServantRoot();
@@ -39,15 +44,18 @@ export async function ensureServantAssets(): Promise<void> {
     const rel = relative(TEMPLATES_DIR, src);
     const dest = join(target, rel);
     const incoming = await readFile(src);
+    const desired = isFineTuneAsset(rel)
+      ? Buffer.from(await composeAssetForRel(rel, incoming.toString("utf8")), "utf8")
+      : incoming;
     let existing: Buffer | null = null;
     try {
       existing = await readFile(dest);
     } catch {
       // missing, will write
     }
-    if (existing?.equals(incoming)) continue;
+    if (existing?.equals(desired)) continue;
     await mkdir(dirname(dest), { recursive: true });
-    await writeFile(dest, incoming);
+    await writeFile(dest, desired);
   }
   await removeLegacyFlatCommands();
 }

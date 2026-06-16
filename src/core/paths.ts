@@ -46,6 +46,15 @@ export function discoveryCachePath(): string {
   return join(cacheDir(), "repo-discovery.json");
 }
 
+/** User-owned fine-tune overlays (one file per tunable aspect), sibling to workspaces/. */
+export function fineTuneDir(): string {
+  return join(aiServantRoot(), "fine-tune");
+}
+
+export function fineTuneAspectPath(id: string): string {
+  return join(fineTuneDir(), `${id}.md`);
+}
+
 /** Durable, git-tracked knowledge store, sibling to workspaces/. */
 export function knowledgeRoot(): string {
   return join(aiServantRoot(), "knowledge");

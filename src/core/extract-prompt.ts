@@ -9,9 +9,19 @@ export interface ExtractPromptOptions {
   fromTurn: number;
   /** Working directory of the ended session (used to infer the project repos). */
   cwd: string;
+  /**
+   * The user's `memory-extraction` fine-tune overlay (comments stripped), if any. Appended
+   * verbatim as user overrides so the headless drainer and the in-session slash command
+   * (which gets the same overlay via asset composition) stay in sync.
+   */
+  fineTuneOverlay?: string | null;
 }
 
 export function buildExtractionPrompt(opts: ExtractPromptOptions): string {
+  const overlay = opts.fineTuneOverlay?.trim();
+  const fineTuneSection = overlay
+    ? `\n\n## Local fine-tuning (user overrides — take precedence over the above)\n${overlay}`
+    : "";
   return `You are the servant knowledge extractor running headlessly. Distill durable knowledge from a just-ended coding session into the servant knowledge base. Do not converse — just do the work and stop.
 
 ## Source
@@ -53,5 +63,5 @@ confidence: high        # high | medium | low
 ## Finish
 Just write/update the note **files** — do NOT touch any INDEX.md and do NOT run any git or
 servant commands; the indexes are rebuilt and the store is committed automatically after you
-finish. Then stop, and output a single final line: "added/updated N notes" (or "no durable facts").`;
+finish. Then stop, and output a single final line: "added/updated N notes" (or "no durable facts").${fineTuneSection}`;
 }
