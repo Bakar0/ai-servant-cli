@@ -16,9 +16,18 @@ afterAll(async () => {
   await rm(tmpRoot, { recursive: true, force: true });
 });
 
-const { assertValidWorkspaceName, detectWorkspaceNameFromCwd, ensureWorkspaceDir, isGoalUnfilled } =
-  await import("../src/core/workspace.ts");
-const { workspacePath, workspacesRoot } = await import("../src/core/paths.ts");
+const {
+  assertValidWorkspaceName,
+  detectWorkspaceNameFromCwd,
+  ensureWorkspaceDir,
+  isGoalUnfilled,
+  mountedRepoSubdirs,
+  syncWorkspaceClaudeMd,
+} = await import("../src/core/workspace.ts");
+const { workspacePath, workspacesRoot, knowledgeProjectIndexPath } = await import(
+  "../src/core/paths.ts"
+);
+const { mkdir } = await import("node:fs/promises");
 
 describe("assertValidWorkspaceName", () => {
   test("accepts simple alphanumeric names", () => {
@@ -68,21 +77,29 @@ describe("ensureWorkspaceDir", () => {
     await expect(ensureWorkspaceDir("../evil")).rejects.toThrow();
   });
 
-  test("writes a CLAUDE.md pointer that imports the servant-root CLAUDE.md and GOAL.md", async () => {
+  // The workspace CLAUDE.md imports the conventions doc + GOAL.md, then INLINES the
+  // knowledge index (no @-import of the external knowledge store, which would trigger
+  // Claude Code's external-import trust prompt on every spawn).
+  const expectBaseClaudeMd = (body: string) => {
+    expect(body.startsWith("@../../CLAUDE.md\n@GOAL.md\n")).toBe(true);
+    expect(body).toContain("# Servant knowledge");
+    expect(body).toContain("servant recall");
+    expect(body).not.toContain("@../../knowledge"); // never @-import the external store
+  };
+
+  test("writes a CLAUDE.md that imports conventions + GOAL.md and inlines the knowledge index", async () => {
     const name = `claude-md-${process.pid}-${Date.now()}`;
     const dir = await ensureWorkspaceDir(name);
-    const body = await readFile(join(dir, "CLAUDE.md"), "utf8");
-    expect(body).toBe("@../../CLAUDE.md\n@GOAL.md\n");
+    expectBaseClaudeMd(await readFile(join(dir, "CLAUDE.md"), "utf8"));
   });
 
-  test("upgrades an old single-import CLAUDE.md pointer to also import GOAL.md", async () => {
+  test("upgrades an old single-import CLAUDE.md pointer", async () => {
     const name = `claude-md-upgrade-${process.pid}-${Date.now()}`;
     const dir = await ensureWorkspaceDir(name);
     const path = join(dir, "CLAUDE.md");
     await writeFile(path, "@../../CLAUDE.md\n");
     await ensureWorkspaceDir(name);
-    const body = await readFile(path, "utf8");
-    expect(body).toBe("@../../CLAUDE.md\n@GOAL.md\n");
+    expectBaseClaudeMd(await readFile(path, "utf8"));
   });
 
   test("restores the CLAUDE.md pointer if it has been tampered with", async () => {
@@ -91,8 +108,51 @@ describe("ensureWorkspaceDir", () => {
     const path = join(dir, "CLAUDE.md");
     await writeFile(path, "tampered");
     await ensureWorkspaceDir(name);
-    const body = await readFile(path, "utf8");
-    expect(body).toBe("@../../CLAUDE.md\n@GOAL.md\n");
+    expectBaseClaudeMd(await readFile(path, "utf8"));
+  });
+
+  test("scaffolds a per-workspace .claude/settings.json with the SessionEnd extraction hook", async () => {
+    const name = `settings-${process.pid}-${Date.now()}`;
+    const dir = await ensureWorkspaceDir(name);
+    const settings = JSON.parse(await readFile(join(dir, ".claude", "settings.json"), "utf8"));
+    const hook = settings.hooks?.SessionEnd?.[0]?.hooks?.[0];
+    expect(hook?.command).toBe("servant extract-memories --from-hook");
+    expect(hook?.type).toBe("command");
+  });
+
+  test("merges the hook into existing workspace settings without clobbering other keys", async () => {
+    const name = `settings-merge-${process.pid}-${Date.now()}`;
+    const dir = await ensureWorkspaceDir(name);
+    const path = join(dir, ".claude", "settings.json");
+    await writeFile(path, JSON.stringify({ model: "opus", hooks: { Stop: [] } }));
+    await ensureWorkspaceDir(name); // re-scaffold
+    const settings = JSON.parse(await readFile(path, "utf8"));
+    expect(settings.model).toBe("opus"); // preserved
+    expect(settings.hooks.Stop).toEqual([]); // preserved
+    expect(settings.hooks.SessionEnd[0].hooks[0].command).toBe(
+      "servant extract-memories --from-hook",
+    );
+  });
+
+  test("inlines a per-repo knowledge section for each mounted repo and creates its store index", async () => {
+    const name = `claude-md-repos-${process.pid}-${Date.now()}`;
+    await ensureWorkspaceDir(name);
+    // Simulate two mounted worktrees (api-gw on two branches → one repo) plus web.
+    const repos = workspacePath(name);
+    await mkdir(join(repos, "repos", "api-gw__feat-a"), { recursive: true });
+    await mkdir(join(repos, "repos", "api-gw__feat-b"), { recursive: true });
+    await mkdir(join(repos, "repos", "web__main"), { recursive: true });
+
+    expect(await mountedRepoSubdirs(name)).toEqual(["api-gw", "web"]);
+
+    await syncWorkspaceClaudeMd(name);
+    const body = await readFile(join(repos, "CLAUDE.md"), "utf8");
+    expect(body).not.toContain("@../../knowledge"); // inlined, not imported
+    expect(body).toContain("## api-gw (project knowledge)");
+    expect(body).toContain("## web (project knowledge)");
+    // Per-repo indexes were still created in the store (for recall / browsing).
+    expect(await readFile(knowledgeProjectIndexPath("api-gw"), "utf8")).toContain("# api-gw");
+    expect(await readFile(knowledgeProjectIndexPath("web"), "utf8")).toContain("# web");
   });
 
   test("scaffolds an intent-only GOAL.md placeholder with the unfilled marker", async () => {

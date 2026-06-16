@@ -4,7 +4,7 @@ import { resolve } from "node:path";
 import { defineCommand } from "citty";
 import { removeWorktree, repoCommonDir } from "../../core/git.ts";
 import { applyRootOverride } from "../../core/paths.ts";
-import { resolveWorkspaceName } from "../../core/workspace.ts";
+import { resolveWorkspaceName, syncWorkspaceClaudeMd } from "../../core/workspace.ts";
 import { worktreePath } from "../../core/worktree-naming.ts";
 
 function parseTarget(spec: string): { repo: string; branch: string } {
@@ -63,6 +63,11 @@ export const repoRmCommand = defineCommand({
     if (existsSync(targetPath)) {
       await rm(targetPath, { recursive: true, force: true });
     }
+
+    // Drop the @-reference from the workspace CLAUDE.md if no worktrees of this repo
+    // remain. The knowledge itself persists in the store — it's keyed by repo, not
+    // by the worktree — so it reattaches the next time the repo is mounted anywhere.
+    await syncWorkspaceClaudeMd(workspace);
 
     console.log(`servant: removed worktree ${targetPath}`);
   },

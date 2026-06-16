@@ -1,12 +1,29 @@
 import { existsSync } from "node:fs";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { dirname, join, relative, resolve, sep } from "node:path";
+import { ensureProjectIndex, renderWorkspaceKnowledgeSection } from "./knowledge.ts";
 import { workspacePath, workspacesRoot } from "./paths.ts";
+import { parseWorktreeDirName, reposRoot } from "./worktree-naming.ts";
 
-// Imports the servant-root CLAUDE.md (workspace conventions) plus the workspace's
-// own GOAL.md (its intent / north star) so Claude Code auto-loads both every session
-// without needing parent-dir traversal to reach `~/.ai_servant/CLAUDE.md`.
-const WORKSPACE_CLAUDE_MD = "@../../CLAUDE.md\n@GOAL.md\n";
+// Imports at the top of a workspace's CLAUDE.md: the servant-root conventions doc and the
+// workspace's own GOAL.md. Both are auto-loaded every session. We do NOT @-import the
+// knowledge store (`~/.ai_servant/knowledge/*`) — those files are outside the workspace
+// cwd and Claude Code gates external imports behind a per-spawn trust prompt. Instead the
+// knowledge index is inlined into the body below (see renderWorkspaceKnowledgeSection).
+const WORKSPACE_CLAUDE_MD_BASE = ["@../../CLAUDE.md", "@GOAL.md"];
+
+// SessionEnd hook that enqueues a knowledge-extraction job when a servant session ends.
+// It MUST live in the workspace's own `.claude/settings.json`: Claude Code discovers
+// slash commands by walking up the directory tree (so they resolve from the servant
+// root) but it does NOT discover settings.json that far up — it only reads the project
+// cwd's `.claude/settings.json`. `servant spawn` launches the agent with cwd = the
+// workspace dir, so scaffolding the hook here is what makes it fire. (Verified 2026-06-16:
+// an upward `~/.ai_servant/.claude/settings.json` does not fire; a per-workspace one does.)
+const SESSION_END_HOOK = {
+  type: "command",
+  command: "servant extract-memories --from-hook",
+  timeout: 15,
+};
 
 // Marker embedded in the placeholder GOAL.md. Its presence means the workspace's
 // goal has not been defined yet; `/servant:goal` removes it once the user approves a goal.
@@ -70,22 +87,89 @@ export async function ensureWorkspaceDir(name: string): Promise<string> {
   assertValidWorkspaceName(name);
   const dir = workspacePath(name);
   await mkdir(dir, { recursive: true });
-  const claudeMdPath = join(dir, "CLAUDE.md");
+  for (const [rel, body] of SCAFFOLD_FILES) {
+    const full = join(dir, rel);
+    await mkdir(dirname(full), { recursive: true });
+    await writeIfMissing(full, body);
+  }
+  await ensureWorkspaceSettings(dir);
+  await syncWorkspaceClaudeMd(name);
+  return dir;
+}
+
+/**
+ * Ensure the workspace's `.claude/settings.json` carries the SessionEnd extraction hook.
+ * Merges the hook into any existing settings (preserving other keys / hook events) and is
+ * idempotent — only rewrites when the content actually changes.
+ */
+export async function ensureWorkspaceSettings(workspaceDir: string): Promise<void> {
+  const path = join(workspaceDir, ".claude", "settings.json");
+  let settings: Record<string, unknown> = {};
+  let existing: string | null = null;
+  try {
+    existing = await readFile(path, "utf8");
+    const parsed = JSON.parse(existing);
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      settings = parsed as Record<string, unknown>;
+    }
+  } catch {
+    // missing or unparseable — start fresh
+  }
+  const hooks =
+    settings.hooks && typeof settings.hooks === "object" && !Array.isArray(settings.hooks)
+      ? (settings.hooks as Record<string, unknown>)
+      : {};
+  hooks.SessionEnd = [{ hooks: [SESSION_END_HOOK] }];
+  settings.hooks = hooks;
+  const desired = `${JSON.stringify(settings, null, 2)}\n`;
+  if (existing === desired) return;
+  await mkdir(dirname(path), { recursive: true });
+  await writeFile(path, desired);
+}
+
+/** Unique repo subdirs mounted under the workspace's repos/ (the worktree-naming segment). */
+export async function mountedRepoSubdirs(workspace: string): Promise<string[]> {
+  const root = reposRoot(workspace);
+  if (!existsSync(root)) return [];
+  let entries: string[];
+  try {
+    entries = await readdir(root);
+  } catch {
+    return [];
+  }
+  const subdirs = new Set<string>();
+  for (const entry of entries) {
+    const parsed = parseWorktreeDirName(entry);
+    if (parsed) subdirs.add(parsed.repoSubdir);
+  }
+  return [...subdirs].sort();
+}
+
+async function buildWorkspaceClaudeMd(repoSubdirs: readonly string[]): Promise<string> {
+  const header = `${WORKSPACE_CLAUDE_MD_BASE.join("\n")}\n`;
+  const knowledge = await renderWorkspaceKnowledgeSection(repoSubdirs);
+  return `${header}\n${knowledge}`;
+}
+
+/**
+ * Rewrite the workspace CLAUDE.md: the base imports (servant-root conventions + GOAL.md)
+ * followed by the inlined knowledge index — the topic tag directory plus a per-repo note
+ * list for every mounted repo. Creates any missing per-repo index in the store so project
+ * knowledge follows the repo. Inlined (not @-imported) to avoid Claude Code's external-
+ * import trust prompt. Idempotent — safe to call on every spawn / repo add / repo rm.
+ */
+export async function syncWorkspaceClaudeMd(workspace: string): Promise<void> {
+  const repoSubdirs = await mountedRepoSubdirs(workspace);
+  for (const repo of repoSubdirs) await ensureProjectIndex(repo);
+  const claudeMdPath = join(workspacePath(workspace), "CLAUDE.md");
+  const desired = await buildWorkspaceClaudeMd(repoSubdirs);
   let existing: string | null = null;
   try {
     existing = await readFile(claudeMdPath, "utf8");
   } catch {
     // missing, will write
   }
-  if (existing !== WORKSPACE_CLAUDE_MD) {
-    await writeFile(claudeMdPath, WORKSPACE_CLAUDE_MD);
-  }
-  for (const [rel, body] of SCAFFOLD_FILES) {
-    const full = join(dir, rel);
-    await mkdir(dirname(full), { recursive: true });
-    await writeIfMissing(full, body);
-  }
-  return dir;
+  if (existing !== desired) await writeFile(claudeMdPath, desired);
 }
 
 // True when the workspace's goal has not been defined yet (GOAL.md still carries the

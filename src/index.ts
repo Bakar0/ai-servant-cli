@@ -1,6 +1,9 @@
 #!/usr/bin/env bun
 import { defineCommand, runMain } from "citty";
+import { extractMemoriesCommand } from "./commands/extract-memories.ts";
 import { initCommand } from "./commands/init.ts";
+import { memoriesCommand } from "./commands/memories.ts";
+import { recallCommand } from "./commands/recall.ts";
 import { repoCommand } from "./commands/repo/index.ts";
 import { resumeCommand } from "./commands/resume.ts";
 import { spawnCommand } from "./commands/spawn.ts";
@@ -17,6 +20,9 @@ const main = defineCommand({
     spawn: spawnCommand,
     repo: repoCommand,
     resume: resumeCommand,
+    recall: recallCommand,
+    memories: memoriesCommand,
+    "extract-memories": extractMemoriesCommand,
     statusline: statuslineCommand,
   },
 });

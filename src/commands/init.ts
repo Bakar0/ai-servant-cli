@@ -65,7 +65,9 @@ export async function runInit(opts: InitOpts = {}): Promise<void> {
 
   // --- Deterministic assets (CLI-owned; self-heal on every spawn/resume too). ---
   await ensureServantAssets();
-  out.write("servant: synced workspace assets (CLAUDE.md, /servant:goal, /servant:delegate)\n");
+  out.write(
+    "servant: synced workspace assets (CLAUDE.md, /servant:goal, /servant:delegate, /servant:recall, /servant:extract-memories, knowledge SessionEnd hook)\n",
+  );
 
   // --- Status line (offered, with a preview). ---
   if (interactive) {

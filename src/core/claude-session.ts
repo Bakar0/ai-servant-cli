@@ -100,6 +100,17 @@ function extractTextFromContent(content: unknown): string | null {
   return parts.length > 0 ? parts.join("\n") : null;
 }
 
+/** Count parseable JSONL records in a transcript — the unit the extraction turn marker advances over. */
+export async function countTranscriptEntries(jsonlPath: string): Promise<number> {
+  let n = 0;
+  try {
+    for await (const _ of readJsonlLines(jsonlPath)) n += 1;
+  } catch {
+    return 0;
+  }
+  return n;
+}
+
 export async function readLaunchCwd(jsonlPath: string): Promise<string | null> {
   for await (const entry of readJsonlLines(jsonlPath)) {
     const rec = entry as TurnRecord;

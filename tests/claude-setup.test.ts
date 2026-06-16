@@ -86,6 +86,14 @@ describe("ensureServantAssets", () => {
     expect(await Bun.file(join(commands, "servant", "delegate.md")).exists()).toBe(true);
   });
 
+  test("ships the recall and extract-memories slash commands", async () => {
+    await ensureServantAssets();
+    const recall = join(claudeCommandsDir(), "servant", "recall.md");
+    const extract = join(claudeCommandsDir(), "servant", "extract-memories.md");
+    expect(await readFile(recall, "utf8")).toContain("/servant:recall");
+    expect(await readFile(extract, "utf8")).toContain("--reconcile");
+  });
+
   test("places .claude/ as a sibling of workspaces/ under the servant root", async () => {
     await ensureServantAssets();
     expect(claudeDir()).toBe(join(tmpRoot, ".claude"));

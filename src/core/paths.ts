@@ -38,8 +38,57 @@ export function configPath(): string {
   return join(aiServantRoot(), "config.json");
 }
 
+export function cacheDir(): string {
+  return join(aiServantRoot(), ".cache");
+}
+
 export function discoveryCachePath(): string {
-  return join(aiServantRoot(), ".cache", "repo-discovery.json");
+  return join(cacheDir(), "repo-discovery.json");
+}
+
+/** Durable, git-tracked knowledge store, sibling to workspaces/. */
+export function knowledgeRoot(): string {
+  return join(aiServantRoot(), "knowledge");
+}
+
+export function knowledgeIndexPath(): string {
+  return join(knowledgeRoot(), "INDEX.md");
+}
+
+export function knowledgeProjectsDir(): string {
+  return join(knowledgeRoot(), "projects");
+}
+
+export function knowledgeProjectDir(repo: string): string {
+  return join(knowledgeProjectsDir(), repo);
+}
+
+export function knowledgeProjectIndexPath(repo: string): string {
+  return join(knowledgeProjectDir(repo), "INDEX.md");
+}
+
+export function knowledgeTopicsDir(): string {
+  return join(knowledgeRoot(), "topics");
+}
+
+/** Queue of pending session-end extraction jobs (one JSON object per line). */
+export function extractQueuePath(): string {
+  return join(cacheDir(), "extract-queue.jsonl");
+}
+
+/** Lockfile guaranteeing only one drainer runs at a time. */
+export function extractLockPath(): string {
+  return join(cacheDir(), "extract-queue.lock");
+}
+
+/** Per-session "extracted up to turn N" markers (incremental extraction). */
+export function extractMarkersPath(): string {
+  return join(cacheDir(), "extract-markers.json");
+}
+
+/** Last drainer run status (for the `servant memories` digest). */
+export function extractStatusPath(): string {
+  return join(cacheDir(), "extract-status.json");
 }
 
 export function claudeDir(): string {

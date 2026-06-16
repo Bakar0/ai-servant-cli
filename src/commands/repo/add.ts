@@ -9,9 +9,14 @@ import {
   localBranchExists,
   remoteBranchExists,
 } from "../../core/git.ts";
+import { commitKnowledge } from "../../core/knowledge.ts";
 import { applyRootOverride } from "../../core/paths.ts";
 import { type DiscoveredRepo, discoverRepos } from "../../core/repo-discovery.ts";
-import { ensureWorkspaceDir, resolveWorkspaceName } from "../../core/workspace.ts";
+import {
+  ensureWorkspaceDir,
+  resolveWorkspaceName,
+  syncWorkspaceClaudeMd,
+} from "../../core/workspace.ts";
 import {
   generateBranchName,
   parseWorktreeDirName,
@@ -271,6 +276,11 @@ export async function addReposInteractive(opts: AddReposOptions): Promise<void> 
     console.log(`servant: created worktree at ${targetPath}`);
     console.log(`  cd ${targetPath}`);
   }
+
+  // Wire project knowledge for the newly mounted repos: ensure a per-repo index exists
+  // and @-reference it from the workspace CLAUDE.md, then commit any scaffold changes.
+  await syncWorkspaceClaudeMd(workspace);
+  await commitKnowledge("memory: scaffold project indexes");
 }
 
 async function collectExistingBranches(
