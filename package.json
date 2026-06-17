@@ -4,6 +4,7 @@
   "description": "AI servant CLI — enhances developer and coding-agent workflows.",
   "type": "module",
   "private": true,
+  "license": "MIT",
   "bin": {
     "servant": "./src/index.ts"
   },
