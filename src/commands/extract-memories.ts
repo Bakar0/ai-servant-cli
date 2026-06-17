@@ -136,7 +136,7 @@ const defaultRunner: ExtractionRunner = async (job, prompt) => {
   }
   // The prompt asks the agent to end with a one-line summary ("added/updated N notes").
   const out = (await new Response(proc.stdout).text()).trim();
-  const lastLine = out.split("\n").filter(Boolean).pop() ?? "";
+  const lastLine = out.split("\n").findLast(Boolean) ?? "";
   return lastLine.slice(0, 200);
 };
 

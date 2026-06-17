@@ -55,14 +55,14 @@ function coerce(raw: unknown): Config {
 }
 
 export async function configExists(): Promise<boolean> {
-  return await Bun.file(configPath()).exists();
+  return Bun.file(configPath()).exists();
 }
 
 export async function loadConfig(): Promise<Config> {
   const file = Bun.file(configPath());
   if (!(await file.exists())) return defaultConfig();
   try {
-    const raw = await file.json();
+    const raw: unknown = await file.json();
     return coerce(raw);
   } catch {
     return defaultConfig();

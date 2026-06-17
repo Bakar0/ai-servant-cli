@@ -33,7 +33,7 @@ export const itermDriver: TerminalDriver = {
       stdout: "pipe",
       stderr: "pipe",
     });
-    proc.stdin.write(script);
+    void proc.stdin.write(script);
     await proc.stdin.end();
     const exitCode = await proc.exited;
     if (exitCode !== 0) {

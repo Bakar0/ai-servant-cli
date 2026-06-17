@@ -2,7 +2,6 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, realpath, rm, stat, utimes } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { $ } from "bun";
 import { setRootOverride } from "../src/core/paths.ts";
 
 let scratch: string;
@@ -44,7 +43,7 @@ afterAll(async () => {
 const { discoverRepos } = await import("../src/core/repo-discovery.ts");
 
 function names(repos: { name: string }[]): string[] {
-  return repos.map((r) => r.name).sort();
+  return repos.map((r) => r.name).toSorted();
 }
 
 describe("discoverRepos", () => {

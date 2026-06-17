@@ -153,7 +153,7 @@ export function parseNote(text: string): KnowledgeNote {
 
 // --- Store lifecycle ---
 
-async function gitInitialized(): Promise<boolean> {
+function gitInitialized(): boolean {
   return existsSync(join(knowledgeRoot(), ".git"));
 }
 
@@ -161,7 +161,7 @@ async function gitInitialized(): Promise<boolean> {
 export async function ensureKnowledgeStore(): Promise<void> {
   await mkdir(knowledgeProjectsDir(), { recursive: true });
   await mkdir(knowledgeTopicsDir(), { recursive: true });
-  if (!(await gitInitialized())) {
+  if (!gitInitialized()) {
     await $`git -C ${knowledgeRoot()} init -q`.nothrow().quiet();
   }
   if (!existsSync(knowledgeIndexPath())) {
@@ -176,7 +176,7 @@ const GIT_IDENTITY = ["-c", "user.name=servant", "-c", "user.email=servant@local
 /** Stage everything under knowledge/ and commit. No-op if nothing changed. */
 export async function commitKnowledge(message: string): Promise<void> {
   const root = knowledgeRoot();
-  if (!(await gitInitialized())) return;
+  if (!gitInitialized()) return;
   await $`git -C ${root} add -A`.nothrow().quiet();
   const status = await $`git -C ${root} status --porcelain`.nothrow().quiet();
   if (status.stdout.toString().trim() === "") return;
@@ -223,7 +223,7 @@ export async function listProjectRepos(): Promise<string[]> {
   return entries
     .filter((e) => e.isDirectory())
     .map((e) => e.name)
-    .sort();
+    .toSorted();
 }
 
 export async function readProjectNotes(repo: string): Promise<KnowledgeNote[]> {
@@ -255,7 +255,7 @@ function indexLine(note: KnowledgeNote): string {
 /** Rebuild projects/<repo>/INDEX.md from the notes on disk. Creates an empty index too. */
 export async function rebuildProjectIndex(repo: string): Promise<void> {
   await mkdir(knowledgeProjectDir(repo), { recursive: true });
-  const notes = (await readProjectNotes(repo)).sort((a, b) => a.name.localeCompare(b.name));
+  const notes = (await readProjectNotes(repo)).toSorted((a, b) => a.name.localeCompare(b.name));
   const lines = [`# ${repo}`, ""];
   if (notes.length === 0) {
     lines.push("_No notes yet._");
@@ -287,7 +287,7 @@ export async function topicTagCounts(): Promise<TagCount[]> {
   }
   return [...counts.entries()]
     .map(([tag, count]) => ({ tag, count }))
-    .sort((a, b) => b.count - a.count || a.tag.localeCompare(b.tag));
+    .toSorted((a, b) => b.count - a.count || a.tag.localeCompare(b.tag));
 }
 
 /**
@@ -376,7 +376,7 @@ export async function renderWorkspaceKnowledgeSection(repos: readonly string[]):
   }
 
   for (const repo of repos) {
-    const notes = (await readProjectNotes(repo)).sort((a, b) => a.name.localeCompare(b.name));
+    const notes = (await readProjectNotes(repo)).toSorted((a, b) => a.name.localeCompare(b.name));
     lines.push("", `## ${repo} (project knowledge)`);
     if (notes.length === 0) {
       lines.push("_No notes captured yet._");

@@ -103,7 +103,7 @@ export const resumeCommand = defineCommand({
     }
     await ensureServantAssets();
 
-    const newTab = args["new-tab"] === true;
+    const newTab = args["new-tab"];
     if (newTab) {
       const terminalName = args.terminal as string | undefined;
       const driver = terminalName ? getDriver(terminalName) : await detectTerminal();
@@ -134,7 +134,7 @@ async function runClaudeInPlace(
     stdout: "inherit",
     stderr: "inherit",
   });
-  return await proc.exited;
+  return proc.exited;
 }
 
 export function buildResumeCommand(id: string, prompt?: string): string {

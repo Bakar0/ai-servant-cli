@@ -109,7 +109,7 @@ export function lockHeld(): boolean {
 
 async function readMarkers(): Promise<Record<string, number>> {
   try {
-    const parsed = JSON.parse(await readFile(extractMarkersPath(), "utf8"));
+    const parsed: unknown = JSON.parse(await readFile(extractMarkersPath(), "utf8"));
     return parsed && typeof parsed === "object" ? (parsed as Record<string, number>) : {};
   } catch {
     return {};

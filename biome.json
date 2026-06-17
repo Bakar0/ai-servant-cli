@@ -12,7 +12,6 @@
     "formatter": { "quoteStyle": "double", "semicolons": "always", "trailingCommas": "all" }
   },
   "linter": {
-    "enabled": true,
-    "rules": { "recommended": true }
+    "enabled": false
   }
 }

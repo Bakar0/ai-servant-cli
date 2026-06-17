@@ -110,7 +110,7 @@ export async function getCurrentCmuxWorkspaceTitle(): Promise<string | null> {
   if (result.exitCode !== 0) return null;
   let parsed: { workspaces?: Array<{ ref: string; title: string }> };
   try {
-    parsed = JSON.parse(result.stdout);
+    parsed = JSON.parse(result.stdout) as { workspaces?: Array<{ ref: string; title: string }> };
   } catch {
     return null;
   }

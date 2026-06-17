@@ -142,7 +142,7 @@ describe("listAllNotes + display helpers", () => {
     await upsertNote(topicNote());
     await upsertNote(topicNote({ name: "auth", scope: "project/api-gw", tags: [] }));
     const all = await listAllNotes();
-    expect(all.map((s) => s.note.name).sort()).toEqual(["auth", "wal-gotcha"]);
+    expect(all.map((s) => s.note.name).toSorted()).toEqual(["auth", "wal-gotcha"]);
     expect(all.every((s) => s.path.endsWith(".md"))).toBe(true);
   });
 
@@ -173,7 +173,7 @@ describe("searchNotes", () => {
     await upsertNote(topicNote({ name: "auth", scope: "project/api-gw", tags: [], body: "jwt" }));
     await upsertNote(topicNote({ name: "topic-jwt", body: "jwt rotation" }));
     const hits = await searchNotes("jwt");
-    expect(hits.map((h) => h.note.name).sort()).toEqual(["auth", "topic-jwt"]);
+    expect(hits.map((h) => h.note.name).toSorted()).toEqual(["auth", "topic-jwt"]);
   });
 
   test("no match returns empty", async () => {

@@ -173,7 +173,7 @@ export const fineTuneCommand = defineCommand({
     }
     if (args.set) {
       const body = args["body-file"]
-        ? await readFile(args["body-file"] as string, "utf8")
+        ? await readFile(args["body-file"], "utf8")
         : await Bun.stdin.text();
       const path = await writeOverlay(aspect, body);
       await ensureServantAssets();

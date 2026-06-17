@@ -80,7 +80,7 @@ async function pickWithFzf<T>(
       stdout: "pipe",
       stderr: "inherit",
     });
-    proc.stdin.write(lines.join("\n"));
+    void proc.stdin.write(lines.join("\n"));
     await proc.stdin.end();
 
     const out = await new Response(proc.stdout).text();

@@ -102,8 +102,8 @@ async function currentRootMtimes(roots: string[]): Promise<Record<string, number
 }
 
 function mtimesEqual(a: Record<string, number>, b: Record<string, number>): boolean {
-  const ka = Object.keys(a).sort();
-  const kb = Object.keys(b).sort();
+  const ka = Object.keys(a).toSorted();
+  const kb = Object.keys(b).toSorted();
   if (ka.length !== kb.length) return false;
   for (let i = 0; i < ka.length; i++) {
     if (ka[i] !== kb[i]) return false;

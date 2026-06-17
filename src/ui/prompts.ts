@@ -3,7 +3,7 @@ import { createInterface } from "node:readline";
 export function readLine(input: NodeJS.ReadableStream): Promise<string> {
   return new Promise((resolve) => {
     // terminal:false disables tty handling — the prompt is already written by the caller.
-    const rl = createInterface({ input: input as NodeJS.ReadableStream, terminal: false });
+    const rl = createInterface({ input: input, terminal: false });
     let resolved = false;
     const done = (s: string) => {
       if (resolved) return;

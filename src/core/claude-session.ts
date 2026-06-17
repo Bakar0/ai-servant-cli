@@ -34,7 +34,7 @@ export function claudeProjectsRoot(): string {
 }
 
 export function encodeProjectDir(cwd: string): string {
-  return cwd.replace(/[\/._]/g, "-");
+  return cwd.replace(/[/._]/g, "-");
 }
 
 async function* listProjectDirs(): AsyncGenerator<string> {
@@ -64,7 +64,7 @@ export async function findSessionJsonl(sessionId: string): Promise<string | null
   return null;
 }
 
-async function* readJsonlLines(path: string): AsyncGenerator<unknown> {
+async function* readJsonlLines(path: string): AsyncGenerator {
   const file = Bun.file(path);
   const text = await file.text();
   for (const line of text.split("\n")) {

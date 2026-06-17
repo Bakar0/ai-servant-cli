@@ -15,7 +15,7 @@ async function readJsonObject(path: string): Promise<Record<string, unknown>> {
     parsed = JSON.parse(raw);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    throw new Error(`Failed to parse ${path}: ${msg}`);
+    throw new Error(`Failed to parse ${path}: ${msg}`, { cause: err });
   }
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
     throw new Error(`${path} is not a JSON object.`);

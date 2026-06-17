@@ -108,7 +108,7 @@ export async function ensureWorkspaceSettings(workspaceDir: string): Promise<voi
   let existing: string | null = null;
   try {
     existing = await readFile(path, "utf8");
-    const parsed = JSON.parse(existing);
+    const parsed: unknown = JSON.parse(existing);
     if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
       settings = parsed as Record<string, unknown>;
     }
@@ -142,7 +142,7 @@ export async function mountedRepoSubdirs(workspace: string): Promise<string[]> {
     const parsed = parseWorktreeDirName(entry);
     if (parsed) subdirs.add(parsed.repoSubdir);
   }
-  return [...subdirs].sort();
+  return [...subdirs].toSorted();
 }
 
 async function buildWorkspaceClaudeMd(repoSubdirs: readonly string[]): Promise<string> {

@@ -45,7 +45,7 @@ export async function pickSession(opts: PickSessionOpts = {}): Promise<string | 
       stderr: "inherit",
     },
   );
-  proc.stdin.write(lines.join("\n"));
+  void proc.stdin.write(lines.join("\n"));
   await proc.stdin.end();
   const out = await new Response(proc.stdout).text();
   const code = await proc.exited;
