@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, realpath, rm, stat, utimes } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm, utimes } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setRootOverride } from "../src/core/paths.ts";
@@ -71,13 +71,19 @@ describe("discoverRepos", () => {
   });
 
   test("returns cached results when root mtimes are unchanged", async () => {
+    // Pin codeRoot's mtime to a fixed, whole-millisecond value before caching so
+    // it round-trips exactly. The cache compares sub-millisecond mtimeMs, but
+    // utimes via a Date truncates to whole ms — on filesystems with sub-ms
+    // resolution (Linux ext4) reading back a non-pinned mtime would differ and
+    // spuriously invalidate the cache.
+    const pinned = new Date(1_700_000_000_000);
+    await utimes(codeRoot, pinned, pinned);
     await discoverRepos(config, { refresh: true });
-    const cachedMtime = (await stat(codeRoot)).mtime;
 
     // Add a new repo (mutates codeRoot mtime), then reset codeRoot mtime to match cache.
     const sneaked = join(codeRoot, "sneaky-subdir-x", "gamma");
     await makeFakeRepo(sneaked);
-    await utimes(codeRoot, cachedMtime, cachedMtime);
+    await utimes(codeRoot, pinned, pinned);
 
     const repos = await discoverRepos(config);
     expect(names(repos)).toEqual(["alpha", "beta", "dupe", "dupe"]);
