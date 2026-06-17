@@ -27,9 +27,9 @@ servant fine-tune                       # customize the agent instructions serva
 - [Requirements](#requirements)
 - [Installation](#installation) — including making `servant` available everywhere
 - [Quick start](#quick-start)
+- [How it works](#how-it-works)
 - [Commands](#commands)
 - [In-session slash commands](#in-session-slash-commands)
-- [How it works](#how-it-works)
 - [Configuration](#configuration)
 - [The fzf picker](#the-fzf-picker)
 - [Development](#development)
@@ -108,6 +108,28 @@ servant spawn -w add-rate-limiter -r
 # 3. Later, jump back into a previous session (fzf picker over history)
 servant resume
 ```
+
+---
+
+## How it works
+
+Everything servant manages lives under a single root, `~/.ai_servant/`:
+
+```
+~/.ai_servant/
+├── config.json                  # repo search roots, scan depth
+├── .cache/repo-discovery.json   # cached repo discovery
+├── knowledge/                   # captured memories (git-tracked store)
+└── workspaces/<workspace>/
+    ├── .claude/                 # synced CLAUDE.md, /servant:* commands, hooks
+    └── repos/<repo>__<branch>/  # git worktree of your local clone
+```
+
+- A **workspace** is a self-contained folder for one task. The coding agent runs there with its own `CLAUDE.md` and slash commands.
+- **Worktrees** use a flat `repos/<repo>__<branch>/` layout — multiple repos per workspace, each a real `git worktree` of your existing local clone (your original checkout is untouched).
+- **Assets are CLI-owned and self-healing**: they're re-synced on every `spawn`/`resume`, so updating servant updates every workspace's instructions automatically. Your `fine-tune` overlays are layered on top and preserved.
+
+> Override the root on any command with `--root <path>` — handy for throwaway or test setups.
 
 ---
 
@@ -213,28 +235,6 @@ Every workspace ships with a set of `/servant:*` slash commands for Claude Code 
 | `/servant:fine-tune` | Interview you to customize a servant instruction aspect, then write the overlay via the CLI. |
 
 These stay in sync automatically — they're re-synced on every `spawn`/`resume`, so updating servant updates the commands in every workspace.
-
----
-
-## How it works
-
-Everything servant manages lives under a single root, `~/.ai_servant/`:
-
-```
-~/.ai_servant/
-├── config.json                  # repo search roots, scan depth
-├── .cache/repo-discovery.json   # cached repo discovery
-├── knowledge/                   # captured memories (git-tracked store)
-└── workspaces/<workspace>/
-    ├── .claude/                 # synced CLAUDE.md, /servant:* commands, hooks
-    └── repos/<repo>__<branch>/  # git worktree of your local clone
-```
-
-- A **workspace** is a self-contained folder for one task. The coding agent runs there with its own `CLAUDE.md` and slash commands.
-- **Worktrees** use a flat `repos/<repo>__<branch>/` layout — multiple repos per workspace, each a real `git worktree` of your existing local clone (your original checkout is untouched).
-- **Assets are CLI-owned and self-healing**: they're re-synced on every `spawn`/`resume`, so updating servant updates every workspace's instructions automatically. Your `fine-tune` overlays are layered on top and preserved.
-
-> Override the root on any command with `--root <path>` — handy for throwaway or test setups.
 
 ---
 
