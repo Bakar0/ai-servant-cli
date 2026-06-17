@@ -1,0 +1,6 @@
+# Code owners for ai-servant-cli.
+# Owners are auto-requested for review on any PR touching matching paths.
+# See: https://docs.github.com/articles/about-code-owners
+
+# Default owner for everything in the repo.
+* @Bakar0
