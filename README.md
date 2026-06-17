@@ -1,59 +1,282 @@
-# ai-servant-cli
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/logo.png"">
+    <img src="assets/logo.png" alt="servant" width="440">
+  </picture>
+</p>
 
-CLI that enhances developer and coding-agent workflows.
+<p align="center">
+  <em>A CLI that enhances developer and coding-agent workflows — spin up isolated agent workspaces, manage git worktrees, and grow a knowledge base your agents learn from.</em>
+</p>
+
+---
+
+`servant` gives every task its own workspace: a dedicated folder, git worktrees of the repos you're working in, and a coding agent (Claude Code) launched in a fresh terminal tab. Sessions are resumable, and durable knowledge is captured automatically so your agents get smarter over time.
 
 ```bash
+servant spawn -w add-rate-limiter -r    # -w names the workspace; -r picks repos + adds worktrees
+servant repo add                        # interactively add another repo's worktree (picker)
+servant memories                        # browse what past sessions learned (fzf)
+servant fine-tune                       # customize the agent instructions servant ships
+```
+
+---
+
+## Contents
+
+- [Requirements](#requirements)
+- [Installation](#installation) — including making `servant` available everywhere
+- [Quick start](#quick-start)
+- [Commands](#commands)
+- [In-session slash commands](#in-session-slash-commands)
+- [How it works](#how-it-works)
+- [Configuration](#configuration)
+- [The fzf picker](#the-fzf-picker)
+- [Development](#development)
+
+---
+
+## Requirements
+
+| Tool | Why | Install |
+|------|-----|---------|
+| [Bun](https://bun.sh) ≥ 1.3 | Runtime — `servant` runs directly from TypeScript | `curl -fsSL https://bun.sh/install \| bash` |
+| [Claude Code](https://claude.com/claude-code) | The default coding agent that gets launched | `npm i -g @anthropic-ai/claude-code` |
+| [fzf](https://github.com/junegunn/fzf) | Interactive repo/session/memory pickers (optional — there's a numbered fallback) | `brew install fzf` |
+| [cmux](https://github.com/manaflow-ai/cmux) or iTerm | Terminal that hosts the agent tabs (auto-detected) | — |
+
+---
+
+## Installation
+
+```bash
+git clone <repo-url> ai-servant-cli
+cd ai-servant-cli
 bun install
 ```
 
-## Layout
+### Make `servant` available everywhere
 
-```
-~/.ai_servant/
-├── config.json                 search roots, scan depth
-├── .cache/repo-discovery.json  cached repo discovery
-└── workspaces/<workspace>/
-    └── repos/<repo>/<branch>/  git worktree of your local clone
+`servant` is the package's `bin`. Run `bun link` **once** from the project directory and Bun creates a global symlink for the `servant` binary:
+
+```bash
+bun link
 ```
 
-Override the root with `--root <path>` on any command (handy for throwaway/test setups).
+This symlinks `~/.bun/bin/servant` → this project, so the command works from any directory and always tracks your latest local code (it runs the source directly — no rebuild needed after edits).
+
+Make sure Bun's global bin directory is on your `PATH` (the Bun installer normally adds this):
+
+```bash
+# in ~/.zshrc or ~/.bashrc
+export PATH="$HOME/.bun/bin:$PATH"
+```
+
+Verify:
+
+```bash
+which servant      # → ~/.bun/bin/servant
+servant --help
+```
+
+To remove the global link later: `bun unlink` from the project directory.
+
+### First-time setup
+
+```bash
+servant init
+```
+
+`init` is idempotent and:
+- creates the servant root at `~/.ai_servant/`
+- writes `config.json` (your repo search roots)
+- syncs the bundled agent assets (workspace `CLAUDE.md`, `/servant:*` slash commands, the knowledge-capture hook)
+- offers to install the Claude Code status line
+
+---
+
+## Quick start
+
+```bash
+# 1. One-time setup
+servant init
+
+# 2. Start a task: pick the repos you need, add a worktree of each,
+#    and open an agent tab — all in one step.
+servant spawn -w add-rate-limiter -r
+
+# 3. Later, jump back into a previous session (fzf picker over history)
+servant resume
+
+# 4. Search what your sessions have learned
+servant recall "token bucket"
+```
+
+---
 
 ## Commands
 
+Run any command with `--help` for the full flag list.
+
+| Command | What it does |
+|---------|--------------|
+| `servant init` | One-time, idempotent setup of the servant root, config, and assets. |
+| `servant spawn` | Create/enter a workspace and open a terminal tab running a coding agent. |
+| `servant repo add\|list\|rm` | Manage git worktrees of your local clones inside a workspace. |
+| `servant resume` | Re-attach to a previous Claude Code session. |
+| `servant recall` | Search the knowledge base by tag and content; prints matching notes. |
+| `servant memories` | Browse the knowledge base in an fzf picker. |
+| `servant fine-tune` | Customize servant's instruction assets in a way that survives CLI updates. |
+| `servant statusline` | Install the servant status line into Claude Code. |
+| `servant extract-memories` | (Mostly internal) capture/reconcile durable knowledge from sessions. |
+
+### `servant spawn`
+
+Create a workspace under `~/.ai_servant/workspaces/<name>` and open a new terminal tab running a coding agent in it.
+
 ```bash
-# One-time setup: create ~/.ai_servant, write config.json, sync assets,
-# and optionally install the Claude Code status line. Idempotent.
-servant init
-
-# Open a new terminal tab in a workspace, running a coding agent.
-servant spawn --workspace my-task
-
-# Pick local repo(s) and create a worktree of <branch> for each.
-# Searches the dirs in config.json (default: ~). Edit config.json to narrow.
-servant repo add [repo-hint] --workspace my-task --branch topic/x
-
-servant repo list --workspace my-task
-servant repo rm <repo>@<branch> --workspace my-task
-
-# Re-attach to a previous Claude Code session in the current tab.
-# With no id, opens an fzf picker over this workspace's session history.
-servant resume [session-id] [--prompt "continue"] [--new-tab]
+servant spawn -w my-task                      # open an agent tab in the workspace
+servant spawn -w my-task -r                    # also pick repos + add a worktree per pick first
+servant spawn -w my-task -r --branch topic/x   # use a specific branch name for the worktrees
+servant spawn -w my-task -p "Read brief.md and start"   # deliver a first prompt to the agent
 ```
 
-Run any command with `--help` for full flag list.
+| Flag | Description |
+|------|-------------|
+| `-w, --workspace` | Workspace name. If omitted, auto-detected from cwd or the current cmux workspace. |
+| `-r, --repo` | Before opening the tab, pick local repo(s) and add a worktree per selection (same picker as `repo add`). |
+| `--branch` | With `-r`: override the auto-generated branch name (default `<workspace>-<shortid>`). |
+| `-p, --prompt` | Initial prompt delivered to the agent as its first message. |
+| `--terminal` | `cmux` \| `iterm` (default: auto-detect). |
+| `--agent` | Coding agent to launch (default: `claude-code`). |
 
-## Picker (fzf)
+### `servant repo`
 
-`repo add` opens an [fzf](https://github.com/junegunn/fzf) picker:
+Manage git worktrees of your **local** clones inside a workspace. `repo add` searches the directories in `config.json` (default: your home dir), opens a picker, and creates one worktree per selected repo — all on the same branch.
 
-- Type to filter · ↑/↓ to move · Esc to cancel
-- **Enter** to confirm — with no marks, the highlighted row; with marks, all marked rows
+The common way is to run it **bare** — no arguments needed. The workspace is auto-detected (from your cwd or current cmux workspace), the picker lets you choose the repo(s), and the branch is auto-generated:
+
+```bash
+servant repo add                                 # interactive: pick repo(s), auto branch
+```
+
+You can also pass any of it explicitly:
+
+```bash
+servant repo add api-server                      # pre-filter the picker with a repo hint
+servant repo add -w add-rate-limiter --branch topic/x   # target a workspace + name the branch
+servant repo list                                # list worktrees in the current workspace
+servant repo rm <repo>@<branch>                  # remove one
+```
+
+### `servant resume`
+
+Re-attach to a previous Claude Code session in the current tab. With no id, opens an fzf picker over this workspace's session history.
+
+```bash
+servant resume                          # fzf-pick from history
+servant resume <session-id> --new-tab   # resume a specific session in a new tab
+servant resume --prompt "continue"      # resume with a kickoff prompt
+```
+
+### Knowledge base — `recall` & `memories`
+
+servant captures durable knowledge from your sessions into `~/.ai_servant/knowledge/` (wired via a Claude Code `SessionEnd` hook). Query it anytime:
+
+```bash
+servant recall "auth flow" -n 5    # search by tag + content, print top notes inline
+servant memories                   # browse all notes in an fzf picker
+servant memories --digest          # non-interactive status digest
+```
+
+In-session, agents use the `/servant:recall` and `/servant:extract-memories` slash commands.
+
+### `servant fine-tune`
+
+Customize servant's instruction assets per *aspect*. Run bare for an interactive tuning session, or use flags for the deterministic write path. Customizations are stored as overlays that **survive CLI updates**.
+
+```bash
+servant fine-tune              # interactive session
+servant fine-tune --list       # list tunable aspects and which are customized
+servant fine-tune <aspect> --show
+```
+
+---
+
+## In-session slash commands
+
+Every workspace ships with a set of `/servant:*` slash commands for Claude Code (synced into the workspace's `.claude/commands/`). Use them from inside the agent session:
+
+| Command | What it does |
+|---------|--------------|
+| `/servant:goal` | Interview you to define (or amend) `GOAL.md` — a short statement of what the workspace is for. |
+| `/servant:delegate` | Distill the current session into an Agent Brief and spawn a fresh servant in the same workspace to execute it. |
+| `/servant:recall` | Search the durable knowledge base for what prior servants learned about a project or topic. |
+| `/servant:extract-memories` | Distill durable knowledge from the current session into the knowledge base (projects + topics). |
+| `/servant:fine-tune` | Interview you to customize a servant instruction aspect, then write the overlay via the CLI. |
+
+These stay in sync automatically — they're re-synced on every `spawn`/`resume`, so updating servant updates the commands in every workspace.
+
+---
+
+## How it works
+
+Everything servant manages lives under a single root, `~/.ai_servant/`:
+
+```
+~/.ai_servant/
+├── config.json                  # repo search roots, scan depth
+├── .cache/repo-discovery.json   # cached repo discovery
+├── knowledge/                   # captured memories (git-tracked store)
+└── workspaces/<workspace>/
+    ├── .claude/                 # synced CLAUDE.md, /servant:* commands, hooks
+    └── repos/<repo>__<branch>/  # git worktree of your local clone
+```
+
+- A **workspace** is a self-contained folder for one task. The coding agent runs there with its own `CLAUDE.md` and slash commands.
+- **Worktrees** use a flat `repos/<repo>__<branch>/` layout — multiple repos per workspace, each a real `git worktree` of your existing local clone (your original checkout is untouched).
+- **Assets are CLI-owned and self-healing**: they're re-synced on every `spawn`/`resume`, so updating servant updates every workspace's instructions automatically. Your `fine-tune` overlays are layered on top and preserved.
+
+> Override the root on any command with `--root <path>` — handy for throwaway or test setups.
+
+---
+
+## Configuration
+
+`~/.ai_servant/config.json` (created by `servant init`):
+
+```jsonc
+{
+  "version": 1,
+  "repoSearchRoots": ["~"]   // where `repo add` looks for local git clones
+}
+```
+
+Narrow `repoSearchRoots` to the directories where you actually keep clones to make discovery faster and the picker shorter. Edit the file directly — these values are never prompted for or clobbered on re-run.
+
+---
+
+## The fzf picker
+
+`repo add` (and `spawn -r`) open an [fzf](https://github.com/junegunn/fzf) picker:
+
+- Type to filter · `↑`/`↓` to move · `Esc` to cancel
+- **Enter** confirms — with no marks, the highlighted row; with marks, all marked rows
 - **Tab** toggles a row (multi-select) · **Ctrl-A** toggles all
 
-One worktree is created per selected repo, all on the same `--branch` name.
+One worktree is created per selected repo, all on the same `--branch` name. If fzf isn't installed, you get a numbered fallback (`brew install fzf` to upgrade the experience).
 
-If fzf isn't installed, you'll see a numbered fallback with a hint:
+---
+
+## Development
 
 ```bash
-brew install fzf
+bun install
+bun run dev        # run the CLI from source (src/index.ts)
+bun test           # run the test suite
+bun run typecheck  # tsc --noEmit
+bun run lint       # biome check
+bun run format     # biome format --write
 ```
+
+Because `bun link` points at the source, any edit is live the next time you run `servant` — no build step.
