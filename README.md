@@ -107,9 +107,6 @@ servant spawn -w add-rate-limiter -r
 
 # 3. Later, jump back into a previous session (fzf picker over history)
 servant resume
-
-# 4. Search what your sessions have learned
-servant recall "token bucket"
 ```
 
 ---
