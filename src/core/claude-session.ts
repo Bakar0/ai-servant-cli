@@ -64,7 +64,8 @@ export async function findSessionJsonl(sessionId: string): Promise<string | null
   return null;
 }
 
-async function* readJsonlLines(path: string): AsyncGenerator {
+/** Stream parsed JSONL records from a transcript, skipping blank/malformed lines. */
+export async function* readJsonlLines(path: string): AsyncGenerator {
   const file = Bun.file(path);
   const text = await file.text();
   for (const line of text.split("\n")) {
