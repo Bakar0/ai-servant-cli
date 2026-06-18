@@ -1,6 +1,8 @@
+import { existsSync } from "node:fs";
 import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { dirname, join, relative } from "node:path";
 import { composeAssetForRel, isFineTuneAsset } from "./fine-tune.ts";
+import { appendChange } from "./insights/changes.ts";
 import { aiServantRoot, claudeCommandsDir } from "./paths.ts";
 
 const TEMPLATES_DIR = new URL("../templates/servant_root/", import.meta.url).pathname;
@@ -40,6 +42,7 @@ async function listTemplateFiles(root: string): Promise<string[]> {
 export async function ensureServantAssets(): Promise<void> {
   const target = aiServantRoot();
   const sources = await listTemplateFiles(TEMPLATES_DIR);
+  const changedAssets: string[] = [];
   for (const src of sources) {
     const rel = relative(TEMPLATES_DIR, src);
     const dest = join(target, rel);
@@ -56,8 +59,17 @@ export async function ensureServantAssets(): Promise<void> {
     if (existing?.equals(desired)) continue;
     await mkdir(dirname(dest), { recursive: true });
     await writeFile(dest, desired);
+    // A brand-new install (no prior store) shouldn't flood the ledger; only log changes to
+    // an existing install, where the asset materially moved the effective setup.
+    if (existing !== null) changedAssets.push(rel);
   }
   await removeLegacyFlatCommands();
+  // Record asset changes in the insights ledger (the before/after primitive). Best-effort.
+  if (changedAssets.length > 0 && existsSync(join(target, "insights"))) {
+    for (const rel of changedAssets) {
+      await appendChange({ ts: Date.now(), kind: "asset", id: rel, note: "asset re-sync" });
+    }
+  }
 }
 
 /** Delete pre-namespace flat command files so upgraded installs don't keep duplicate commands. */

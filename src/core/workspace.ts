@@ -25,6 +25,24 @@ const SESSION_END_HOOK = {
   timeout: 15,
 };
 
+// Telemetry sink (the OTel half of insights). Every hook below pipes its payload into
+// `servant record`, which enriches it from the transcript and appends one event to the session's
+// log. It runs on the hot path (every tool call), so the timeout is short and the command itself
+// always exits 0 — a slow or broken emitter must never stall or block the session.
+const RECORD_HOOK = { type: "command", command: "servant record", timeout: 10 };
+
+// Hook events instrumented for telemetry. SessionEnd is special-cased to keep the extraction hook
+// alongside the recorder; the rest run the recorder alone. These map 1:1 to the events the probe
+// validated (src/core/insights/events.ts).
+const RECORD_EVENTS = [
+  "SessionStart",
+  "UserPromptSubmit",
+  "PreToolUse",
+  "PostToolUse",
+  "PreCompact",
+  "Stop",
+] as const;
+
 // Marker embedded in the placeholder GOAL.md. Its presence means the workspace's
 // goal has not been defined yet; `/servant:goal` removes it once the user approves a goal.
 export const GOAL_UNFILLED_MARKER = "servant:goal:unfilled";
@@ -119,7 +137,11 @@ export async function ensureWorkspaceSettings(workspaceDir: string): Promise<voi
     settings.hooks && typeof settings.hooks === "object" && !Array.isArray(settings.hooks)
       ? (settings.hooks as Record<string, unknown>)
       : {};
-  hooks.SessionEnd = [{ hooks: [SESSION_END_HOOK] }];
+  for (const event of RECORD_EVENTS) {
+    hooks[event] = [{ hooks: [RECORD_HOOK] }];
+  }
+  // SessionEnd carries both the knowledge-extraction enqueue and the telemetry recorder.
+  hooks.SessionEnd = [{ hooks: [SESSION_END_HOOK, RECORD_HOOK] }];
   settings.hooks = hooks;
   const desired = `${JSON.stringify(settings, null, 2)}\n`;
   if (existing === desired) return;

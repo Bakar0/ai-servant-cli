@@ -17,6 +17,7 @@
 servant spawn -w add-rate-limiter -r    # -w names the workspace; -r picks repos + adds worktrees
 servant repo add                        # interactively add another repo's worktree (picker)
 servant memories                        # browse what past sessions learned (fzf)
+servant insights                        # see how the setup steers agents (tokens, rules, knowledge)
 servant fine-tune                       # customize the agent instructions servant ships
 ```
 
@@ -145,6 +146,7 @@ Run any command with `--help` for the full flag list.
 | `servant resume` | Re-attach to a previous Claude Code session. |
 | `servant recall` | Search the knowledge base by tag and content; prints matching notes. |
 | `servant memories` | Browse the knowledge base in an fzf picker. |
+| `servant insights` | Transcript-driven observability across instructions, tokens, and the knowledge base. |
 | `servant fine-tune` | Customize servant's instruction assets in a way that survives CLI updates. |
 | `servant statusline` | Install the servant status line into Claude Code. |
 | `servant extract-memories` | (Mostly internal) capture/reconcile durable knowledge from sessions. |
@@ -209,6 +211,29 @@ servant memories --digest          # non-interactive status digest
 ```
 
 In-session, agents use the `/servant:recall` and `/servant:extract-memories` slash commands.
+
+### `servant insights`
+
+A feedback loop on how well servant's setup is steering your agents. It mines the Claude Code session transcripts servant already produces — no extra instrumentation — and reports across three areas:
+
+- **Tokens / context window** — peak & final context occupancy, cache-hit ratio, output volume, which tools eat the window, and the static instruction footprint servant imposes per session.
+- **Instructions** — `/servant:*` command usage, checkable rule violations (e.g. writing a plan *inside* a repo worktree), tool errors, permission denials, and user-correction turns.
+- **Knowledge base** — recall usage and whether results were actually read, plus a store-health scan (note counts, confidence, stale/rotted/orphan/**dead** notes that are never recalled).
+
+Sessions are grouped by a **setup fingerprint** (CLAUDE.md + command bodies + a knowledge signature + the Claude Code version) and aligned to a change ledger, so the digest reads as a **before/after timeline** — change an instruction or fine-tune an overlay, and you can see how the metrics moved.
+
+```bash
+servant insights                       # all workspaces, rolling 30 days, all three areas
+servant insights -w my-task            # drill into one workspace
+servant insights --days 90             # widen the window  (or --since 2026-01-01 / --all)
+servant insights --area tokens         # focus one area: tokens | instructions | knowledge
+servant insights -s <session-id>       # one session's context-growth curve + per-jump tool drivers
+servant insights --json                # machine-readable digest
+```
+
+The `-s/--session` view answers "how did the context window grow, when, and what filled it?" for a single session: a sparkline of the per-turn context trajectory, the biggest jumps (turn number · size · the tool result that drove each), and total token spend bucketed by tool.
+
+Metrics live in a git-tracked store at `~/.ai_servant/insights/` (one cached record per session, plus the change ledger and a digest snapshot). v1 is report-only.
 
 ### `servant fine-tune`
 

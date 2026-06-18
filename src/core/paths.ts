@@ -80,6 +80,35 @@ export function knowledgeTopicsDir(): string {
   return join(knowledgeRoot(), "topics");
 }
 
+/** Durable, git-tracked insights store (metrics + change ledger), sibling to knowledge/. */
+export function insightsRoot(): string {
+  return join(aiServantRoot(), "insights");
+}
+
+/** One deterministic metrics record per session lives here (dedup key = session id). */
+export function insightsMetricsDir(): string {
+  return join(insightsRoot(), "metrics");
+}
+
+/** Append-only live telemetry: one JSONL event log per session, written by `servant record`. */
+export function insightsEventsDir(): string {
+  return join(insightsRoot(), "events");
+}
+
+export function insightsEventLogPath(sessionId: string): string {
+  return join(insightsEventsDir(), `${sessionId}.jsonl`);
+}
+
+/** Append-only ledger of instruction/asset changes (the before/after primitive). */
+export function insightsChangesPath(): string {
+  return join(insightsRoot(), "changes.jsonl");
+}
+
+/** Thin regenerated digest snapshot, like knowledge/INDEX.md. */
+export function insightsIndexPath(): string {
+  return join(insightsRoot(), "INDEX.md");
+}
+
 /** Queue of pending session-end extraction jobs (one JSON object per line). */
 export function extractQueuePath(): string {
   return join(cacheDir(), "extract-queue.jsonl");

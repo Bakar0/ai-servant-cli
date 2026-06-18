@@ -1,5 +1,6 @@
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
+import { appendChange } from "./insights/changes.ts";
 import { fineTuneAspectPath } from "./paths.ts";
 
 // "Fine-tuning" lets a user customize servant's instruction assets without losing those
@@ -150,9 +151,14 @@ export async function ensureScaffold(aspect: FineTuneAspect): Promise<string> {
 export async function writeOverlay(aspect: FineTuneAspect, body: string): Promise<string> {
   const path = fineTuneAspectPath(aspect.id);
   await mkdir(dirname(path), { recursive: true });
+  const before = await readOverlayBody(aspect.id);
   const trimmed = body.trim();
   const content = trimmed.length > 0 ? `${scaffoldFor(aspect)}${trimmed}\n` : scaffoldFor(aspect);
   await writeFile(path, content);
+  // Record the overlay change in the insights ledger (the before/after primitive). Best-effort.
+  if ((trimmed || null) !== (before ?? null)) {
+    await appendChange({ ts: Date.now(), kind: "overlay", id: aspect.id, note: aspect.title });
+  }
   return path;
 }
 

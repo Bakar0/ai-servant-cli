@@ -111,27 +111,43 @@ describe("ensureWorkspaceDir", () => {
     expectBaseClaudeMd(await readFile(path, "utf8"));
   });
 
-  test("scaffolds a per-workspace .claude/settings.json with the SessionEnd extraction hook", async () => {
+  test("scaffolds a per-workspace .claude/settings.json with the extraction + telemetry hooks", async () => {
     const name = `settings-${process.pid}-${Date.now()}`;
     const dir = await ensureWorkspaceDir(name);
     const settings = JSON.parse(await readFile(join(dir, ".claude", "settings.json"), "utf8"));
-    const hook = settings.hooks?.SessionEnd?.[0]?.hooks?.[0];
-    expect(hook?.command).toBe("servant extract-memories --from-hook");
-    expect(hook?.type).toBe("command");
+    // SessionEnd carries both the knowledge-extraction enqueue and the telemetry recorder.
+    const sessionEnd = settings.hooks?.SessionEnd?.[0]?.hooks ?? [];
+    expect(sessionEnd.map((h: { command: string }) => h.command)).toEqual([
+      "servant extract-memories --from-hook",
+      "servant record",
+    ]);
+    // The hot-path telemetry events all run the recorder.
+    for (const event of [
+      "SessionStart",
+      "UserPromptSubmit",
+      "PreToolUse",
+      "PostToolUse",
+      "PreCompact",
+      "Stop",
+    ]) {
+      expect(settings.hooks?.[event]?.[0]?.hooks?.[0]?.command).toBe("servant record");
+    }
   });
 
-  test("merges the hook into existing workspace settings without clobbering other keys", async () => {
+  test("merges the hooks into existing workspace settings without clobbering other keys", async () => {
     const name = `settings-merge-${process.pid}-${Date.now()}`;
     const dir = await ensureWorkspaceDir(name);
     const path = join(dir, ".claude", "settings.json");
-    await writeFile(path, JSON.stringify({ model: "opus", hooks: { Stop: [] } }));
+    // Notification is not a servant-managed event, so a user hook on it must survive re-scaffold.
+    await writeFile(path, JSON.stringify({ model: "opus", hooks: { Notification: [] } }));
     await ensureWorkspaceDir(name); // re-scaffold
     const settings = JSON.parse(await readFile(path, "utf8"));
     expect(settings.model).toBe("opus"); // preserved
-    expect(settings.hooks.Stop).toEqual([]); // preserved
+    expect(settings.hooks.Notification).toEqual([]); // preserved (unmanaged event)
     expect(settings.hooks.SessionEnd[0].hooks[0].command).toBe(
       "servant extract-memories --from-hook",
     );
+    expect(settings.hooks.PostToolUse[0].hooks[0].command).toBe("servant record");
   });
 
   test("inlines a per-repo knowledge section for each mounted repo and creates its store index", async () => {
