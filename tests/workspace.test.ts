@@ -122,7 +122,14 @@ describe("ensureWorkspaceDir", () => {
       "servant record",
     ]);
     // The hot-path telemetry events all run the recorder.
-    for (const event of ["SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "PreCompact", "Stop"]) {
+    for (const event of [
+      "SessionStart",
+      "UserPromptSubmit",
+      "PreToolUse",
+      "PostToolUse",
+      "PreCompact",
+      "Stop",
+    ]) {
       expect(settings.hooks?.[event]?.[0]?.hooks?.[0]?.command).toBe("servant record");
     }
   });
