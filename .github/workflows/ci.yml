@@ -28,6 +28,12 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
+      - name: Template manifest is up to date
+        run: |
+          bun run gen:templates
+          git diff --exit-code src/templates/index.generated.ts \
+            || (echo "::error::src/templates/index.generated.ts is stale — run 'bun run gen:templates' and commit." && exit 1)
+
       - name: Lint
         run: bun run lint
 
