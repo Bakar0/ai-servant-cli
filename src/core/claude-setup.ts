@@ -1,11 +1,14 @@
 import { existsSync } from "node:fs";
-import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
-import { dirname, join, relative } from "node:path";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
+import { TEMPLATES } from "../templates/index.generated.ts";
 import { composeAssetForRel, isFineTuneAsset } from "./fine-tune.ts";
 import { appendChange } from "./insights/changes.ts";
 import { aiServantRoot, claudeCommandsDir } from "./paths.ts";
 
-const TEMPLATES_DIR = new URL("../templates/servant_root/", import.meta.url).pathname;
+// Templates synced into the servant root live under the `servant_root/` prefix in the
+// embedded manifest; the part after it is the path relative to `~/.ai_servant/`.
+const SERVANT_ROOT_PREFIX = "servant_root/";
 
 // Slash commands used to live flat at `.claude/commands/<name>.md` (un-prefixed `/goal`,
 // `/delegate`). They are now namespaced under `commands/servant/` so they surface as
@@ -13,20 +16,6 @@ const TEMPLATES_DIR = new URL("../templates/servant_root/", import.meta.url).pat
 // stale flat copies would linger and shadow the namespaced ones with duplicate commands.
 // Remove the specific legacy files we know we shipped.
 const LEGACY_FLAT_COMMANDS = ["goal.md", "delegate.md"];
-
-async function listTemplateFiles(root: string): Promise<string[]> {
-  const out: string[] = [];
-  async function walk(dir: string): Promise<void> {
-    const entries = await readdir(dir, { withFileTypes: true });
-    for (const entry of entries) {
-      const full = join(dir, entry.name);
-      if (entry.isDirectory()) await walk(full);
-      else if (entry.isFile()) out.push(full);
-    }
-  }
-  await walk(root);
-  return out;
-}
 
 /**
  * Sync the bundled servant-root templates into `~/.ai_servant/`. This includes
@@ -41,14 +30,14 @@ async function listTemplateFiles(root: string): Promise<string[]> {
  */
 export async function ensureServantAssets(): Promise<void> {
   const target = aiServantRoot();
-  const sources = await listTemplateFiles(TEMPLATES_DIR);
+  const sources = TEMPLATES.filter((t) => t.rel.startsWith(SERVANT_ROOT_PREFIX));
   const changedAssets: string[] = [];
   for (const src of sources) {
-    const rel = relative(TEMPLATES_DIR, src);
+    const rel = src.rel.slice(SERVANT_ROOT_PREFIX.length);
     const dest = join(target, rel);
-    const incoming = await readFile(src);
+    const incoming = Buffer.from(src.content, "utf8");
     const desired = isFineTuneAsset(rel)
-      ? Buffer.from(await composeAssetForRel(rel, incoming.toString("utf8")), "utf8")
+      ? Buffer.from(await composeAssetForRel(rel, src.content), "utf8")
       : incoming;
     let existing: Buffer | null = null;
     try {

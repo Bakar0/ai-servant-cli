@@ -11,6 +11,11 @@
   "scripts": {
     "dev": "bun run src/index.ts",
     "start": "bun run src/index.ts",
+    "gen:templates": "bun run scripts/gen-templates.ts",
+    "gen:version": "bun run scripts/gen-version.ts",
+    "prebuild": "bun run gen:templates && bun run gen:version",
+    "build": "bun build --compile src/index.ts --outfile dist/servant",
+    "install-local": "bun run build && bun run scripts/install-local.ts",
     "typecheck": "tsc --noEmit",
     "test": "bun test",
     "lint": "oxlint --type-aware",

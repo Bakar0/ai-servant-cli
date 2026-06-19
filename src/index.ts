@@ -11,11 +11,12 @@ import { repoCommand } from "./commands/repo/index.ts";
 import { resumeCommand } from "./commands/resume.ts";
 import { spawnCommand } from "./commands/spawn.ts";
 import { statuslineCommand } from "./commands/statusline.ts";
+import { getVersion } from "./version.ts";
 
 const main = defineCommand({
   meta: {
     name: "servant",
-    version: "0.0.1",
+    version: getVersion(),
     description: "AI servant CLI — enhances developer and coding-agent workflows.",
   },
   subCommands: {

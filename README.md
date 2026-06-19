@@ -41,46 +41,26 @@ servant fine-tune                       # customize the agent instructions serva
 
 | Tool | Why | Install |
 |------|-----|---------|
-| [Bun](https://bun.sh) ≥ 1.3 | Runtime — `servant` runs directly from TypeScript | `curl -fsSL https://bun.sh/install \| bash` |
 | [Claude Code](https://claude.com/claude-code) | The default coding agent that gets launched | `npm i -g @anthropic-ai/claude-code` |
 | [fzf](https://github.com/junegunn/fzf) | Interactive repo/session/memory pickers (optional — there's a numbered fallback) | `brew install fzf` |
 | [cmux](https://github.com/manaflow-ai/cmux) or iTerm | Terminal that hosts the agent tabs (auto-detected) | — |
+| [Bun](https://bun.sh) ≥ 1.3 | Only to build/hack on servant itself (end users installing via Homebrew don't need it) | `curl -fsSL https://bun.sh/install \| bash` |
 
 ---
 
 ## Installation
 
-```bash
-git clone <repo-url> ai-servant-cli
-cd ai-servant-cli
-bun install
-```
-
-### Make `servant` available everywhere
-
-`servant` is the package's `bin`. Run `bun link` **once** from the project directory and Bun creates a global symlink for the `servant` binary:
+`servant` ships as a self-contained compiled binary — end users need nothing else installed
+(no clone, no Bun). Install it from the Homebrew tap:
 
 ```bash
-bun link
+brew install Bakar0/tap/servant
+servant --version            # prints the release version, e.g. v0.2.0
+brew upgrade servant         # later, to pick up a newer release
 ```
 
-This symlinks `~/.bun/bin/servant` → this project, so the command works from any directory and always tracks your latest local code (it runs the source directly — no rebuild needed after edits).
-
-Make sure Bun's global bin directory is on your `PATH` (the Bun installer normally adds this):
-
-```bash
-# in ~/.zshrc or ~/.bashrc
-export PATH="$HOME/.bun/bin:$PATH"
-```
-
-Verify:
-
-```bash
-which servant      # → ~/.bun/bin/servant
-servant --help
-```
-
-To remove the global link later: `bun unlink` from the project directory.
+> Contributors who want to hack on servant itself want the source instead — see
+> [the three ways to run servant](#the-three-ways-to-run-servant) below.
 
 ### First-time setup
 
@@ -293,12 +273,73 @@ One worktree is created per selected repo, all on the same `--branch` name. If f
 ## Development
 
 ```bash
+git clone https://github.com/Bakar0/ai-servant-cli
+cd ai-servant-cli
 bun install
 bun run dev        # run the CLI from source (src/index.ts)
 bun test           # run the test suite
 bun run typecheck  # tsc --noEmit
-bun run lint       # biome check
+bun run lint       # oxlint --type-aware
 bun run format     # biome format --write
 ```
 
-Because `bun link` points at the source, any edit is live the next time you run `servant` — no build step.
+### The three ways to run servant
+
+| Mode | Command | When | Edits reflect? |
+|------|---------|------|----------------|
+| **Dev iterate** | `bun run src/index.ts …` (or `bun run dev …`) | Fast inner loop while hacking | Immediately — runs the source |
+| **Local build test** | `bun run build` → `./dist/servant …` | Validate the *real* compiled artifact before pushing | Only after a rebuild |
+| **Published** | `brew install Bakar0/tap/servant` | What end users get | On `brew upgrade` |
+
+To make your locally built binary your global `servant` (on `PATH` via `~/.bun/bin`):
+
+```bash
+bun run install-local   # builds, then copies dist/servant → ~/.bun/bin/servant
+```
+
+Ensure Bun's bin dir is on your `PATH` (the Bun installer usually adds it):
+
+```bash
+# in ~/.zshrc or ~/.bashrc
+export PATH="$HOME/.bun/bin:$PATH"
+```
+
+> This replaces any earlier `bun link` symlink with a real, versioned binary — the global
+> command no longer silently tracks whatever working tree the symlink pointed at.
+
+### How templates and version are embedded
+
+The binary is fully self-contained: there is no source tree to read at runtime.
+
+- **Templates** (`src/templates/**` — the workspace `CLAUDE.md`, `/servant:*` slash commands,
+  the status-line script) are embedded via a generated manifest, `src/templates/index.generated.ts`
+  (`with { type: "text" }` imports). Regenerate it with `bun run gen:templates`; CI fails if it
+  drifts from the files on disk. Never edit the generated file by hand.
+- **Version** comes from `git describe --tags`, stamped into `src/version.generated.ts` by
+  `bun run gen:version`. In dev (`bun run`) the live `git describe` is used; the compiled binary
+  uses the value embedded at build time.
+
+`bun run build` runs both generators (via `prebuild`) before compiling, so you never have to
+remember to.
+
+### Releasing & distribution
+
+Publishing is plain git + CI — there is no `servant release` subcommand.
+
+1. Tag and push: `git tag v0.2.0 && git push --tags`.
+2. [`.github/workflows/release.yml`](.github/workflows/release.yml) builds a standalone binary
+   for darwin arm64/x64 and linux x64 (`bun build --compile --target=…`), uploads each as a
+   `.tar.gz` + `.sha256` to a GitHub Release for the tag, then bumps the Homebrew tap formula.
+3. Users get it via `brew install Bakar0/tap/servant` / `brew upgrade`.
+
+PRs continue to run [`ci.yml`](.github/workflows/ci.yml) (lint, typecheck, test, template-drift).
+
+**One-time setup for the Homebrew tap** (maintainer):
+
+- Create a public repo **`Bakar0/homebrew-tap`** (Homebrew strips the `homebrew-` prefix, so
+  the tap is addressed as `Bakar0/tap`). The formula lands at `Formula/servant.rb`, rendered by
+  [`scripts/gen-formula.ts`](scripts/gen-formula.ts) on every release. One `homebrew-tap` repo
+  can hold formulae for any future tools too.
+- Add a repo secret **`HOMEBREW_TAP_TOKEN`** to `ai-servant-cli`: a fine-grained PAT with
+  `contents: write` on the tap repo. Without it, releases still publish — the formula-bump job
+  just warns and skips, so you can populate `Formula/servant.rb` manually for the first release.

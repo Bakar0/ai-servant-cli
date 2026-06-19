@@ -16,6 +16,7 @@ import {
 import { readOverlayBody } from "../core/fine-tune.ts";
 import { commitKnowledge, reconcileAllIndexes } from "../core/knowledge.ts";
 import { applyRootOverride, knowledgeRoot, workspacesRoot } from "../core/paths.ts";
+import { servantReinvokeArgv } from "../core/self-exec.ts";
 import { detectWorkspaceNameFromCwd } from "../core/workspace.ts";
 
 // Minimum transcript entries before a session is worth extracting from. A handful of
@@ -86,8 +87,7 @@ export async function runFromHook(stdin: string, opts: { kick?: boolean } = {}):
 /** Spawn a detached drainer. Best-effort — failure to kick just means it drains next time. */
 function kickDrainer(): void {
   try {
-    const args = [process.argv[1] ?? "", "extract-memories", "--drain"];
-    Bun.spawn([process.execPath, ...args], {
+    Bun.spawn([...servantReinvokeArgv(), "extract-memories", "--drain"], {
       stdin: "ignore",
       stdout: "ignore",
       stderr: "ignore",

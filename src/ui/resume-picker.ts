@@ -1,4 +1,5 @@
 import { type ClaudeSessionMeta, listWorkspaceSessions } from "../core/claude-session.ts";
+import { servantReinvokeArgv } from "../core/self-exec.ts";
 
 export interface PickSessionOpts {
   workspaceName?: string;
@@ -24,7 +25,7 @@ export async function pickSession(opts: PickSessionOpts = {}): Promise<string | 
 
   const lines = sessions.map((s) => `${s.sessionId}\t${formatListLine(s)}`);
 
-  const previewCmd = `${shellQuote(process.execPath)} ${shellQuote(servantEntry())} resume --preview {1}`;
+  const previewCmd = `${servantReinvokeArgv().map(shellQuote).join(" ")} resume --preview {1}`;
 
   const proc = Bun.spawn(
     [
@@ -81,10 +82,4 @@ export function relativeAge(mtimeMs: number, now: number = Date.now()): string {
 
 function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
-}
-
-function servantEntry(): string {
-  // When invoked as `bun /path/to/src/index.ts`, process.argv[1] is the script path.
-  // When invoked via the published binary, argv[1] may not be set; fall back to argv[0].
-  return process.argv[1] ?? process.argv[0] ?? "servant";
 }

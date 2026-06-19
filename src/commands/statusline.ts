@@ -3,8 +3,15 @@ import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { defineCommand } from "citty";
 import { applyRootOverride, statuslineScriptPath, userClaudeSettingsPath } from "../core/paths.ts";
+import { TEMPLATES } from "../templates/index.generated.ts";
 
-const TEMPLATE_URL = new URL("../templates/claude/statusline.sh", import.meta.url);
+const STATUSLINE_REL = "claude/statusline.sh";
+
+function statuslineScript(): string {
+  const entry = TEMPLATES.find((t) => t.rel === STATUSLINE_REL);
+  if (!entry) throw new Error(`Embedded template missing: ${STATUSLINE_REL}`);
+  return entry.content;
+}
 
 async function readJsonObject(path: string): Promise<Record<string, unknown>> {
   if (!existsSync(path)) return {};
@@ -44,7 +51,7 @@ export const STATUSLINE_EXAMPLE = [
  */
 export async function installStatusline(log: (s: string) => void = console.log): Promise<void> {
   const dest = statuslineScriptPath();
-  const script = await readFile(TEMPLATE_URL, "utf8");
+  const script = statuslineScript();
   await mkdir(dirname(dest), { recursive: true });
   await writeFile(dest, script);
   await chmod(dest, 0o755);

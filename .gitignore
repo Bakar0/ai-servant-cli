@@ -6,6 +6,9 @@ out
 dist
 *.tgz
 
+# bun build --compile scratch files
+*.bun-build
+
 # code coverage
 coverage
 *.lcov
