@@ -26,7 +26,7 @@ servant fine-tune                       # customize the agent instructions serva
 ## Contents
 
 - [Requirements](#requirements)
-- [Installation](#installation) — including making `servant` available everywhere
+- [Installation](#installation) — `brew install` + first-time setup
 - [Quick start](#quick-start)
 - [How it works](#how-it-works)
 - [Commands](#commands)
