@@ -65,11 +65,17 @@ export interface InsightEvent {
   promptChars?: number; // prompt
   slashCommand?: string | null; // prompt
   effort?: string; // turn_complete
+  /**
+   * True when this event was backfilled by the batch reconciler rather than emitted live. Lets the
+   * dashboard/LLM layer tell live telemetry from reconstructed gaps. Distinct from `source` (which
+   * already carries the SessionStart origin: startup | resume | compact | …).
+   */
+  reconciled?: boolean;
 }
 
 // --- transcript shapes (only the fields we read) ---
 
-interface RawUsage {
+export interface RawUsage {
   input_tokens?: number;
   cache_read_input_tokens?: number;
   cache_creation_input_tokens?: number;
@@ -172,30 +178,38 @@ export function lastAssistantTurn(lines: RawLine[]): AssistantTurn | null {
 
 // --- event log IO ---
 
-async function appendEvents(sessionId: string, events: InsightEvent[]): Promise<void> {
+export async function appendEvents(sessionId: string, events: InsightEvent[]): Promise<void> {
   if (events.length === 0) return;
   const path = insightsEventLogPath(sessionId);
   await mkdir(dirname(path), { recursive: true });
   await appendFile(path, events.map((e) => JSON.stringify(e)).join("\n") + "\n");
 }
 
-/** uuids already emitted as turn_complete events — the dedup key that makes turn sync idempotent. */
-async function emittedTurnIds(sessionId: string): Promise<Set<string>> {
-  const ids = new Set<string>();
+/** Parse a session's event log into events, skipping junk. Returns [] when no log exists yet. */
+export async function readEventLog(sessionId: string): Promise<InsightEvent[]> {
   let text: string;
   try {
     text = await readFile(insightsEventLogPath(sessionId), "utf8");
   } catch {
-    return ids; // no log yet
+    return []; // no log yet
   }
+  const out: InsightEvent[] = [];
   for (const line of text.split("\n")) {
     if (!line.trim()) continue;
     try {
-      const e = JSON.parse(line) as InsightEvent;
-      if (e.event === "turn_complete" && e.turnId) ids.add(e.turnId);
+      out.push(JSON.parse(line) as InsightEvent);
     } catch {
-      // skip
+      // skip malformed entry
     }
+  }
+  return out;
+}
+
+/** uuids already emitted as turn_complete events — the dedup key that makes turn sync idempotent. */
+async function emittedTurnIds(sessionId: string): Promise<Set<string>> {
+  const ids = new Set<string>();
+  for (const e of await readEventLog(sessionId)) {
+    if (e.event === "turn_complete" && e.turnId) ids.add(e.turnId);
   }
   return ids;
 }
