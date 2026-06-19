@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { buildDigest, renderDigest } from "../src/core/insights/digest.ts";
+import { buildDigest, renderDigest, renderSessionTimeline } from "../src/core/insights/digest.ts";
 import type { ChangeEntry } from "../src/core/insights/changes.ts";
 import type { KnowledgeHealth } from "../src/core/insights/knowledge-health.ts";
 import type { SessionMetrics } from "../src/core/insights/metrics.ts";
@@ -61,6 +61,7 @@ function rec(over: {
       repeatedReads: [],
     },
     knowledge: { recallInvocations: 0, knowledgeReads: [], recallFollowedByRead: 0 },
+    candidates: [],
   };
 }
 
@@ -129,5 +130,62 @@ describe("buildDigest before/after segmentation", () => {
       workspaceLabel: "all workspaces",
     });
     expect(renderDigest(digest)).toContain("No servant sessions");
+  });
+});
+
+describe("renderSessionTimeline candidate worklist", () => {
+  test("renders the anchored candidate list with kind tags and magnitudes", () => {
+    const m = rec({ fingerprint: "cccccc000000", mtimeMs: NOW });
+    m.tokens.peakContext = 5000;
+    m.tokens.finalContext = 5000;
+    m.tokens.contextCurve = [
+      {
+        turn: 1,
+        context: 5000,
+        output: 100,
+        delta: 5000,
+        drivers: [{ tool: "Read", approxTokens: 2000 }],
+        anchor: { turnUuid: "a1aaaaaa", toolUseId: null, line: 2 },
+      },
+    ];
+    m.tokens.topToolResults = [
+      {
+        tool: "Read",
+        target: "/x/y.ts",
+        chars: 8000,
+        approxTokens: 2000,
+        anchor: { turnUuid: "a1aaaaaa", toolUseId: "tu-1", line: 3 },
+      },
+    ];
+    m.candidates = [
+      {
+        kind: "context-jump",
+        anchor: { turnUuid: "a1aaaaaa", toolUseId: null, line: 2 },
+        magnitude: 5000,
+        summary: "turn 1 context +~5000 tok",
+      },
+      {
+        kind: "repeated-read",
+        anchor: { turnUuid: "b9bbbbbb", toolUseId: "tu-9", line: 42 },
+        magnitude: 3,
+        summary: "read /x/y.ts ×3",
+      },
+    ];
+
+    const text = renderSessionTimeline(m);
+
+    // header + both kinds present
+    expect(text).toContain("candidates worth a closer look (2");
+    expect(text).toContain("ctx-jump");
+    expect(text).toContain("re-read");
+    // token kinds read as ~Nk, count kinds as ×N
+    expect(text).toContain("~5.0k");
+    expect(text).toContain("×3");
+    // anchors expose the transcript line (the drill target) and a turn-uuid prefix
+    expect(text).toContain("L2");
+    expect(text).toContain("@a1aaaaaa");
+    expect(text).toContain("L42");
+    // the largest-result line is also anchored now
+    expect(text).toMatch(/single largest tool results:[\s\S]*L3 +@a1aaaaaa/);
   });
 });

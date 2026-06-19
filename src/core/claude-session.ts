@@ -66,13 +66,27 @@ export async function findSessionJsonl(sessionId: string): Promise<string | null
 
 /** Stream parsed JSONL records from a transcript, skipping blank/malformed lines. */
 export async function* readJsonlLines(path: string): AsyncGenerator {
+  for await (const { record } of readJsonlLinesWithLineNumbers(path)) {
+    yield record;
+  }
+}
+
+/**
+ * Like {@link readJsonlLines} but also yields each record's 1-based physical line number in the
+ * file — a stable locator for transcript anchors. Blank/malformed lines are skipped (so the line
+ * number can be non-contiguous), which keeps every yielded number a real, re-locatable file line.
+ */
+export async function* readJsonlLinesWithLineNumbers(
+  path: string,
+): AsyncGenerator<{ record: unknown; line: number }> {
   const file = Bun.file(path);
   const text = await file.text();
-  for (const line of text.split("\n")) {
-    const trimmed = line.trim();
+  const lines = text.split("\n");
+  for (let i = 0; i < lines.length; i++) {
+    const trimmed = (lines[i] ?? "").trim();
     if (!trimmed) continue;
     try {
-      yield JSON.parse(trimmed);
+      yield { record: JSON.parse(trimmed), line: i + 1 };
     } catch {
       // skip malformed lines
     }

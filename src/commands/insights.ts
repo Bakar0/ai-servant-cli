@@ -1,6 +1,10 @@
 import { stat } from "node:fs/promises";
 import { defineCommand } from "citty";
-import { findSessionJsonl, listWorkspaceSessions } from "../core/claude-session.ts";
+import {
+  assertValidSessionId,
+  findSessionJsonl,
+  listWorkspaceSessions,
+} from "../core/claude-session.ts";
 import {
   type Area,
   buildDigest,
@@ -17,6 +21,8 @@ import {
   rebuildInsightsIndex,
 } from "../core/insights/store.ts";
 import { applyRootOverride } from "../core/paths.ts";
+import { resolveWorkspaceName } from "../core/workspace.ts";
+import { pickSession } from "../ui/resume-picker.ts";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const DEFAULT_DAYS = 30;
@@ -73,6 +79,18 @@ export const insightsCommand = defineCommand({
       description:
         "Drill into one session id: show its context-growth curve, the biggest jumps, and what tools drove them.",
     },
+    pick: {
+      type: "boolean",
+      required: false,
+      default: false,
+      description:
+        "Pick a session interactively (fzf), previewing each session's metrics + candidate worklist. Scoped by --workspace, else auto-detected.",
+    },
+    preview: {
+      type: "string",
+      required: false,
+      description: "(internal) Render the picker preview pane for a session id and exit.",
+    },
     area: {
       type: "string",
       required: false,
@@ -100,10 +118,30 @@ export const insightsCommand = defineCommand({
     applyRootOverride(args.root);
     const now = Date.now();
 
+    // Internal: render the fzf preview pane for one session (used by `--pick`) and exit.
+    if (typeof args.preview === "string" && args.preview.length > 0) {
+      await renderSessionPreviewToStdout(args.preview);
+      return;
+    }
+
     // Single-session drill-down: the context-growth curve and what drove it, no aggregation.
-    if (args.session) {
-      const jsonlPath = await findSessionJsonl(args.session);
-      if (!jsonlPath) throw new Error(`No transcript found for session "${args.session}".`);
+    // With --pick (and no explicit id), choose a session via the fzf picker first.
+    let sessionId = (args.session as string | undefined) ?? null;
+    if (!sessionId && args.pick) {
+      const ws =
+        (args.workspace as string | undefined) ??
+        (await resolveWorkspaceName(undefined, { allowUnresolved: true })) ??
+        undefined;
+      sessionId = await pickSession({
+        workspaceName: ws,
+        promptLabel: "insights> ",
+        previewSubcommand: "insights",
+      });
+      if (!sessionId) return; // picker cancelled
+    }
+    if (sessionId) {
+      const jsonlPath = await findSessionJsonl(sessionId);
+      if (!jsonlPath) throw new Error(`No transcript found for session "${sessionId}".`);
       const { mtimeMs } = await stat(jsonlPath);
       const record = await getOrComputeMetrics(jsonlPath, mtimeMs);
       console.log(args.json ? JSON.stringify(record, null, 2) : renderSessionTimeline(record));
@@ -163,3 +201,21 @@ export const insightsCommand = defineCommand({
     }
   },
 });
+
+/** Render one session's timeline (curve, jumps, candidate worklist) for the fzf preview pane. */
+async function renderSessionPreviewToStdout(id: string): Promise<void> {
+  try {
+    assertValidSessionId(id);
+    const jsonlPath = await findSessionJsonl(id);
+    if (!jsonlPath) {
+      process.stdout.write(`<no session file found for ${id}>\n`);
+      return;
+    }
+    const { mtimeMs } = await stat(jsonlPath);
+    const record = await getOrComputeMetrics(jsonlPath, mtimeMs);
+    process.stdout.write(`${renderSessionTimeline(record)}\n`);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    process.stdout.write(`<could not load session: ${msg}>\n`);
+  }
+}
