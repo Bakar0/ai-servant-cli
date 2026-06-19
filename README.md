@@ -336,10 +336,16 @@ PRs continue to run [`ci.yml`](.github/workflows/ci.yml) (lint, typecheck, test,
 
 **One-time setup for the Homebrew tap** (maintainer):
 
-- Create a public repo **`Bakar0/homebrew-tap`** (Homebrew strips the `homebrew-` prefix, so
-  the tap is addressed as `Bakar0/tap`). The formula lands at `Formula/servant.rb`, rendered by
-  [`scripts/gen-formula.ts`](scripts/gen-formula.ts) on every release. One `homebrew-tap` repo
-  can hold formulae for any future tools too.
-- Add a repo secret **`HOMEBREW_TAP_TOKEN`** to `ai-servant-cli`: a fine-grained PAT with
-  `contents: write` on the tap repo. Without it, releases still publish — the formula-bump job
-  just warns and skips, so you can populate `Formula/servant.rb` manually for the first release.
+- The public tap repo **`Bakar0/homebrew-tap`** holds the formula at `Formula/servant.rb`,
+  rendered by [`scripts/gen-formula.ts`](scripts/gen-formula.ts) on every release. Homebrew
+  strips the `homebrew-` prefix, so it's addressed as `Bakar0/tap` — and one tap repo can hold
+  formulae for any future tools too.
+- The release workflow pushes that formula across-repo using a **GitHub App** (short-lived,
+  per-run token — no long-lived PAT to rotate, not tied to a personal account):
+  1. Create a GitHub App with **Repository permissions → Contents: Read and write**, and
+     generate a private key (`.pem`).
+  2. **Install** the app on the `Bakar0/homebrew-tap` repo.
+  3. Add two secrets to `ai-servant-cli`: **`APP_ID`** (the app's numeric ID) and
+     **`APP_PRIVATE_KEY`** (the full `.pem` contents).
+- Without `APP_ID`, releases still publish — the formula-bump job just warns and skips, so you
+  can populate `Formula/servant.rb` manually for the first release.
