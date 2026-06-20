@@ -60,7 +60,13 @@ function rec(over: {
       userCorrections: 0,
       repeatedReads: [],
     },
-    knowledge: { recallInvocations: 0, knowledgeReads: [], recallFollowedByRead: 0 },
+    knowledge: {
+      recallInvocations: 0,
+      knowledgeReads: [],
+      recallSurfacedNotes: [],
+      recallFollowedByRead: 0,
+      recallsConsumed: 0,
+    },
     candidates: [],
   };
 }

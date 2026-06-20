@@ -13,7 +13,9 @@ import { type RuleViolation, type ToolCall, checkRules } from "./rules.ts";
 // Bumping this invalidates every cached metrics record (the store keys on
 // `sessionId + mtime + schema`), so a bump forces all records to recompute on next read.
 // v4 adds transcript anchors on moment-bearing metrics + the deterministic `candidates` list.
-export const METRICS_SCHEMA_VERSION = 4;
+// v5 attributes notes a `servant recall` surfaced inline (recallSurfacedNotes + recallsConsumed),
+// so the recall path counts as knowledge use even with zero `Read` calls.
+export const METRICS_SCHEMA_VERSION = 5;
 
 /**
  * A stable pointer back into a transcript so a later (qualitative) pass can re-locate the exact
@@ -149,8 +151,20 @@ export interface SessionMetrics {
     recallInvocations: number;
     /** Knowledge note files (knowledge/**\/*.md) opened with Read. */
     knowledgeReads: string[];
-    /** Recalls that were followed by a knowledge-note Read (result actually consumed). */
+    /**
+     * Distinct knowledge note paths a `servant recall` printed inline in its Bash result. Recall
+     * returns note bodies to stdout (each hit ends with its absolute path), so these notes are used
+     * without ever being `Read`. Deduped and sorted for stable recompute. Knowledge *usage* is the
+     * union of `knowledgeReads` and these. */
+    recallSurfacedNotes: string[];
+    /**
+     * Recalls that were followed by a knowledge-note Read. Legacy signal kept unchanged for the
+     * direct grep/Read path; structurally ~0 on the inline-recall path (see `recallsConsumed`). */
     recallFollowedByRead: number;
+    /**
+     * Recalls whose result was actually consumed: it surfaced ≥1 note inline, or it was followed by
+     * a knowledge-note Read. The honest "consumed" count — no longer near-zero on the recall path. */
+    recallsConsumed: number;
   };
 
   /**
@@ -232,6 +246,36 @@ const PERMISSION_RE =
 
 function asString(v: unknown): string {
   return typeof v === "string" ? v : "";
+}
+
+/** A tool_result block's text payload (string content or concatenated text blocks). */
+function resultText(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    const parts: string[] = [];
+    for (const item of content) {
+      if (item && typeof item === "object") {
+        const t = item as { text?: unknown };
+        if (typeof t.text === "string") parts.push(t.text);
+      }
+    }
+    return parts.join("\n");
+  }
+  return "";
+}
+
+/**
+ * Extract the knowledge-note file paths a `servant recall` printed. Recall renders each hit ending
+ * with the note's absolute path on its own line (see `renderNote`), so a line that is a knowledge
+ * note path is a surfaced note. Deduped and sorted so re-parsing the same result is deterministic.
+ */
+function extractRecallNotePaths(text: string): string[] {
+  const out = new Set<string>();
+  for (const line of text.split(/\r?\n/)) {
+    const p = line.trim();
+    if (p && KNOWLEDGE_PATH_RE.test(p)) out.add(p);
+  }
+  return [...out].toSorted();
 }
 
 /** Length of a tool_result block's payload (string content or stringified array). */
@@ -317,8 +361,11 @@ export async function extractSessionMetrics(
 
   let recallInvocations = 0;
   const knowledgeReads = new Set<string>();
+  const recallSurfacedNotes = new Set<string>();
   let recallFollowedByRead = 0;
-  let pendingRecall = false; // a recall awaiting a knowledge Read
+  let recallsConsumed = 0;
+  let pendingRecall = false; // a recall awaiting a knowledge Read (feeds recallFollowedByRead)
+  let recallAwaitingConsume = false; // a recall not yet counted consumed (surfaced ∪ read)
 
   const reposSeen = new Set<string>();
   const allRecords: AnyRecord[] = [];
@@ -418,6 +465,7 @@ export async function extractSessionMetrics(
             if (block.name === "Bash" && /\bservant recall\b/.test(asString(input.command))) {
               recallInvocations += 1;
               pendingRecall = true;
+              recallAwaitingConsume = true;
             }
           }
         }
@@ -475,6 +523,20 @@ export async function extractSessionMetrics(
                 recallFollowedByRead += 1;
                 pendingRecall = false;
               }
+              if (recallAwaitingConsume) {
+                recallsConsumed += 1;
+                recallAwaitingConsume = false;
+              }
+            }
+          }
+          // `servant recall` returns note bodies inline (each hit prints its absolute path), so the
+          // surfaced notes are used without any Read. Attribute them off the Bash *result* text.
+          if (tool === "Bash" && /\bservant recall\b/.test(asString(input.command))) {
+            const surfaced = extractRecallNotePaths(resultText(block.content));
+            for (const p of surfaced) recallSurfacedNotes.add(p);
+            if (surfaced.length > 0 && recallAwaitingConsume) {
+              recallsConsumed += 1;
+              recallAwaitingConsume = false;
             }
           }
         }
@@ -498,6 +560,7 @@ export async function extractSessionMetrics(
           if (/\/servant:recall\b/.test(name) || name === "/recall") {
             recallInvocations += 1;
             pendingRecall = true;
+            recallAwaitingConsume = true;
           }
         }
         if (!isCommandTurn) {
@@ -624,7 +687,9 @@ export async function extractSessionMetrics(
     knowledge: {
       recallInvocations,
       knowledgeReads: [...knowledgeReads].toSorted(),
+      recallSurfacedNotes: [...recallSurfacedNotes].toSorted(),
       recallFollowedByRead,
+      recallsConsumed,
     },
     candidates,
   };

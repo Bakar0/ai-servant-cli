@@ -171,7 +171,10 @@ export const insightsCommand = defineCommand({
       }
     }
 
-    const readNoteFiles = readNoteFilesFrom(records.map((r) => r.knowledge.knowledgeReads));
+    // Knowledge "use" is surfacing ∪ reading, so a note recall keeps surfacing inline is live too.
+    const readNoteFiles = readNoteFilesFrom(
+      records.map((r) => [...r.knowledge.knowledgeReads, ...r.knowledge.recallSurfacedNotes]),
+    );
     const knowledgeHealth = await scanKnowledgeHealth({ readNoteFiles, now });
     const changes = await readChanges();
 

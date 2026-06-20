@@ -32,6 +32,8 @@ export interface FingerprintGroup {
   // knowledge
   recallInvocations: number;
   recallFollowedByRead: number;
+  recallsConsumed: number;
+  /** Distinct notes used = union of notes Read and notes a recall surfaced inline. */
   distinctKnowledgeReads: number;
 }
 
@@ -74,7 +76,9 @@ function aggregateGroup(fingerprint: string, recs: SessionMetrics[]): Fingerprin
     }
     for (const c of r.instructions.slashCommands)
       slash.set(c.name, (slash.get(c.name) ?? 0) + c.count);
+    // Knowledge "use" is surfacing ∪ reading: count notes a recall surfaced inline alongside reads.
     for (const p of r.knowledge.knowledgeReads) reads.add(p);
+    for (const p of r.knowledge.recallSurfacedNotes) reads.add(p);
   }
   return {
     fingerprint,
@@ -101,6 +105,7 @@ function aggregateGroup(fingerprint: string, recs: SessionMetrics[]): Fingerprin
     userCorrections: recs.reduce((a, r) => a + r.instructions.userCorrections, 0),
     recallInvocations: recs.reduce((a, r) => a + r.knowledge.recallInvocations, 0),
     recallFollowedByRead: recs.reduce((a, r) => a + r.knowledge.recallFollowedByRead, 0),
+    recallsConsumed: recs.reduce((a, r) => a + r.knowledge.recallsConsumed, 0),
     distinctKnowledgeReads: reads.size,
   };
 }
@@ -195,7 +200,7 @@ function renderInstructions(g: FingerprintGroup, lines: string[]): void {
 
 function renderKnowledge(g: FingerprintGroup, lines: string[]): void {
   lines.push(
-    `    know:    recalls: ${g.recallInvocations} (consumed: ${g.recallFollowedByRead}) · distinct notes read: ${g.distinctKnowledgeReads}`,
+    `    know:    recalls: ${g.recallInvocations} (consumed: ${g.recallsConsumed}) · distinct notes used: ${g.distinctKnowledgeReads}`,
   );
 }
 
