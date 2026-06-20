@@ -6,7 +6,6 @@ import { initCommand } from "./commands/init.ts";
 import { insightsCommand } from "./commands/insights.ts";
 import { memoriesCommand } from "./commands/memories.ts";
 import { recallCommand } from "./commands/recall.ts";
-import { recordCommand } from "./commands/record.ts";
 import { repoCommand } from "./commands/repo/index.ts";
 import { resumeCommand } from "./commands/resume.ts";
 import { spawnCommand } from "./commands/spawn.ts";
@@ -25,7 +24,6 @@ const main = defineCommand({
     repo: repoCommand,
     resume: resumeCommand,
     recall: recallCommand,
-    record: recordCommand,
     memories: memoriesCommand,
     insights: insightsCommand,
     "extract-memories": extractMemoriesCommand,

@@ -25,16 +25,13 @@ const SESSION_END_HOOK = {
   timeout: 15,
 };
 
-// Telemetry sink (the OTel half of insights). Every hook below pipes its payload into
-// `servant record`, which enriches it from the transcript and appends one event to the session's
-// log. It runs on the hot path (every tool call), so the timeout is short and the command itself
-// always exits 0 — a slow or broken emitter must never stall or block the session.
-const RECORD_HOOK = { type: "command", command: "servant record", timeout: 10 };
-
-// Hook events instrumented for telemetry. SessionEnd is special-cased to keep the extraction hook
-// alongside the recorder; the rest run the recorder alone. These map 1:1 to the events the probe
-// validated (src/core/insights/events.ts).
-const RECORD_EVENTS = [
+// The live telemetry recorder (`servant record`) was removed — it fed nothing user-facing and was
+// redundant with the transcript (see context/adr-002-remove-live-event-recorder.md). It used to be
+// wired into the hook events below on the hot path of every tool call. `ensureWorkspaceSettings`
+// now *strips* it from any workspace settings that still carry it (healing old workspaces) while
+// preserving the SessionEnd knowledge-extraction hook.
+const DEPRECATED_RECORD_COMMAND = "servant record";
+const DEPRECATED_RECORD_EVENTS = [
   "SessionStart",
   "UserPromptSubmit",
   "PreToolUse",
@@ -42,6 +39,31 @@ const RECORD_EVENTS = [
   "PreCompact",
   "Stop",
 ] as const;
+
+function isHookGroup(g: unknown): g is { hooks: unknown[] } {
+  return !!g && typeof g === "object" && Array.isArray((g as { hooks?: unknown }).hooks);
+}
+
+function isCommandHook(h: unknown): h is { command?: string } {
+  return !!h && typeof h === "object";
+}
+
+/** Drop any `servant record` command hook from a hooks-group array; drop groups left empty. */
+function stripRecordHooks(groups: unknown): unknown[] {
+  if (!Array.isArray(groups)) return [];
+  const out: unknown[] = [];
+  for (const group of groups) {
+    if (!isHookGroup(group)) {
+      out.push(group);
+      continue;
+    }
+    const kept = group.hooks.filter(
+      (h) => !(isCommandHook(h) && h.command === DEPRECATED_RECORD_COMMAND),
+    );
+    if (kept.length > 0) out.push({ ...group, hooks: kept });
+  }
+  return out;
+}
 
 // Marker embedded in the placeholder GOAL.md. Its presence means the workspace's
 // goal has not been defined yet; `/servant:goal` removes it once the user approves a goal.
@@ -116,9 +138,10 @@ export async function ensureWorkspaceDir(name: string): Promise<string> {
 }
 
 /**
- * Ensure the workspace's `.claude/settings.json` carries the SessionEnd extraction hook.
- * Merges the hook into any existing settings (preserving other keys / hook events) and is
- * idempotent — only rewrites when the content actually changes.
+ * Ensure the workspace's `.claude/settings.json` carries the SessionEnd knowledge-extraction hook,
+ * and remove the deprecated `servant record` telemetry hooks (ADR-002) from any event they were
+ * wired into — healing workspaces created before the recorder was removed. Merges into existing
+ * settings (preserving other keys / user hooks) and is idempotent — only rewrites on real change.
  */
 export async function ensureWorkspaceSettings(workspaceDir: string): Promise<void> {
   const path = join(workspaceDir, ".claude", "settings.json");
@@ -137,11 +160,25 @@ export async function ensureWorkspaceSettings(workspaceDir: string): Promise<voi
     settings.hooks && typeof settings.hooks === "object" && !Array.isArray(settings.hooks)
       ? (settings.hooks as Record<string, unknown>)
       : {};
-  for (const event of RECORD_EVENTS) {
-    hooks[event] = [{ hooks: [RECORD_HOOK] }];
+
+  // Strip the deprecated recorder from every event it used to manage; drop keys left empty
+  // (any unrelated user hooks on those events are preserved).
+  for (const event of DEPRECATED_RECORD_EVENTS) {
+    if (!(event in hooks)) continue;
+    const cleaned = stripRecordHooks(hooks[event]);
+    if (cleaned.length > 0) hooks[event] = cleaned;
+    else delete hooks[event];
   }
-  // SessionEnd carries both the knowledge-extraction enqueue and the telemetry recorder.
-  hooks.SessionEnd = [{ hooks: [SESSION_END_HOOK, RECORD_HOOK] }];
+
+  // SessionEnd: strip the recorder but guarantee the knowledge-extraction enqueue is present.
+  const sessionEnd = stripRecordHooks(hooks.SessionEnd);
+  const hasExtraction = sessionEnd.some(
+    (g) =>
+      isHookGroup(g) &&
+      g.hooks.some((h) => isCommandHook(h) && h.command === SESSION_END_HOOK.command),
+  );
+  hooks.SessionEnd = hasExtraction ? sessionEnd : [...sessionEnd, { hooks: [SESSION_END_HOOK] }];
+
   settings.hooks = hooks;
   const desired = `${JSON.stringify(settings, null, 2)}\n`;
   if (existing === desired) return;

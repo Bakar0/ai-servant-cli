@@ -90,15 +90,6 @@ export function insightsMetricsDir(): string {
   return join(insightsRoot(), "metrics");
 }
 
-/** Append-only live telemetry: one JSONL event log per session, written by `servant record`. */
-export function insightsEventsDir(): string {
-  return join(insightsRoot(), "events");
-}
-
-export function insightsEventLogPath(sessionId: string): string {
-  return join(insightsEventsDir(), `${sessionId}.jsonl`);
-}
-
 /** Append-only ledger of instruction/asset changes (the before/after primitive). */
 export function insightsChangesPath(): string {
   return join(insightsRoot(), "changes.jsonl");
