@@ -15,7 +15,10 @@ import { type RuleViolation, type ToolCall, checkRules } from "./rules.ts";
 // v4 adds transcript anchors on moment-bearing metrics + the deterministic `candidates` list.
 // v5 attributes notes a `servant recall` surfaced inline (recallSurfacedNotes + recallsConsumed),
 // so the recall path counts as knowledge use even with zero `Read` calls.
-export const METRICS_SCHEMA_VERSION = 5;
+// v6 splits Bash tool buckets by command head (`Bash: git`, `Bash: npm`, …) so one catch-all "Bash"
+// bucket no longer swamps the spend chart, and captures friction samples (error/correction snippets)
+// so the dashboard can show *what* went wrong, not just how many.
+export const METRICS_SCHEMA_VERSION = 6;
 
 /**
  * A stable pointer back into a transcript so a later (qualitative) pass can re-locate the exact
@@ -98,6 +101,16 @@ export interface RepeatedRead {
   count: number;
 }
 
+/** One concrete friction event sampled from the transcript (a tool error or permission denial). */
+export interface FrictionSample {
+  /** Bucket label of the tool that errored (Bash split by command head, e.g. `Bash: git`). */
+  tool: string;
+  /** A short, single-line snippet of the error payload. */
+  snippet: string;
+  /** Whether the error read as a permission denial (vs a plain tool error). */
+  permission: boolean;
+}
+
 export interface SessionMetrics {
   schema: number;
   sessionId: string;
@@ -140,8 +153,12 @@ export interface SessionMetrics {
     errorToolResults: number;
     /** Subset of errors that look like permission denials. */
     permissionDenials: number;
+    /** A bounded sample of the actual error/denial payloads — so the report can show what broke. */
+    errorSamples: FrictionSample[];
     /** User turns shortly after an assistant action that read as a correction/redirect. */
     userCorrections: number;
+    /** A bounded sample of the actual correction snippets — so the report can show what was redirected. */
+    correctionSamples: string[];
     /** Files read more than once (instruction/context not retained). */
     repeatedReads: RepeatedRead[];
   };
@@ -301,6 +318,39 @@ function resultIsError(block: { is_error?: unknown; content?: unknown }): boolea
   return /^Error:|tool ran without|is_error/i.test(text) && /error/i.test(text);
 }
 
+/** Max number of error / correction samples kept per session (largest signal, bounded payload). */
+const MAX_FRICTION_SAMPLES = 8;
+
+/**
+ * The leading program of a shell command (basename), skipping leading env assignments (`FOO=bar`)
+ * and `sudo`. `git commit -m …` → `git`; `servant recall x` → `servant`; `/usr/bin/node a.js` → `node`.
+ * Returns null when there's no clean program token (e.g. a bare subshell), so the caller falls back.
+ */
+function bashHead(command: string): string | null {
+  const tokens = command.trim().split(/\s+/);
+  let i = 0;
+  while (i < tokens.length) {
+    const t = tokens[i] ?? "";
+    if (t === "sudo" || /^[A-Za-z_][A-Za-z0-9_]*=/.test(t)) i += 1;
+    else break;
+  }
+  const tok = tokens[i];
+  if (!tok) return null;
+  const base = tok.replace(/^.*\//, "");
+  return /^[\w.-]+$/.test(base) ? base : null;
+}
+
+/**
+ * The spend-bucket label for a tool result. Bash is split by command head so a single catch-all
+ * "Bash" bucket doesn't swamp the chart (`Bash: git`, `Bash: npm`, `Bash: servant`, …); every other
+ * tool keeps its own name.
+ */
+function bucketLabel(tool: string, input: Record<string, unknown>): string {
+  if (tool !== "Bash") return tool;
+  const head = bashHead(asString(input.command));
+  return head ? `Bash: ${head}` : "Bash";
+}
+
 /** Extract the human target of a tool call for the "largest results" list. */
 function targetOf(tool: string, input: Record<string, unknown>): string | null {
   if (tool === "Bash") return asString(input.command).slice(0, 80) || null;
@@ -357,6 +407,8 @@ export async function extractSessionMetrics(
   let errorToolResults = 0;
   let permissionDenials = 0;
   let userCorrections = 0;
+  const errorSamples: FrictionSample[] = [];
+  const correctionSamples: string[] = [];
   const readCounts = new Map<string, number>();
 
   let recallInvocations = 0;
@@ -487,16 +539,18 @@ export async function extractSessionMetrics(
           if (block.type !== "tool_result") continue;
           toolResultOnly = true;
           const tool = (block.tool_use_id && toolUseName.get(block.tool_use_id)) || "unknown";
+          const input = (block.tool_use_id && toolUseInput.get(block.tool_use_id)) || {};
+          // Bash splits into per-command-head buckets; every other tool keeps its own name.
+          const bucket = bucketLabel(tool, input);
           const chars = resultChars(block.content);
-          const b = bucketChars.get(tool) ?? { count: 0, chars: 0 };
+          const b = bucketChars.get(bucket) ?? { count: 0, chars: 0 };
           b.count += 1;
           b.chars += chars;
-          bucketChars.set(tool, b);
+          bucketChars.set(bucket, b);
           // Stage this result as a driver of the next assistant turn's context jump.
-          pendingDrivers.set(tool, (pendingDrivers.get(tool) ?? 0) + approxTokens(chars));
-          const input = (block.tool_use_id && toolUseInput.get(block.tool_use_id)) || {};
+          pendingDrivers.set(bucket, (pendingDrivers.get(bucket) ?? 0) + approxTokens(chars));
           largeResults.push({
-            tool,
+            tool: bucket,
             target: targetOf(tool, input),
             chars,
             approxTokens: approxTokens(chars),
@@ -512,7 +566,11 @@ export async function extractSessionMetrics(
               typeof block.content === "string"
                 ? block.content
                 : JSON.stringify(block.content ?? "");
-            if (PERMISSION_RE.test(text)) permissionDenials += 1;
+            const permission = PERMISSION_RE.test(text);
+            if (permission) permissionDenials += 1;
+            if (errorSamples.length < MAX_FRICTION_SAMPLES) {
+              errorSamples.push({ tool: bucket, snippet: oneLine(text, 120), permission });
+            }
           }
           // A recall is "consumed" if a knowledge note is Read after it.
           if (tool === "Read") {
@@ -571,6 +629,9 @@ export async function extractSessionMetrics(
               summary: `user correction: "${oneLine(text)}"`,
               anchor: { turnUuid: recUuid, toolUseId: null, line: lineNo },
             });
+            if (correctionSamples.length < MAX_FRICTION_SAMPLES) {
+              correctionSamples.push(oneLine(text, 120));
+            }
           }
         }
       }
@@ -681,7 +742,9 @@ export async function extractSessionMetrics(
       ruleViolations,
       errorToolResults,
       permissionDenials,
+      errorSamples,
       userCorrections,
+      correctionSamples,
       repeatedReads,
     },
     knowledge: {

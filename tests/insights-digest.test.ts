@@ -11,6 +11,11 @@ const emptyHealth: KnowledgeHealth = {
   byScope: { topic: 0, project: 0 },
   byRepo: [],
   confidence: { high: 0, medium: 0, low: 0 },
+  confidenceUsage: {
+    high: { used: 0, dead: 0 },
+    medium: { used: 0, dead: 0 },
+    low: { used: 0, dead: 0 },
+  },
   stale: [],
   rotted: [],
   orphanTags: [],
@@ -57,7 +62,9 @@ function rec(over: {
       })),
       errorToolResults: 0,
       permissionDenials: 0,
+      errorSamples: [],
       userCorrections: 0,
+      correctionSamples: [],
       repeatedReads: [],
     },
     knowledge: {

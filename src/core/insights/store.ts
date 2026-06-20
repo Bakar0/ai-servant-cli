@@ -3,6 +3,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { $ } from "bun";
 import {
+  insightsDashboardPath,
   insightsIndexPath,
   insightsJudgmentsDir,
   insightsMetricsDir,
@@ -22,10 +23,15 @@ function gitInitialized(): boolean {
   return existsSync(join(insightsRoot(), ".git"));
 }
 
+// The regenerated `--deep` dashboard is an artifact, not a data record, so the store git-ignores it.
+const STORE_GITIGNORE = "dashboard.html\n";
+
 /** Create the store dirs and git-init on first use. Idempotent and cheap. */
 export async function ensureInsightsStore(): Promise<void> {
   await mkdir(insightsMetricsDir(), { recursive: true });
   await mkdir(insightsJudgmentsDir(), { recursive: true });
+  const ignorePath = join(insightsRoot(), ".gitignore");
+  if (!existsSync(ignorePath)) await writeFile(ignorePath, STORE_GITIGNORE);
   if (!gitInitialized()) {
     await $`git -C ${insightsRoot()} init -q`.nothrow().quiet();
   }
@@ -106,4 +112,12 @@ export async function writeJudgment(record: JudgmentRecord): Promise<void> {
 export async function rebuildInsightsIndex(body: string): Promise<void> {
   await mkdir(insightsRoot(), { recursive: true });
   await writeFile(insightsIndexPath(), body.endsWith("\n") ? body : `${body}\n`);
+}
+
+/** Write the rendered `--deep` dashboard HTML (git-ignored artifact); returns its path. */
+export async function writeDashboard(html: string): Promise<string> {
+  await mkdir(insightsRoot(), { recursive: true });
+  const path = insightsDashboardPath();
+  await writeFile(path, html);
+  return path;
 }

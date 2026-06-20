@@ -5,12 +5,14 @@ import {
   findSessionJsonl,
   listWorkspaceSessions,
 } from "../core/claude-session.ts";
+import { renderDashboard } from "../core/insights/dashboard.ts";
 import {
   type Area,
   buildDigest,
   renderDigest,
   renderSessionTimeline,
 } from "../core/insights/digest.ts";
+import type { JudgmentRecord } from "../core/insights/judgments.ts";
 import { readNoteFilesFrom, scanKnowledgeHealth } from "../core/insights/knowledge-health.ts";
 import type { SessionMetrics } from "../core/insights/metrics.ts";
 import {
@@ -18,8 +20,11 @@ import {
   ensureInsightsStore,
   getOrComputeMetrics,
   readChanges,
+  readJudgment,
   rebuildInsightsIndex,
+  writeDashboard,
 } from "../core/insights/store.ts";
+import { openInDefaultApp } from "../core/open.ts";
 import { applyRootOverride } from "../core/paths.ts";
 import { resolveWorkspaceName } from "../core/workspace.ts";
 import { pickSession } from "../ui/resume-picker.ts";
@@ -106,7 +111,15 @@ export const insightsCommand = defineCommand({
       type: "boolean",
       required: false,
       default: false,
-      description: "Reserved: run an optional `claude -p` qualitative pass (no-op in v1).",
+      description:
+        "Render a self-contained HTML dashboard (four story sections) from the same data, open it, and print its path. Deterministic: no agent, no model. Ignored when --json is also set.",
+    },
+    "no-open": {
+      type: "boolean",
+      required: false,
+      default: false,
+      description:
+        "With --deep: write the dashboard and print its path, but don't open the browser.",
     },
     root: {
       type: "string",
@@ -187,6 +200,21 @@ export const insightsCommand = defineCommand({
       workspaceLabel,
     });
 
+    // --deep renders the visual surface from the same data and exits. --json keeps precedence
+    // (the dashboard is the visual surface, not a data format), so --deep --json behaves as --json.
+    if (args.deep && !args.json) {
+      const judgments: JudgmentRecord[] = [];
+      for (const r of records) {
+        const j = await readJudgment(r.sessionId);
+        if (j) judgments.push(j);
+      }
+      const html = renderDashboard({ digest, records, judgments, changes });
+      const path = await writeDashboard(html);
+      if (!args["no-open"]) openInDefaultApp(path);
+      console.log(path);
+      return;
+    }
+
     if (args.json) {
       console.log(JSON.stringify(digest, null, 2));
     } else {
@@ -197,10 +225,6 @@ export const insightsCommand = defineCommand({
         await rebuildInsightsIndex(text);
         await commitInsights("insights: refresh digest");
       }
-    }
-
-    if (args.deep) {
-      console.log("\n(--deep qualitative pass is reserved for a future release; no-op for now.)");
     }
   },
 });

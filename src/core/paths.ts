@@ -108,6 +108,14 @@ export function insightsIndexPath(): string {
   return join(insightsRoot(), "INDEX.md");
 }
 
+/**
+ * The rendered `--deep` HTML dashboard. A regenerated artifact (not part of the data record), so it
+ * lives in the store area but is git-ignored — it is overwritten on every `insights --deep` run.
+ */
+export function insightsDashboardPath(): string {
+  return join(insightsRoot(), "dashboard.html");
+}
+
 /** Queue of pending session-end extraction jobs (one JSON object per line). */
 export function extractQueuePath(): string {
   return join(cacheDir(), "extract-queue.jsonl");
