@@ -12,18 +12,20 @@ import { parseWorktreeDirName, reposRoot } from "./worktree-naming.ts";
 // knowledge index is inlined into the body below (see renderWorkspaceKnowledgeSection).
 const WORKSPACE_CLAUDE_MD_BASE = ["@../../CLAUDE.md", "@GOAL.md"];
 
-// SessionEnd hook that enqueues a knowledge-extraction job when a servant session ends.
-// It MUST live in the workspace's own `.claude/settings.json`: Claude Code discovers
-// slash commands by walking up the directory tree (so they resolve from the servant
-// root) but it does NOT discover settings.json that far up — it only reads the project
-// cwd's `.claude/settings.json`. `servant spawn` launches the agent with cwd = the
-// workspace dir, so scaffolding the hook here is what makes it fire. (Verified 2026-06-16:
-// an upward `~/.ai_servant/.claude/settings.json` does not fire; a per-workspace one does.)
-const SESSION_END_HOOK = {
-  type: "command",
-  command: "servant extract-memories --from-hook",
-  timeout: 15,
-};
+// SessionEnd hooks that fire when a servant session ends: (1) enqueue a knowledge-extraction job,
+// and (2) enqueue a qualitative insight-judgment job. Both are instant enqueues that never block
+// session close (a lockfile-serialized drainer does the headless work later).
+//
+// They MUST live in the workspace's own `.claude/settings.json`: Claude Code discovers slash
+// commands by walking up the directory tree (so they resolve from the servant root) but it does
+// NOT discover settings.json that far up — it only reads the project cwd's `.claude/settings.json`.
+// `servant spawn` launches the agent with cwd = the workspace dir, so scaffolding the hooks here is
+// what makes them fire. (Verified 2026-06-16: an upward `~/.ai_servant/.claude/settings.json` does
+// not fire; a per-workspace one does.)
+const SESSION_END_HOOKS = [
+  { type: "command", command: "servant extract-memories --from-hook", timeout: 15 },
+  { type: "command", command: "servant insights-judge --from-hook", timeout: 15 },
+];
 
 // The live telemetry recorder (`servant record`) was removed — it fed nothing user-facing and was
 // redundant with the transcript (see context/adr-002-remove-live-event-recorder.md). It used to be
@@ -170,14 +172,17 @@ export async function ensureWorkspaceSettings(workspaceDir: string): Promise<voi
     else delete hooks[event];
   }
 
-  // SessionEnd: strip the recorder but guarantee the knowledge-extraction enqueue is present.
+  // SessionEnd: strip the recorder, then guarantee each managed enqueue hook is present (appending
+  // any that's missing — this heals workspaces created before a hook was added). Idempotent.
   const sessionEnd = stripRecordHooks(hooks.SessionEnd);
-  const hasExtraction = sessionEnd.some(
-    (g) =>
-      isHookGroup(g) &&
-      g.hooks.some((h) => isCommandHook(h) && h.command === SESSION_END_HOOK.command),
-  );
-  hooks.SessionEnd = hasExtraction ? sessionEnd : [...sessionEnd, { hooks: [SESSION_END_HOOK] }];
+  for (const required of SESSION_END_HOOKS) {
+    const present = sessionEnd.some(
+      (g) =>
+        isHookGroup(g) && g.hooks.some((h) => isCommandHook(h) && h.command === required.command),
+    );
+    if (!present) sessionEnd.push({ hooks: [required] });
+  }
+  hooks.SessionEnd = sessionEnd;
 
   settings.hooks = hooks;
   const desired = `${JSON.stringify(settings, null, 2)}\n`;

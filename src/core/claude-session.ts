@@ -1,6 +1,7 @@
 import { stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join, relative, resolve, sep } from "node:path";
+import { readHeadlessSessionIds } from "./headless-sessions.ts";
 import { workspacesRoot } from "./paths.ts";
 import { assertValidWorkspaceName } from "./workspace.ts";
 
@@ -222,6 +223,9 @@ export async function listWorkspaceSessions(
   const includeWorktreeSubdirs = opts.includeWorktreeSubdirs ?? true;
   const now = Date.now();
   const wsRoot = workspacesRoot();
+  // Skip the servant's own headless runs (extraction, judging) so it never measures itself —
+  // the only self-measurement guard since the live recorder was removed (ADR-002).
+  const headlessIds = await readHeadlessSessionIds();
 
   const projectPrefix = opts.workspaceName
     ? encodeProjectDir(join(wsRoot, opts.workspaceName))
@@ -234,6 +238,7 @@ export async function listWorkspaceSessions(
 
     const glob = new Bun.Glob("*.jsonl");
     for await (const file of glob.scan({ cwd: projectDir, onlyFiles: true })) {
+      if (headlessIds.has(file.replace(/\.jsonl$/, ""))) continue; // servant's own headless run
       const path = join(projectDir, file);
       let s: Awaited<ReturnType<typeof stat>>;
       try {

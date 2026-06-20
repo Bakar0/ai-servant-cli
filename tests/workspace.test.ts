@@ -111,14 +111,17 @@ describe("ensureWorkspaceDir", () => {
     expectBaseClaudeMd(await readFile(path, "utf8"));
   });
 
-  test("scaffolds a per-workspace .claude/settings.json with the SessionEnd extraction hook only", async () => {
+  test("scaffolds a per-workspace .claude/settings.json with the SessionEnd enqueue hooks", async () => {
     const name = `settings-${process.pid}-${Date.now()}`;
     const dir = await ensureWorkspaceDir(name);
     const settings = JSON.parse(await readFile(join(dir, ".claude", "settings.json"), "utf8"));
-    // SessionEnd carries the knowledge-extraction enqueue — and nothing else.
-    const sessionEnd = settings.hooks?.SessionEnd?.[0]?.hooks ?? [];
-    expect(sessionEnd.map((h: { command: string }) => h.command)).toEqual([
+    // SessionEnd carries both servant enqueue hooks: knowledge extraction + insight judgment.
+    const commands = (settings.hooks?.SessionEnd ?? []).flatMap(
+      (g: { hooks: { command: string }[] }) => g.hooks.map((h) => h.command),
+    );
+    expect(commands).toEqual([
       "servant extract-memories --from-hook",
+      "servant insights-judge --from-hook",
     ]);
     // The deprecated telemetry recorder is no longer wired into any event (ADR-002).
     for (const event of [
@@ -145,9 +148,13 @@ describe("ensureWorkspaceDir", () => {
     const settings = JSON.parse(await readFile(path, "utf8"));
     expect(settings.model).toBe("opus"); // preserved
     expect(settings.hooks.Notification).toEqual([]); // preserved (unmanaged event)
-    expect(settings.hooks.SessionEnd[0].hooks[0].command).toBe(
-      "servant extract-memories --from-hook",
+    const mergedCommands = settings.hooks.SessionEnd.flatMap(
+      (g: { hooks: { command: string }[] }) => g.hooks.map((h) => h.command),
     );
+    expect(mergedCommands).toEqual([
+      "servant extract-memories --from-hook",
+      "servant insights-judge --from-hook",
+    ]);
     expect(settings.hooks.PostToolUse).toBeUndefined(); // recorder no longer added
   });
 
@@ -186,9 +193,13 @@ describe("ensureWorkspaceDir", () => {
     expect(settings.hooks.PostToolUse).toEqual([
       { hooks: [{ type: "command", command: "my-own-hook" }] },
     ]);
-    // extraction hook preserved on SessionEnd
-    expect(settings.hooks.SessionEnd[0].hooks.map((h: { command: string }) => h.command)).toEqual([
+    // extraction hook preserved on SessionEnd; the judgment hook is healed in alongside it
+    const healedCommands = settings.hooks.SessionEnd.flatMap(
+      (g: { hooks: { command: string }[] }) => g.hooks.map((h) => h.command),
+    );
+    expect(healedCommands).toEqual([
       "servant extract-memories --from-hook",
+      "servant insights-judge --from-hook",
     ]);
   });
 

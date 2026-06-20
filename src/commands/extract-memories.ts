@@ -55,9 +55,11 @@ interface HookPayload {
  * The single most important guard is `SERVANT_EXTRACTION`: the drainer runs its headless
  * `claude -p` with that env set, the hook subprocess inherits it, so the extraction's own
  * session end is ignored here — closing the capture loop without depending on CLI flags.
+ * `SERVANT_INSIGHTS` is honored the same way so the insight-judging headless run (which sets it)
+ * never triggers a memory extraction of itself either.
  */
 export async function runFromHook(stdin: string, opts: { kick?: boolean } = {}): Promise<void> {
-  if (process.env.SERVANT_EXTRACTION) return; // the extraction's own session — never re-enqueue
+  if (process.env.SERVANT_EXTRACTION || process.env.SERVANT_INSIGHTS) return; // servant's own run
 
   let payload: HookPayload;
   try {

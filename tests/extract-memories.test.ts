@@ -73,6 +73,16 @@ describe("runFromHook guards", () => {
     expect(await queueDepth()).toBe(0);
   });
 
+  test("SERVANT_INSIGHTS set → no enqueue (the judge's own headless session)", async () => {
+    process.env.SERVANT_INSIGHTS = "1";
+    try {
+      await runFromHook(payload(), { kick: false });
+      expect(await queueDepth()).toBe(0);
+    } finally {
+      process.env.SERVANT_INSIGHTS = "";
+    }
+  });
+
   test("cwd outside workspaces root → no enqueue", async () => {
     await runFromHook(payload({ cwd: "/tmp/elsewhere" }), { kick: false });
     expect(await queueDepth()).toBe(0);

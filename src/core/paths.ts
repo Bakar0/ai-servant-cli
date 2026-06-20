@@ -95,6 +95,14 @@ export function insightsChangesPath(): string {
   return join(insightsRoot(), "changes.jsonl");
 }
 
+/**
+ * One qualitative judgment record per session lives here (dedup key = session id), a sibling area
+ * to metrics/ inside the same git-tracked insights store.
+ */
+export function insightsJudgmentsDir(): string {
+  return join(insightsRoot(), "judgments");
+}
+
 /** Thin regenerated digest snapshot, like knowledge/INDEX.md. */
 export function insightsIndexPath(): string {
   return join(insightsRoot(), "INDEX.md");
@@ -118,6 +126,30 @@ export function extractMarkersPath(): string {
 /** Last drainer run status (for the `servant memories` digest). */
 export function extractStatusPath(): string {
   return join(cacheDir(), "extract-status.json");
+}
+
+/** Queue of pending session-end judgment jobs (one JSON object per line). */
+export function judgeQueuePath(): string {
+  return join(cacheDir(), "judge-queue.jsonl");
+}
+
+/** Lockfile guaranteeing only one judgment drainer runs at a time. */
+export function judgeLockPath(): string {
+  return join(cacheDir(), "judge-queue.lock");
+}
+
+/** Last judgment drainer run status. */
+export function judgeStatusPath(): string {
+  return join(cacheDir(), "judge-status.json");
+}
+
+/**
+ * Set of Claude session ids that servant itself created headlessly (memory extraction, insight
+ * judging). The pull/listing side reads this to keep the servant from measuring its own runs —
+ * the only self-measurement guard now that the live recorder is gone (see ADR-002).
+ */
+export function headlessSessionsPath(): string {
+  return join(cacheDir(), "headless-sessions.json");
 }
 
 export function claudeDir(): string {
