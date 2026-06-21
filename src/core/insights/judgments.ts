@@ -1,5 +1,6 @@
 import { rm } from "node:fs/promises";
 import { join } from "node:path";
+import { headlessModelArgs } from "../headless-model.ts";
 import { registerHeadlessSession } from "../headless-sessions.ts";
 import { cacheDir } from "../paths.ts";
 import type { Candidate, CandidateKind, TranscriptAnchor } from "./metrics.ts";
@@ -192,6 +193,26 @@ export type JudgeRunner = (input: {
  * measurement even if it crashes. `SERVANT_INSIGHTS=1` is the re-entry guard (the run's own
  * SessionEnd hook sees it and never re-enqueues). Best-effort; throws only when it produced nothing.
  */
+/**
+ * Argv for the headless judge `claude -p`. `headlessModelArgs()` injects `--model` (default
+ * `sonnet`) — see ADR-005. Exported so tests can assert the headless model without spawning claude.
+ */
+export function judgeArgv(prompt: string, sessionId: string): string[] {
+  return [
+    "claude",
+    "-p",
+    prompt,
+    ...headlessModelArgs(),
+    "--output-format",
+    "text",
+    "--dangerously-skip-permissions",
+    "--session-id",
+    sessionId,
+    "--add-dir",
+    cacheDir(),
+  ];
+}
+
 export const defaultJudgeRunner: JudgeRunner = async ({ job, candidates }) => {
   const sessionId = crypto.randomUUID();
   await registerHeadlessSession(sessionId); // exclude before spawn — robust against a crash mid-run
@@ -201,27 +222,13 @@ export const defaultJudgeRunner: JudgeRunner = async ({ job, candidates }) => {
     candidates,
     outPath,
   });
-  const proc = Bun.spawn(
-    [
-      "claude",
-      "-p",
-      prompt,
-      "--output-format",
-      "text",
-      "--dangerously-skip-permissions",
-      "--session-id",
-      sessionId,
-      "--add-dir",
-      cacheDir(),
-    ],
-    {
-      cwd: job.cwd,
-      stdin: "ignore",
-      stdout: "ignore",
-      stderr: "pipe",
-      env: { ...process.env, SERVANT_INSIGHTS: "1" },
-    },
-  );
+  const proc = Bun.spawn(judgeArgv(prompt, sessionId), {
+    cwd: job.cwd,
+    stdin: "ignore",
+    stdout: "ignore",
+    stderr: "pipe",
+    env: { ...process.env, SERVANT_INSIGHTS: "1" },
+  });
   const code = await proc.exited;
   let raw = "";
   try {
