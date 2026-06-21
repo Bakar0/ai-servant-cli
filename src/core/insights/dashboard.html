@@ -59,6 +59,18 @@
     border-radius: var(--radius); padding: 16px;
   }
   .card h3 { margin: 0 0 12px; font-size: 13px; color: var(--ink); font-weight: 600; }
+  /* Bound a card's variable-length body to a fixed height and let it scroll inside, so a
+     long list (one row per session / per tool) can't blow out the section's height. */
+  .card .scrollbox { max-height: 300px; overflow-y: auto; padding-right: 8px; }
+  /* Always show a styled scrollbar (macOS hides overlay scrollbars until you scroll, which
+     made it unclear there was more below). Styling the webkit scrollbar opts out of overlay. */
+  .card .scrollbox { scrollbar-width: thin; scrollbar-color: var(--muted) var(--panel-2); }
+  .card .scrollbox::-webkit-scrollbar { width: 10px; }
+  .card .scrollbox::-webkit-scrollbar-track { background: var(--panel-2); border-radius: 6px; }
+  .card .scrollbox::-webkit-scrollbar-thumb {
+    background: var(--faint); border-radius: 6px; border: 2px solid var(--panel-2);
+  }
+  .card .scrollbox::-webkit-scrollbar-thumb:hover { background: var(--muted); }
   .card .hint { color: var(--faint); font-size: 12px; margin: 8px 0 0; }
   .card ul { margin: 6px 0 12px; padding-left: 18px; }
   .card li { font-size: 12px; color: var(--muted); margin: 3px 0; word-break: break-word; }
@@ -356,31 +368,33 @@
     var sessions = c.sessions || [];
     var twocol = el("div", { class: "grid cols-2" });
 
-    // curves
+    // curves — rows scroll inside a fixed-height box; the hint stays pinned below it
     var curveCard = el("div", { class: "card" }, [el("h3", { text: "Context-growth curves" })]);
     if (sessions.length === 0) {
       curveCard.appendChild(emptyState("No sessions in this window."));
     } else {
+      var curveBox = el("div", { class: "scrollbox" });
       sessions.forEach(function (m, i) {
-        curveCard.appendChild(el("div", { class: "sessrow" }, [
+        curveBox.appendChild(el("div", { class: "sessrow" }, [
           el("div", { class: "id", title: m.id8, text: sessLabel(i, m.mtimeMs, m.workspace) }),
           sparkLine(m.curve),
           el("div", { class: "peak", html: "peak ~" + k(m.peakContext) + " <span class='pill'>" + winPct(m.peakContext, m.contextWindowSize) + " of win</span>" }),
         ]));
       });
+      curveCard.appendChild(curveBox);
       curveCard.appendChild(el("div", { class: "hint", text: "Each curve is scaled to its own peak — compare the shape of growth, not the height. The % is how much of the context window the peak used." }));
     }
     twocol.appendChild(curveCard);
 
-    // tool spend
+    // tool spend — bars scroll inside a fixed-height box
     var spendCard = el("div", { class: "card" }, [el("h3", { text: "Token spend by tool (window-wide)" })]);
     var spend = c.toolSpend || [];
     if (spend.length === 0) {
       spendCard.appendChild(emptyState("No tool-result payloads recorded."));
     } else {
-      spendCard.appendChild(barChart(spend.map(function (b) {
+      spendCard.appendChild(el("div", { class: "scrollbox" }, [barChart(spend.map(function (b) {
         return { name: b.tool, value: b.approxTokens, sub: "(" + b.count + ")" };
-      }), function (v) { return "~" + k(v); }));
+      }), function (v) { return "~" + k(v); })]));
     }
     twocol.appendChild(spendCard);
     s.appendChild(twocol);

@@ -138,7 +138,9 @@ describe("buildDashboardData", () => {
           ruleViolations: [{ rule: "no-plans-in-repo", detail: "x" }],
           errorToolResults: 2,
           permissionDenials: 1,
-          errorSamples: [{ tool: "Bash: git", snippet: "fatal: not a git repo", permission: false }],
+          errorSamples: [
+            { tool: "Bash: git", snippet: "fatal: not a git repo", permission: false },
+          ],
           userCorrections: 1,
           correctionSamples: ["no, use the workspace plans dir"],
           repeatedReads: [],
