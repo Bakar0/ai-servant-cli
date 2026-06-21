@@ -18,7 +18,8 @@ servant spawn -w add-rate-limiter -r    # -w names the workspace; -r picks repos
 servant repo add                        # interactively add another repo's worktree (picker)
 servant memories                        # browse what past sessions learned (fzf)
 servant insights                        # see how the setup steers agents (tokens, rules, knowledge)
-servant fine-tune                       # customize the agent instructions servant ships
+servant insights --deep                 # render an offline HTML dashboard of the same data
+servant fine-tune                       # insights analyst: read your metrics, then tune the instructions
 ```
 
 ---
@@ -126,8 +127,8 @@ Run any command with `--help` for the full flag list.
 | `servant resume` | Re-attach to a previous Claude Code session. |
 | `servant recall` | Search the knowledge base by tag and content; prints matching notes. |
 | `servant memories` | Browse the knowledge base in an fzf picker. |
-| `servant insights` | Transcript-driven observability across instructions, tokens, and the knowledge base. |
-| `servant fine-tune` | Customize servant's instruction assets in a way that survives CLI updates. |
+| `servant insights` | Transcript-driven observability across instructions, tokens, and the knowledge base; `--deep` renders an offline HTML dashboard. |
+| `servant fine-tune` | Insights analyst: investigate the metrics, then tune servant's instructions via overlays that survive CLI updates. |
 | `servant statusline` | Install the servant status line into Claude Code. |
 | `servant extract-memories` | (Mostly internal) capture/reconcile durable knowledge from sessions. |
 
@@ -209,20 +210,28 @@ servant insights --days 90             # widen the window  (or --since 2026-01-0
 servant insights --area tokens         # focus one area: tokens | instructions | knowledge
 servant insights -s <session-id>       # one session's context-growth curve + per-jump tool drivers
 servant insights --json                # machine-readable digest
+servant insights --deep                # render a self-contained HTML dashboard and open it
+servant insights --deep --no-open      # ...write + print the path, but don't open the browser
 ```
 
 The `-s/--session` view answers "how did the context window grow, when, and what filled it?" for a single session: a sparkline of the per-turn context trajectory, the biggest jumps (turn number · size · the tool result that drove each), and total token spend bucketed by tool.
 
-Metrics live in a git-tracked store at `~/.ai_servant/insights/` (one cached record per session, plus the change ledger and a digest snapshot). v1 is report-only.
+`--deep` renders the same data as a **self-contained HTML dashboard** — four story sections (*did my tuning help · where's context leaking · friction · knowledge health*), charts inlined, no network, works offline. It's deterministic: no agent is spawned and no model is called. The dashboard is also layered with **qualitative judgments** — at `SessionEnd` a headless pass reads the few flagged moments in a session and records a short verdict per moment, so "was that big read worth it?" is answered on the page.
+
+Metrics live in a git-tracked store at `~/.ai_servant/insights/` (one cached record per session, the per-session judgments, the change ledger, and a digest snapshot). `servant insights` is read-only; to act on what it shows, use `servant fine-tune` (below).
 
 ### `servant fine-tune`
 
-Customize servant's instruction assets per *aspect*. Run bare for an interactive tuning session, or use flags for the deterministic write path. Customizations are stored as overlays that **survive CLI updates**.
+The **insights analyst** and the way you tune servant. Run bare and it closes the loop *observe → understand → act*: it pulls your insights (rendering the dashboard), narrates the takeaways, helps you investigate — drilling a flagged metric back into the exact moment in the transcript that produced it — and then tunes servant's instructions based on what you found.
+
+Tuning is per *aspect* (the root `CLAUDE.md`, each `/servant:*` command, the headless memory extractor). Changes are written as **overlays** layered on top of the shipped assets, so they **survive CLI updates**, and each write is recorded in the insights change ledger — so the next dashboard shows the before/after.
 
 ```bash
-servant fine-tune              # interactive session
+servant fine-tune              # interactive analyst session (investigate, then tune)
+servant fine-tune <aspect>     # fast path: jump straight to tuning one aspect
 servant fine-tune --list       # list tunable aspects and which are customized
-servant fine-tune <aspect> --show
+servant fine-tune <aspect> --show     # print the current overlay
+servant fine-tune <aspect> --reset    # revert an aspect to the shipped default
 ```
 
 ---
@@ -237,7 +246,7 @@ Every workspace ships with a set of `/servant:*` slash commands for Claude Code 
 | `/servant:delegate` | Distill the current session into an Agent Brief and spawn a fresh servant in the same workspace to execute it. |
 | `/servant:recall` | Search the durable knowledge base for what prior servants learned about a project or topic. |
 | `/servant:extract-memories` | Distill durable knowledge from the current session into the knowledge base (projects + topics). |
-| `/servant:fine-tune` | Interview you to customize a servant instruction aspect, then write the overlay via the CLI. |
+| `/servant:fine-tune` | Insights analyst: read servant's own metrics, investigate them, then tune an instruction aspect via the overlay path. |
 
 These stay in sync automatically — they're re-synced on every `spawn`/`resume`, so updating servant updates the commands in every workspace.
 
@@ -255,6 +264,12 @@ These stay in sync automatically — they're re-synced on every `spawn`/`resume`
 ```
 
 Narrow `repoSearchRoots` to the directories where you actually keep clones to make discovery faster and the picker shorter. Edit the file directly — these values are never prompted for or clobbered on re-run.
+
+### Environment variables
+
+| Variable | Default | What it does |
+|----------|---------|--------------|
+| `SERVANT_HEADLESS_MODEL` | `sonnet` | Model for servant's two *headless* `claude -p` passes (memory extraction + insight judgment), which fire unattended on `SessionEnd`. Set to a model name to override, or to `default` (or empty) to inherit your Claude Code default. **Interactive spawns (`servant spawn`, `servant fine-tune`) always use your default model — this never touches them.** |
 
 ---
 
