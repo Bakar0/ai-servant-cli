@@ -6,12 +6,14 @@
 </p>
 
 <p align="center">
-  <em>A CLI that enhances developer and coding-agent workflows — spin up isolated agent workspaces, manage git worktrees, and grow a knowledge base your agents learn from.</em>
+  <em><strong>It serves; you command.</strong></em>
+  <br>
+  <em>An advanced tool that amplifies the engineer - never replaces them.</em>
 </p>
 
 ---
 
-`servant` gives every task its own workspace: a dedicated folder, git worktrees of the repos you're working in, and a coding agent (Claude Code) launched in a fresh terminal tab. Sessions are resumable, and durable knowledge is captured automatically so your agents get smarter over time.
+`servant` puts coding agents to work in the engineer's service. Every task gets its own workspace: a dedicated folder, git worktrees of the repos you're working in, and a coding agent (Claude Code) launched in a fresh terminal tab. Sessions are resumable, durable knowledge is captured automatically, and ongoing context is shared across every session in the workspace - so the agent does the heavy lifting while you stay the architect. Like the compiler before it, servant raises the level you work at without taking your hands off the wheel.
 
 ```bash
 servant spawn -w add-rate-limiter -r    # -w names the workspace; -r picks repos + adds worktrees
@@ -22,12 +24,18 @@ servant insights --deep                 # render an offline HTML dashboard of th
 servant fine-tune                       # insights analyst: read your metrics, then tune the instructions
 ```
 
+> **The everyday move - `/servant:delegate`.** From inside a session, distill what you've
+> figured out into an **Agent Brief** (a self-contained contract) and spawn a fresh agent in the
+> same workspace to execute it. Briefs, plans, and context docs live in the workspace - not the
+> repo - so ongoing context is shared across sessions: each new agent picks up exactly where the
+> last one left off, instead of starting cold. This is how you keep command while the work fans out.
+
 ---
 
 ## Contents
 
 - [Requirements](#requirements)
-- [Installation](#installation) — `brew install` + first-time setup
+- [Installation](#installation) - `brew install` + first-time setup
 - [Quick start](#quick-start)
 - [How it works](#how-it-works)
 - [Commands](#commands)
@@ -43,15 +51,15 @@ servant fine-tune                       # insights analyst: read your metrics, t
 | Tool | Why | Install |
 |------|-----|---------|
 | [Claude Code](https://claude.com/claude-code) | The default coding agent that gets launched | `npm i -g @anthropic-ai/claude-code` |
-| [fzf](https://github.com/junegunn/fzf) | Interactive repo/session/memory pickers (optional — there's a numbered fallback) | `brew install fzf` |
-| [cmux](https://github.com/manaflow-ai/cmux) or iTerm | Terminal that hosts the agent tabs (auto-detected) | — |
+| [fzf](https://github.com/junegunn/fzf) | Interactive repo/session/memory pickers (optional - there's a numbered fallback) | `brew install fzf` |
+| [cmux](https://github.com/manaflow-ai/cmux) or iTerm | Terminal that hosts the agent tabs (auto-detected) | - |
 | [Bun](https://bun.sh) ≥ 1.3 | Only to build/hack on servant itself (end users installing via Homebrew don't need it) | `curl -fsSL https://bun.sh/install \| bash` |
 
 ---
 
 ## Installation
 
-`servant` ships as a self-contained compiled binary — end users need nothing else installed
+`servant` ships as a self-contained compiled binary - end users need nothing else installed
 (no clone, no Bun). Install it from the Homebrew tap:
 
 ```bash
@@ -60,7 +68,7 @@ servant --version            # prints the release version, e.g. v0.2.0
 brew upgrade servant         # later, to pick up a newer release
 ```
 
-> Contributors who want to hack on servant itself want the source instead — see
+> Contributors who want to hack on servant itself want the source instead - see
 > [the three ways to run servant](#the-three-ways-to-run-servant) below.
 
 ### First-time setup
@@ -84,7 +92,7 @@ servant init
 servant init
 
 # 2. Start a task: pick the repos you need, add a worktree of each,
-#    and open an agent tab — all in one step.
+#    and open an agent tab - all in one step.
 servant spawn -w add-rate-limiter -r
 
 # 3. Later, jump back into a previous session (fzf picker over history)
@@ -108,10 +116,10 @@ Everything servant manages lives under a single root, `~/.ai_servant/`:
 ```
 
 - A **workspace** is a self-contained folder for one task. The coding agent runs there with its own `CLAUDE.md` and slash commands.
-- **Worktrees** use a flat `repos/<repo>__<branch>/` layout — multiple repos per workspace, each a real `git worktree` of your existing local clone (your original checkout is untouched).
+- **Worktrees** use a flat `repos/<repo>__<branch>/` layout - multiple repos per workspace, each a real `git worktree` of your existing local clone (your original checkout is untouched).
 - **Assets are CLI-owned and self-healing**: they're re-synced on every `spawn`/`resume`, so updating servant updates every workspace's instructions automatically. Your `fine-tune` overlays are layered on top and preserved.
 
-> Override the root on any command with `--root <path>` — handy for throwaway or test setups.
+> Override the root on any command with `--root <path>` - handy for throwaway or test setups.
 
 ---
 
@@ -154,9 +162,9 @@ servant spawn -w my-task -p "Read brief.md and start"   # deliver a first prompt
 
 ### `servant repo`
 
-Manage git worktrees of your **local** clones inside a workspace. `repo add` searches the directories in `config.json` (default: your home dir), opens a picker, and creates one worktree per selected repo — all on the same branch.
+Manage git worktrees of your **local** clones inside a workspace. `repo add` searches the directories in `config.json` (default: your home dir), opens a picker, and creates one worktree per selected repo - all on the same branch.
 
-The common way is to run it **bare** — no arguments needed. The workspace is auto-detected (from your cwd or current cmux workspace), the picker lets you choose the repo(s), and the branch is auto-generated:
+The common way is to run it **bare** - no arguments needed. The workspace is auto-detected (from your cwd or current cmux workspace), the picker lets you choose the repo(s), and the branch is auto-generated:
 
 ```bash
 servant repo add                                 # interactive: pick repo(s), auto branch
@@ -181,7 +189,7 @@ servant resume <session-id> --new-tab   # resume a specific session in a new tab
 servant resume --prompt "continue"      # resume with a kickoff prompt
 ```
 
-### Knowledge base — `recall` & `memories`
+### Knowledge base - `recall` & `memories`
 
 servant captures durable knowledge from your sessions into `~/.ai_servant/knowledge/` (wired via a Claude Code `SessionEnd` hook). Query it anytime:
 
@@ -195,13 +203,13 @@ In-session, agents use the `/servant:recall` and `/servant:extract-memories` sla
 
 ### `servant insights`
 
-A feedback loop on how well servant's setup is steering your agents. It mines the Claude Code session transcripts servant already produces — no extra instrumentation — and reports across three areas:
+A feedback loop on how well servant's setup is steering your agents. It mines the Claude Code session transcripts servant already produces - no extra instrumentation - and reports across three areas:
 
-- **Tokens / context window** — peak & final context occupancy, cache-hit ratio, output volume, which tools eat the window, and the static instruction footprint servant imposes per session.
-- **Instructions** — `/servant:*` command usage, checkable rule violations (e.g. writing a plan *inside* a repo worktree), tool errors, permission denials, and user-correction turns.
-- **Knowledge base** — recall usage and whether results were actually read, plus a store-health scan (note counts, confidence, stale/rotted/orphan/**dead** notes that are never recalled).
+- **Tokens / context window** - peak & final context occupancy, cache-hit ratio, output volume, which tools eat the window, and the static instruction footprint servant imposes per session.
+- **Instructions** - `/servant:*` command usage, checkable rule violations (e.g. writing a plan *inside* a repo worktree), tool errors, permission denials, and user-correction turns.
+- **Knowledge base** - recall usage and whether results were actually read, plus a store-health scan (note counts, confidence, stale/rotted/orphan/**dead** notes that are never recalled).
 
-Sessions are grouped by a **setup fingerprint** (CLAUDE.md + command bodies + a knowledge signature + the Claude Code version) and aligned to a change ledger, so the digest reads as a **before/after timeline** — change an instruction or fine-tune an overlay, and you can see how the metrics moved.
+Sessions are grouped by a **setup fingerprint** (CLAUDE.md + command bodies + a knowledge signature + the Claude Code version) and aligned to a change ledger, so the digest reads as a **before/after timeline** - change an instruction or fine-tune an overlay, and you can see how the metrics moved.
 
 ```bash
 servant insights                       # all workspaces, rolling 30 days, all three areas
@@ -216,15 +224,15 @@ servant insights --deep --no-open      # ...write + print the path, but don't op
 
 The `-s/--session` view answers "how did the context window grow, when, and what filled it?" for a single session: a sparkline of the per-turn context trajectory, the biggest jumps (turn number · size · the tool result that drove each), and total token spend bucketed by tool.
 
-`--deep` renders the same data as a **self-contained HTML dashboard** — four story sections (*did my tuning help · where's context leaking · friction · knowledge health*), charts inlined, no network, works offline. It's deterministic: no agent is spawned and no model is called. The dashboard is also layered with **qualitative judgments** — at `SessionEnd` a headless pass reads the few flagged moments in a session and records a short verdict per moment, so "was that big read worth it?" is answered on the page.
+`--deep` renders the same data as a **self-contained HTML dashboard** - four story sections (*did my tuning help · where's context leaking · friction · knowledge health*), charts inlined, no network, works offline. It's deterministic: no agent is spawned and no model is called. The dashboard is also layered with **qualitative judgments** - at `SessionEnd` a headless pass reads the few flagged moments in a session and records a short verdict per moment, so "was that big read worth it?" is answered on the page.
 
 Metrics live in a git-tracked store at `~/.ai_servant/insights/` (one cached record per session, the per-session judgments, the change ledger, and a digest snapshot). `servant insights` is read-only; to act on what it shows, use `servant fine-tune` (below).
 
 ### `servant fine-tune`
 
-The **insights analyst** and the way you tune servant. Run bare and it closes the loop *observe → understand → act*: it pulls your insights (rendering the dashboard), narrates the takeaways, helps you investigate — drilling a flagged metric back into the exact moment in the transcript that produced it — and then tunes servant's instructions based on what you found.
+The **insights analyst** and the way you tune servant. Run bare and it closes the loop *observe → understand → act*: it pulls your insights (rendering the dashboard), narrates the takeaways, helps you investigate - drilling a flagged metric back into the exact moment in the transcript that produced it - and then tunes servant's instructions based on what you found.
 
-Tuning is per *aspect* (the root `CLAUDE.md`, each `/servant:*` command, the headless memory extractor). Changes are written as **overlays** layered on top of the shipped assets, so they **survive CLI updates**, and each write is recorded in the insights change ledger — so the next dashboard shows the before/after.
+Tuning is per *aspect* (the root `CLAUDE.md`, each `/servant:*` command, the headless memory extractor). Changes are written as **overlays** layered on top of the shipped assets, so they **survive CLI updates**, and each write is recorded in the insights change ledger - so the next dashboard shows the before/after.
 
 ```bash
 servant fine-tune              # interactive analyst session (investigate, then tune)
@@ -242,13 +250,13 @@ Every workspace ships with a set of `/servant:*` slash commands for Claude Code 
 
 | Command | What it does |
 |---------|--------------|
-| `/servant:goal` | Interview you to define (or amend) `GOAL.md` — a short statement of what the workspace is for. |
+| `/servant:goal` | Interview you to define (or amend) `GOAL.md` - a short statement of what the workspace is for. |
 | `/servant:delegate` | Distill the current session into an Agent Brief and spawn a fresh servant in the same workspace to execute it. |
 | `/servant:recall` | Search the durable knowledge base for what prior servants learned about a project or topic. |
 | `/servant:extract-memories` | Distill durable knowledge from the current session into the knowledge base (projects + topics). |
 | `/servant:fine-tune` | Insights analyst: read servant's own metrics, investigate them, then tune an instruction aspect via the overlay path. |
 
-These stay in sync automatically — they're re-synced on every `spawn`/`resume`, so updating servant updates the commands in every workspace.
+These stay in sync automatically - they're re-synced on every `spawn`/`resume`, so updating servant updates the commands in every workspace.
 
 ---
 
@@ -263,13 +271,13 @@ These stay in sync automatically — they're re-synced on every `spawn`/`resume`
 }
 ```
 
-Narrow `repoSearchRoots` to the directories where you actually keep clones to make discovery faster and the picker shorter. Edit the file directly — these values are never prompted for or clobbered on re-run.
+Narrow `repoSearchRoots` to the directories where you actually keep clones to make discovery faster and the picker shorter. Edit the file directly - these values are never prompted for or clobbered on re-run.
 
 ### Environment variables
 
 | Variable | Default | What it does |
 |----------|---------|--------------|
-| `SERVANT_HEADLESS_MODEL` | `sonnet` | Model for servant's two *headless* `claude -p` passes (memory extraction + insight judgment), which fire unattended on `SessionEnd`. Set to a model name to override, or to `default` (or empty) to inherit your Claude Code default. **Interactive spawns (`servant spawn`, `servant fine-tune`) always use your default model — this never touches them.** |
+| `SERVANT_HEADLESS_MODEL` | `sonnet` | Model for servant's two *headless* `claude -p` passes (memory extraction + insight judgment), which fire unattended on `SessionEnd`. Set to a model name to override, or to `default` (or empty) to inherit your Claude Code default. **Interactive spawns (`servant spawn`, `servant fine-tune`) always use your default model - this never touches them.** |
 
 ---
 
@@ -278,7 +286,7 @@ Narrow `repoSearchRoots` to the directories where you actually keep clones to ma
 `repo add` (and `spawn -r`) open an [fzf](https://github.com/junegunn/fzf) picker:
 
 - Type to filter · `↑`/`↓` to move · `Esc` to cancel
-- **Enter** confirms — with no marks, the highlighted row; with marks, all marked rows
+- **Enter** confirms - with no marks, the highlighted row; with marks, all marked rows
 - **Tab** toggles a row (multi-select) · **Ctrl-A** toggles all
 
 One worktree is created per selected repo, all on the same `--branch` name. If fzf isn't installed, you get a numbered fallback (`brew install fzf` to upgrade the experience).
@@ -302,7 +310,7 @@ bun run format     # biome format --write
 
 | Mode | Command | When | Edits reflect? |
 |------|---------|------|----------------|
-| **Dev iterate** | `bun run src/index.ts …` (or `bun run dev …`) | Fast inner loop while hacking | Immediately — runs the source |
+| **Dev iterate** | `bun run src/index.ts …` (or `bun run dev …`) | Fast inner loop while hacking | Immediately - runs the source |
 | **Local build test** | `bun run build` → `./dist/servant …` | Validate the *real* compiled artifact before pushing | Only after a rebuild |
 | **Published** | `brew install Bakar0/tap/servant` | What end users get | On `brew upgrade` |
 
@@ -319,14 +327,14 @@ Ensure Bun's bin dir is on your `PATH` (the Bun installer usually adds it):
 export PATH="$HOME/.bun/bin:$PATH"
 ```
 
-> This replaces any earlier `bun link` symlink with a real, versioned binary — the global
+> This replaces any earlier `bun link` symlink with a real, versioned binary - the global
 > command no longer silently tracks whatever working tree the symlink pointed at.
 
 ### How templates and version are embedded
 
 The binary is fully self-contained: there is no source tree to read at runtime.
 
-- **Templates** (`src/templates/**` — the workspace `CLAUDE.md`, `/servant:*` slash commands,
+- **Templates** (`src/templates/**` - the workspace `CLAUDE.md`, `/servant:*` slash commands,
   the status-line script) are embedded via a generated manifest, `src/templates/index.generated.ts`
   (`with { type: "text" }` imports). Regenerate it with `bun run gen:templates`; CI fails if it
   drifts from the files on disk. Never edit the generated file by hand.
@@ -339,7 +347,7 @@ remember to.
 
 ### Releasing & distribution
 
-Publishing is plain git + CI — there is no `servant release` subcommand.
+Publishing is plain git + CI - there is no `servant release` subcommand.
 
 1. Tag and push: `git tag v0.2.0 && git push --tags`.
 2. [`.github/workflows/release.yml`](.github/workflows/release.yml) builds a standalone binary
@@ -353,14 +361,14 @@ PRs continue to run [`ci.yml`](.github/workflows/ci.yml) (lint, typecheck, test,
 
 - The public tap repo **`Bakar0/homebrew-tap`** holds the formula at `Formula/servant.rb`,
   rendered by [`scripts/gen-formula.ts`](scripts/gen-formula.ts) on every release. Homebrew
-  strips the `homebrew-` prefix, so it's addressed as `Bakar0/tap` — and one tap repo can hold
+  strips the `homebrew-` prefix, so it's addressed as `Bakar0/tap` - and one tap repo can hold
   formulae for any future tools too.
 - The release workflow pushes that formula across-repo using a **GitHub App** (short-lived,
-  per-run token — no long-lived PAT to rotate, not tied to a personal account):
+  per-run token - no long-lived PAT to rotate, not tied to a personal account):
   1. Create a GitHub App with **Repository permissions → Contents: Read and write**, and
      generate a private key (`.pem`).
   2. **Install** the app on the `Bakar0/homebrew-tap` repo.
   3. Add two secrets to `ai-servant-cli`: **`APP_ID`** (the app's numeric ID) and
      **`APP_PRIVATE_KEY`** (the full `.pem` contents).
-- Without `APP_ID`, releases still publish — the formula-bump job just warns and skips, so you
+- Without `APP_ID`, releases still publish - the formula-bump job just warns and skips, so you
   can populate `Formula/servant.rb` manually for the first release.
