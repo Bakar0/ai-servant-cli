@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { extractSessionMetrics } from "../src/core/insights/metrics.ts";
+import { METRICS_SCHEMA_VERSION, extractSessionMetrics } from "../src/core/insights/metrics.ts";
 import { setRootOverride } from "../src/core/paths.ts";
 
 let tmpRoot: string;
@@ -138,5 +138,114 @@ describe("extractSessionMetrics", () => {
     // a deterministic fingerprint is assigned
     expect(m.setupFingerprint).toMatch(/^[0-9a-f]{12}$/);
     expect(m.version).toBe("2.1.99");
+  });
+});
+
+/** A `servant recall` Bash result, mirroring `renderNote`: each hit ends with its absolute path. */
+function recallResult(notePaths: string[]): string {
+  return notePaths
+    .map(
+      (p, i) =>
+        `# note-${i}  (topic)\nsome description\n\nbody text for note ${i}\n\n_2026-06-01 · confidence: high_\n\n${p}`,
+    )
+    .join("\n\n---\n\n");
+}
+
+describe("extractSessionMetrics — recall-surfaced notes", () => {
+  const noteA = () => join(tmpRoot, "knowledge", "topics", "coralogix.md");
+  const noteB = () => join(tmpRoot, "knowledge", "projects", "api-gw", "auth-flow.md");
+
+  /** A transcript that runs `servant recall` via Bash and uses the inline output (no Read). */
+  async function recallFixture(notePaths: string[], command = "servant recall auth") {
+    return writeFixture([
+      { type: "user", cwd: worktree, message: { role: "user", content: "go" } },
+      {
+        type: "assistant",
+        cwd: worktree,
+        message: {
+          role: "assistant",
+          model: "claude-opus-4-7",
+          usage: { input_tokens: 10, cache_read_input_tokens: 100, output_tokens: 20 },
+          content: [
+            { type: "text", text: "recalling" },
+            { type: "tool_use", id: "tu-recall", name: "Bash", input: { command } },
+          ],
+        },
+      },
+      {
+        type: "user",
+        cwd: worktree,
+        message: {
+          role: "user",
+          content: [
+            { type: "tool_result", tool_use_id: "tu-recall", content: recallResult(notePaths) },
+          ],
+        },
+      },
+    ]);
+  }
+
+  test("attributes notes a recall surfaced inline, with zero Read calls", async () => {
+    const m = await extractSessionMetrics(await recallFixture([noteB(), noteA()]));
+
+    // The recall ran and its surfaced notes are captured from the Bash *result* — no Read needed.
+    expect(m.knowledge.recallInvocations).toBe(1);
+    expect(m.knowledge.knowledgeReads).toEqual([]);
+    // Deterministic: deduped + sorted regardless of order in the output.
+    expect(m.knowledge.recallSurfacedNotes).toEqual([noteA(), noteB()].toSorted());
+    // "Consumed" reflects reality: a recall that surfaced ≥1 note counts as consumed.
+    expect(m.knowledge.recallsConsumed).toBe(1);
+    // Legacy read-follow signal stays ~0 on the pure-recall path (unchanged).
+    expect(m.knowledge.recallFollowedByRead).toBe(0);
+    // Schema is bumped so stale cached records recompute.
+    expect(m.schema).toBe(METRICS_SCHEMA_VERSION);
+  });
+
+  test("dedupes repeated path lines and is stable across recompute", async () => {
+    // Same note printed twice (e.g. recalled in two hits) collapses to one entry.
+    const path = await recallFixture([noteA(), noteA(), noteB()]);
+    const a = await extractSessionMetrics(path);
+    const b = await extractSessionMetrics(path);
+    expect(a.knowledge.recallSurfacedNotes).toEqual([noteA(), noteB()].toSorted());
+    expect(b.knowledge.recallSurfacedNotes).toEqual(a.knowledge.recallSurfacedNotes);
+  });
+
+  test("a non-recall Bash result is not mined for note paths", async () => {
+    // A cat of a knowledge file is not a recall — its result must not be attributed as surfaced.
+    const path = await recallFixture([noteA()], "cat some-file.md");
+    const m = await extractSessionMetrics(path);
+    expect(m.knowledge.recallInvocations).toBe(0);
+    expect(m.knowledge.recallSurfacedNotes).toEqual([]);
+    expect(m.knowledge.recallsConsumed).toBe(0);
+  });
+
+  test("direct Read attribution still works (grep/Read path unchanged)", async () => {
+    const knowledgePath = noteA();
+    const path = await writeFixture([
+      { type: "user", cwd: worktree, message: { role: "user", content: "go" } },
+      {
+        type: "assistant",
+        cwd: worktree,
+        message: {
+          role: "assistant",
+          model: "claude-opus-4-7",
+          usage: { input_tokens: 10, cache_read_input_tokens: 100, output_tokens: 20 },
+          content: [
+            { type: "tool_use", id: "tu-read", name: "Read", input: { file_path: knowledgePath } },
+          ],
+        },
+      },
+      {
+        type: "user",
+        cwd: worktree,
+        message: {
+          role: "user",
+          content: [{ type: "tool_result", tool_use_id: "tu-read", content: "note body" }],
+        },
+      },
+    ]);
+    const m = await extractSessionMetrics(path);
+    expect(m.knowledge.knowledgeReads).toEqual([knowledgePath]);
+    expect(m.knowledge.recallSurfacedNotes).toEqual([]);
   });
 });

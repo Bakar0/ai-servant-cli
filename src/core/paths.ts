@@ -90,23 +90,30 @@ export function insightsMetricsDir(): string {
   return join(insightsRoot(), "metrics");
 }
 
-/** Append-only live telemetry: one JSONL event log per session, written by `servant record`. */
-export function insightsEventsDir(): string {
-  return join(insightsRoot(), "events");
-}
-
-export function insightsEventLogPath(sessionId: string): string {
-  return join(insightsEventsDir(), `${sessionId}.jsonl`);
-}
-
 /** Append-only ledger of instruction/asset changes (the before/after primitive). */
 export function insightsChangesPath(): string {
   return join(insightsRoot(), "changes.jsonl");
 }
 
+/**
+ * One qualitative judgment record per session lives here (dedup key = session id), a sibling area
+ * to metrics/ inside the same git-tracked insights store.
+ */
+export function insightsJudgmentsDir(): string {
+  return join(insightsRoot(), "judgments");
+}
+
 /** Thin regenerated digest snapshot, like knowledge/INDEX.md. */
 export function insightsIndexPath(): string {
   return join(insightsRoot(), "INDEX.md");
+}
+
+/**
+ * The rendered `--deep` HTML dashboard. A regenerated artifact (not part of the data record), so it
+ * lives in the store area but is git-ignored — it is overwritten on every `insights --deep` run.
+ */
+export function insightsDashboardPath(): string {
+  return join(insightsRoot(), "dashboard.html");
 }
 
 /** Queue of pending session-end extraction jobs (one JSON object per line). */
@@ -127,6 +134,30 @@ export function extractMarkersPath(): string {
 /** Last drainer run status (for the `servant memories` digest). */
 export function extractStatusPath(): string {
   return join(cacheDir(), "extract-status.json");
+}
+
+/** Queue of pending session-end judgment jobs (one JSON object per line). */
+export function judgeQueuePath(): string {
+  return join(cacheDir(), "judge-queue.jsonl");
+}
+
+/** Lockfile guaranteeing only one judgment drainer runs at a time. */
+export function judgeLockPath(): string {
+  return join(cacheDir(), "judge-queue.lock");
+}
+
+/** Last judgment drainer run status. */
+export function judgeStatusPath(): string {
+  return join(cacheDir(), "judge-status.json");
+}
+
+/**
+ * Set of Claude session ids that servant itself created headlessly (memory extraction, insight
+ * judging). The pull/listing side reads this to keep the servant from measuring its own runs —
+ * the only self-measurement guard now that the live recorder is gone (see ADR-002).
+ */
+export function headlessSessionsPath(): string {
+  return join(cacheDir(), "headless-sessions.json");
 }
 
 export function claudeDir(): string {

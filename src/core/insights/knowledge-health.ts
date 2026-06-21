@@ -12,6 +12,8 @@ export interface KnowledgeHealth {
   byScope: { topic: number; project: number };
   byRepo: { repo: string; count: number }[];
   confidence: Record<Confidence, number>;
+  /** Per-confidence split of whether a note is actually used (read/recalled) or dead. */
+  confidenceUsage: Record<Confidence, { used: number; dead: number }>;
   /** Notes whose source.date is older than the staleness window. */
   stale: { name: string; path: string; date: string }[];
   /** Notes whose body cites a file path that no longer exists on disk. */
@@ -62,6 +64,11 @@ export async function scanKnowledgeHealth(
   const byScope = { topic: 0, project: 0 };
   const repoCounts = new Map<string, number>();
   const confidence: Record<Confidence, number> = { high: 0, medium: 0, low: 0 };
+  const confidenceUsage: Record<Confidence, { used: number; dead: number }> = {
+    high: { used: 0, dead: 0 },
+    medium: { used: 0, dead: 0 },
+    low: { used: 0, dead: 0 },
+  };
   const tagCounts = new Map<string, number>();
   const stale: KnowledgeHealth["stale"] = [];
   const rotted: KnowledgeHealth["rotted"] = [];
@@ -92,7 +99,12 @@ export async function scanKnowledgeHealth(
       }
     }
 
-    if (!readSet.has(path)) dead.push({ name: note.name, path });
+    const isUsed = readSet.has(path);
+    if (isUsed) confidenceUsage[note.confidence].used += 1;
+    else {
+      confidenceUsage[note.confidence].dead += 1;
+      dead.push({ name: note.name, path });
+    }
   }
 
   const orphanTags = [...tagCounts.entries()]
@@ -107,6 +119,7 @@ export async function scanKnowledgeHealth(
       .map(([repo, count]) => ({ repo, count }))
       .toSorted((a, b) => b.count - a.count || a.repo.localeCompare(b.repo)),
     confidence,
+    confidenceUsage,
     stale,
     rotted,
     orphanTags,
@@ -114,9 +127,13 @@ export async function scanKnowledgeHealth(
   };
 }
 
-/** Convenience: the set of knowledge note files read across a batch of session metrics. */
-export function readNoteFilesFrom(knowledgeReadsPerSession: readonly string[][]): Set<string> {
+/**
+ * Convenience: flatten per-session note-path lists into one set of "used" note files. Callers pass
+ * the union of notes Read and notes a `servant recall` surfaced inline, so the dead-note scan treats
+ * recall-surfaced notes as live (not just `Read` ones).
+ */
+export function readNoteFilesFrom(usedNotesPerSession: readonly string[][]): Set<string> {
   const out = new Set<string>();
-  for (const reads of knowledgeReadsPerSession) for (const p of reads) out.add(p);
+  for (const used of usedNotesPerSession) for (const p of used) out.add(p);
   return out;
 }

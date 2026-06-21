@@ -1,4 +1,5 @@
 import { resolve } from "node:path";
+import type { TranscriptAnchor } from "./metrics.ts";
 
 // Deterministic, checkable instruction rules drawn straight from the workspace CLAUDE.md.
 // Each rule scans the structured tool calls of a session and flags concrete violations.
@@ -8,6 +9,8 @@ import { resolve } from "node:path";
 export interface ToolCall {
   tool: string;
   input: Record<string, unknown>;
+  /** Transcript anchor for the assistant turn that issued this call (when known). */
+  anchor?: TranscriptAnchor;
 }
 
 /** Everything a rule needs to judge a session, assembled by the metrics extractor. */
@@ -22,6 +25,8 @@ export interface RuleViolation {
   rule: string;
   /** Human-readable specifics, e.g. the offending path. */
   detail: string;
+  /** Transcript anchor for the offending tool call (when known). */
+  anchor?: TranscriptAnchor;
 }
 
 interface Rule {
@@ -62,7 +67,11 @@ const RULES: readonly Rule[] = [
         if (!target) continue;
         if (!IN_REPO_PLANNING_RE.test(target)) continue;
         if (!isInsideRepoWorktree(ctx.launchCwd, target)) continue;
-        out.push({ rule: "no-plans-in-repo", detail: `${call.tool} ${target}` });
+        out.push({
+          rule: "no-plans-in-repo",
+          detail: `${call.tool} ${target}`,
+          anchor: call.anchor,
+        });
       }
       return out;
     },

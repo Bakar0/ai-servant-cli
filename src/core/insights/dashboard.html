@@ -1,0 +1,653 @@
+<!--
+  servant insights dashboard — a self-contained, OFFLINE page.
+
+  Hard rules (enforced by tests):
+   - No network requests: no CDN-loaded scripts or stylesheets, no remote fonts/images, no fetch/XHR.
+   - All styling and charting is inline below; charts are hand-rolled SVG, no chart library.
+   - The CLI renderer fills exactly one slot: the JSON sentinel inside the application/json
+     script#dashboard-data below. It writes NO chart code per run — this file owns all of it.
+-->
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>servant insights</title>
+
+<style>
+  :root {
+    --bg: #0f1115;
+    --panel: #171a21;
+    --panel-2: #1d212b;
+    --line: #2a2f3a;
+    --ink: #e6e9ef;
+    --muted: #98a2b3;
+    --faint: #6b7280;
+    --accent: #6ea8fe;
+    --good: #4ade80;
+    --bad: #f87171;
+    --warn: #fbbf24;
+    --neutral: #94a3b8;
+    --radius: 12px;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--ink);
+    font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 1100px; margin: 0 auto; padding: 28px 20px 64px; }
+  header.top { margin-bottom: 24px; }
+  header.top h1 { font-size: 22px; margin: 0 0 4px; letter-spacing: 0.2px; }
+  header.top .sub { color: var(--muted); font-size: 13px; }
+  header.top .sub b { color: var(--ink); font-weight: 600; }
+
+  section.story { margin: 30px 0; }
+  section.story > h2 {
+    font-size: 12px; text-transform: uppercase; letter-spacing: 1.4px;
+    color: var(--accent); margin: 0 0 2px; font-weight: 700;
+  }
+  section.story > .lead { color: var(--muted); font-size: 13px; margin: 0 0 14px; }
+
+  .grid { display: grid; gap: 14px; }
+  .cols-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .cols-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .cols-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  @media (max-width: 760px) { .cols-2, .cols-3, .cols-4 { grid-template-columns: 1fr; } }
+
+  .card {
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: var(--radius); padding: 16px;
+  }
+  .card h3 { margin: 0 0 12px; font-size: 13px; color: var(--ink); font-weight: 600; }
+  /* Bound a card's variable-length body to a fixed height and let it scroll inside, so a
+     long list (one row per session / per tool) can't blow out the section's height. */
+  .card .scrollbox { max-height: 300px; overflow-y: auto; padding-right: 8px; }
+  /* Always show a styled scrollbar (macOS hides overlay scrollbars until you scroll, which
+     made it unclear there was more below). Styling the webkit scrollbar opts out of overlay. */
+  .card .scrollbox { scrollbar-width: thin; scrollbar-color: var(--muted) var(--panel-2); }
+  .card .scrollbox::-webkit-scrollbar { width: 10px; }
+  .card .scrollbox::-webkit-scrollbar-track { background: var(--panel-2); border-radius: 6px; }
+  .card .scrollbox::-webkit-scrollbar-thumb {
+    background: var(--faint); border-radius: 6px; border: 2px solid var(--panel-2);
+  }
+  .card .scrollbox::-webkit-scrollbar-thumb:hover { background: var(--muted); }
+  .card .hint { color: var(--faint); font-size: 12px; margin: 8px 0 0; }
+  .card ul { margin: 6px 0 12px; padding-left: 18px; }
+  .card li { font-size: 12px; color: var(--muted); margin: 3px 0; word-break: break-word; }
+  .tag.error { color: var(--bad); border-color: #5a2f2f; }
+  .tag.denied { color: var(--warn); border-color: #5a4a1f; }
+
+  .stat { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 14px 16px; }
+  .stat .label { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.6px; }
+  .stat .value { font-size: 26px; font-weight: 700; margin-top: 4px; }
+  .stat .value small { font-size: 13px; color: var(--muted); font-weight: 500; }
+  .stat .value.good { color: var(--good); }
+  .stat .value.bad { color: var(--bad); }
+
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 7px 8px; border-bottom: 1px solid var(--line); }
+  th { color: var(--muted); font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  tr:last-child td { border-bottom: 0; }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+
+  .tag { display: inline-block; padding: 1px 7px; border-radius: 999px; font-size: 11px; border: 1px solid var(--line); color: var(--muted); }
+  .tag.overlay { color: var(--accent); border-color: #2f4a7a; }
+  .tag.asset { color: var(--warn); border-color: #5a4a1f; }
+
+  .delta { font-variant-numeric: tabular-nums; font-weight: 600; }
+  .delta.good { color: var(--good); }
+  .delta.bad { color: var(--bad); }
+  .delta.flat { color: var(--faint); }
+
+  .empty {
+    border: 1px dashed var(--line); border-radius: var(--radius);
+    color: var(--faint); padding: 22px; text-align: center; font-size: 13px; background: var(--panel-2);
+  }
+  .legend { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 10px; color: var(--muted); font-size: 12px; }
+  .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 5px; vertical-align: middle; }
+  .barrow { display: grid; grid-template-columns: 130px 1fr 64px; align-items: center; gap: 10px; margin: 6px 0; }
+  .barrow .name { color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .barrow .track { background: var(--panel-2); border-radius: 4px; height: 14px; overflow: hidden; }
+  .barrow .fill { height: 100%; background: var(--accent); border-radius: 4px; }
+  .barrow .amt { text-align: right; font-variant-numeric: tabular-nums; font-size: 12px; color: var(--ink); }
+  .spark { display: block; }
+  .sessrow { display: grid; grid-template-columns: 96px 1fr 120px; align-items: center; gap: 10px; padding: 8px 0; border-bottom: 1px solid var(--line); }
+  .sessrow:last-child { border-bottom: 0; }
+  .sessrow .id { font-size: 12px; color: var(--muted); }
+  .sessrow .peak { text-align: right; font-size: 12px; color: var(--ink); font-variant-numeric: tabular-nums; }
+  .pill { font-size: 11px; color: var(--faint); }
+  footer.foot { color: var(--faint); font-size: 12px; margin-top: 40px; border-top: 1px solid var(--line); padding-top: 14px; }
+</style>
+
+<div class="wrap">
+  <header class="top">
+    <h1>servant insights</h1>
+    <div class="sub" id="subhead"></div>
+  </header>
+  <main id="app"></main>
+  <footer class="foot" id="foot"></footer>
+</div>
+
+<script id="dashboard-data" type="application/json">__DASHBOARD_DATA__</script>
+
+<script>
+  "use strict";
+  // ---- read the injected, deterministic payload (no network, no deps) ----
+  var DATA = JSON.parse(document.getElementById("dashboard-data").textContent || "{}");
+
+  // ---- tiny DOM + format helpers ----
+  function el(tag, attrs, kids) {
+    var n = document.createElement(tag);
+    if (attrs) for (var k in attrs) {
+      if (k === "class") n.className = attrs[k];
+      else if (k === "html") n.innerHTML = attrs[k];
+      else if (k === "text") n.textContent = attrs[k];
+      else n.setAttribute(k, attrs[k]);
+    }
+    if (kids) (Array.isArray(kids) ? kids : [kids]).forEach(function (c) {
+      if (c == null) return;
+      n.appendChild(typeof c === "string" ? document.createTextNode(c) : c);
+    });
+    return n;
+  }
+  function svgEl(tag, attrs) {
+    var n = document.createElementNS("http://www.w3.org/2000/svg", tag);
+    for (var k in attrs) n.setAttribute(k, attrs[k]);
+    return n;
+  }
+  function k(n) {
+    n = Number(n) || 0;
+    if (Math.abs(n) >= 1000) return (n / 1000).toFixed(1) + "k";
+    return String(Math.round(n));
+  }
+  function pct(x) { return Math.round((Number(x) || 0) * 100) + "%"; }
+  function signed(n) { n = Math.round(Number(n) || 0); return (n > 0 ? "+" : "") + n; }
+  function fmtDate(ms) { try { return new Date(ms).toISOString().slice(0, 10); } catch (e) { return "—"; } }
+  // A value as a percentage of the context window (utilization).
+  function winPct(v, w) { return w ? Math.round((Number(v) || 0) / w * 100) + "%" : "—"; }
+  // A readable session label — "S3 · 06-18 · workspace" — instead of an opaque hex id.
+  function sessLabel(i, ms, ws) { return "S" + (i + 1) + " · " + fmtDate(ms).slice(5) + (ws ? " · " + ws : ""); }
+
+  function stat(label, value, cls) {
+    return el("div", { class: "stat" }, [
+      el("div", { class: "label", text: label }),
+      el("div", { class: "value " + (cls || ""), html: value }),
+    ]);
+  }
+  function emptyState(msg) { return el("div", { class: "empty", text: msg }); }
+
+  // Horizontal bar chart from [{name, value, sub?}], value rendered via fmt().
+  function barChart(rows, fmt) {
+    fmt = fmt || k;
+    var max = rows.reduce(function (m, r) { return Math.max(m, r.value); }, 0) || 1;
+    var box = el("div", {});
+    rows.forEach(function (r) {
+      box.appendChild(el("div", { class: "barrow" }, [
+        el("div", { class: "name", title: r.name, text: r.name }),
+        el("div", { class: "track" }, el("div", { class: "fill", style: "width:" + ((r.value / max) * 100).toFixed(1) + "%" })),
+        el("div", { class: "amt", text: fmt(r.value) + (r.sub ? " " + r.sub : "") }),
+      ]));
+    });
+    return box;
+  }
+
+  // A compact SVG line chart for a single session's context curve. Scaled to the curve's OWN peak
+  // (not the context window) so the *shape* of growth is visible — otherwise every session is a flat
+  // sliver against a 200k/1M window and they all look identical.
+  function sparkLine(curve) {
+    var W = 260, H = 46, pad = 3;
+    var svg = svgEl("svg", { class: "spark", viewBox: "0 0 " + W + " " + H, width: "100%", height: H, preserveAspectRatio: "none" });
+    if (!curve || curve.length === 0) {
+      svg.appendChild(svgEl("line", { x1: 0, y1: H - pad, x2: W, y2: H - pad, stroke: "var(--line)", "stroke-width": 1 }));
+      return svg;
+    }
+    var max = Math.max(Math.max.apply(null, curve), 1);
+    var n = curve.length;
+    var x = function (i) { return n === 1 ? W / 2 : pad + (i / (n - 1)) * (W - 2 * pad); };
+    var y = function (v) { return H - pad - (v / max) * (H - 2 * pad); };
+    var d = curve.map(function (v, i) { return (i === 0 ? "M" : "L") + x(i).toFixed(1) + " " + y(v).toFixed(1); }).join(" ");
+    var area = d + " L" + x(n - 1).toFixed(1) + " " + (H - pad) + " L" + x(0).toFixed(1) + " " + (H - pad) + " Z";
+    svg.appendChild(svgEl("path", { d: area, fill: "rgba(110,168,254,0.14)", stroke: "none" }));
+    svg.appendChild(svgEl("path", { d: d, fill: "none", stroke: "var(--accent)", "stroke-width": 1.5, "stroke-linejoin": "round" }));
+    return svg;
+  }
+
+  // A stacked horizontal bar for a category breakdown [{label, value, color}].
+  function stackedBar(parts) {
+    var total = parts.reduce(function (s, p) { return s + p.value; }, 0) || 1;
+    var row = el("div", { class: "track", style: "display:flex;height:20px" });
+    parts.forEach(function (p) {
+      if (p.value <= 0) return;
+      row.appendChild(el("div", {
+        title: p.label + ": " + p.value,
+        style: "width:" + ((p.value / total) * 100).toFixed(1) + "%;background:" + p.color + ";height:100%",
+      }));
+    });
+    var legend = el("div", { class: "legend" });
+    parts.forEach(function (p) {
+      legend.appendChild(el("span", {}, [el("i", { style: "background:" + p.color }), p.label + " " + p.value]));
+    });
+    return el("div", {}, [row, legend]);
+  }
+
+  // verdict → color, for the Tier-2 judgment mix.
+  var VERDICT_COLOR = {
+    justified: "var(--good)", efficient: "var(--good)",
+    wasteful: "var(--bad)", inefficient: "var(--bad)",
+    neutral: "var(--neutral)",
+  };
+
+  function deltaCell(value, opts) {
+    // opts.lowerBetter: a negative delta is good (e.g. context, errors, rule violations).
+    opts = opts || {};
+    var n = Math.round(Number(value) || 0);
+    var cls = "flat";
+    if (n !== 0) {
+      var improving = opts.lowerBetter ? n < 0 : n > 0;
+      cls = improving ? "good" : "bad";
+    }
+    return el("span", { class: "delta " + cls, text: opts.fmt ? opts.fmt(n) : signed(n) });
+  }
+
+  function sectionEl(num, title, lead) {
+    var s = el("section", { class: "story" });
+    s.appendChild(el("h2", { text: num + ". " + title }));
+    s.appendChild(el("div", { class: "lead", text: lead }));
+    return s;
+  }
+
+  // ======================= Section 1 — DID MY TUNING HELP? =======================
+  function renderTuning(t) {
+    var s = sectionEl("1", "Did my tuning help?",
+      "A \"config\" is your servant instruction setup — CLAUDE.md + slash-commands + the inlined knowledge section + Claude Code version. Each card is one config (sessions that ran under it), oldest → newest; a new card means one of those changed. The change-ledger and per-transition deltas show what moved between configs.");
+
+    // setup timeline as cards
+    var groups = t.groups || [];
+    if (groups.length === 0) {
+      s.appendChild(emptyState("No setups recorded in this window yet."));
+      return s;
+    }
+    var tl = el("div", { class: "grid cols-3" });
+    groups.forEach(function (g) {
+      tl.appendChild(el("div", { class: "card" }, [
+        el("h3", { html: 'config <span class="mono">' + g.fp6 + "</span> · " + g.sessions + " session(s)" }),
+        el("div", { class: "pill", text: g.from + " → " + g.to + (g.version ? " · cc " + g.version : "") }),
+        el("table", {}, el("tbody", {}, [
+          tr2("peak ctx", "~" + k(g.avgPeakContext)),
+          tr2("window use", winPct(g.avgPeakContext, g.contextWindowSize)),
+          tr2("cache hit", pct(g.avgCacheHitRatio)),
+          tr2("total output", "~" + k(g.totalOutput)),
+          tr2("footprint", "~" + k(g.avgInstructionFootprint) + " tok"),
+        ])),
+      ]));
+    });
+    s.appendChild(tl);
+
+    // peak-context-by-config bar chart
+    s.appendChild(el("div", { class: "card", style: "margin-top:14px" }, [
+      el("h3", { text: "Avg peak context per config" }),
+      barChart(groups.map(function (g) { return { name: "config " + g.fp6, value: g.avgPeakContext }; }), function (v) { return "~" + k(v); }),
+    ]));
+
+    // before/after transitions + change ledger, side by side
+    var twocol = el("div", { class: "grid cols-2", style: "margin-top:14px" });
+
+    var transCard = el("div", { class: "card" }, [el("h3", { text: "Before / after (what moved)" })]);
+    if ((t.transitions || []).length === 0) {
+      transCard.appendChild(emptyState("Only one setup so far — no transitions to compare."));
+    } else {
+      t.transitions.forEach(function (tr) {
+        var head = el("div", { style: "margin:10px 0 4px" }, [
+          el("span", { class: "mono", text: tr.from6 + " → " + tr.to6 }), " ",
+        ]);
+        (tr.changes.length ? tr.changes : [null]).forEach(function (c) {
+          if (c) head.appendChild(el("span", { class: "tag " + c.kind, text: c.kind + " " + c.id }));
+          else head.appendChild(el("span", { class: "tag", text: "no ledger entry — changed outside servant" }));
+          head.appendChild(document.createTextNode(" "));
+        });
+        transCard.appendChild(head);
+        var d = tr.deltas;
+        var deltas = el("div", { style: "font-size:12px;color:var(--muted)" }, [
+          "Δ peak ctx ", deltaCell(d.avgPeakContext, { lowerBetter: true, fmt: function (n) { return signed(n); } }), " · ",
+          "Δ cache hit ", deltaCell(Math.round(d.avgCacheHitRatio * 100), { lowerBetter: false, fmt: function (n) { return signed(n) + "pp"; } }), " · ",
+          "Δ rule viol ", deltaCell(d.ruleViolations, { lowerBetter: true }), " · ",
+          "Δ errors ", deltaCell(d.errorToolResults, { lowerBetter: true }),
+        ]);
+        transCard.appendChild(deltas);
+      });
+    }
+    twocol.appendChild(transCard);
+
+    var ledgerCard = el("div", { class: "card" }, [el("h3", { text: "Change ledger" })]);
+    if ((t.ledger || []).length === 0) {
+      ledgerCard.appendChild(emptyState("No overlay / asset changes recorded."));
+    } else {
+      var lt = el("table", {}, [
+        el("thead", {}, el("tr", {}, [el("th", { text: "when" }), el("th", { text: "kind" }), el("th", { text: "id" })])),
+        el("tbody", {}, t.ledger.map(function (c) {
+          return el("tr", {}, [
+            el("td", { class: "mono", text: fmtDate(c.ts) }),
+            el("td", {}, el("span", { class: "tag " + c.kind, text: c.kind })),
+            el("td", { text: c.id + (c.note ? " — " + c.note : "") }),
+          ]);
+        })),
+      ]);
+      ledgerCard.appendChild(lt);
+    }
+    twocol.appendChild(ledgerCard);
+    s.appendChild(twocol);
+
+    // Tier-2 judgment verdicts (empty placeholder when none exist yet)
+    var j = t.judgments || { hasJudgments: false, total: 0, byVerdict: {} };
+    var jCard = el("div", { class: "card", style: "margin-top:14px" }, [el("h3", { text: "Tier-2 judgment verdicts" })]);
+    if (!j.hasJudgments) {
+      jCard.appendChild(emptyState("No qualitative judgments yet — they accrue at SessionEnd. This section fills in once verdicts exist."));
+    } else {
+      var order = ["justified", "wasteful", "neutral", "efficient", "inefficient"];
+      var parts = order
+        .filter(function (v) { return (j.byVerdict[v] || 0) > 0; })
+        .map(function (v) { return { label: v, value: j.byVerdict[v] || 0, color: VERDICT_COLOR[v] }; });
+      jCard.appendChild(el("div", { class: "hint", text: j.total + " candidate moment(s) judged" }));
+      jCard.appendChild(stackedBar(parts));
+    }
+    s.appendChild(jCard);
+
+    return s;
+  }
+
+  function tr2(label, value) {
+    return el("tr", {}, [el("td", { text: label }), el("td", { class: "num", html: value })]);
+  }
+
+  // ======================= Section 2 — WHERE'S CONTEXT LEAKING? =======================
+  function renderContext(c) {
+    var s = sectionEl("2", "Where's context leaking?",
+      "Per-session context-growth curves, the biggest single jumps, and which tools' result payloads ate the window. Bash is split by command (git, npm, …) so it doesn't hide behind one bar.");
+
+    var sessions = c.sessions || [];
+    var twocol = el("div", { class: "grid cols-2" });
+
+    // curves — rows scroll inside a fixed-height box; the hint stays pinned below it
+    var curveCard = el("div", { class: "card" }, [el("h3", { text: "Context-growth curves" })]);
+    if (sessions.length === 0) {
+      curveCard.appendChild(emptyState("No sessions in this window."));
+    } else {
+      var curveBox = el("div", { class: "scrollbox" });
+      sessions.forEach(function (m, i) {
+        curveBox.appendChild(el("div", { class: "sessrow" }, [
+          el("div", { class: "id", title: m.id8, text: sessLabel(i, m.mtimeMs, m.workspace) }),
+          sparkLine(m.curve),
+          el("div", { class: "peak", html: "peak ~" + k(m.peakContext) + " <span class='pill'>" + winPct(m.peakContext, m.contextWindowSize) + " of win</span>" }),
+        ]));
+      });
+      curveCard.appendChild(curveBox);
+      curveCard.appendChild(el("div", { class: "hint", text: "Each curve is scaled to its own peak — compare the shape of growth, not the height. The % is how much of the context window the peak used." }));
+    }
+    twocol.appendChild(curveCard);
+
+    // tool spend — bars scroll inside a fixed-height box
+    var spendCard = el("div", { class: "card" }, [el("h3", { text: "Token spend by tool (window-wide)" })]);
+    var spend = c.toolSpend || [];
+    if (spend.length === 0) {
+      spendCard.appendChild(emptyState("No tool-result payloads recorded."));
+    } else {
+      spendCard.appendChild(el("div", { class: "scrollbox" }, [barChart(spend.map(function (b) {
+        return { name: b.tool, value: b.approxTokens, sub: "(" + b.count + ")" };
+      }), function (v) { return "~" + k(v); })]));
+    }
+    twocol.appendChild(spendCard);
+    s.appendChild(twocol);
+
+    // biggest jumps table (across sessions that have any)
+    var jumpsCard = el("div", { class: "card", style: "margin-top:14px" }, [el("h3", { text: "Biggest context jumps" })]);
+    var jrows = [];
+    sessions.forEach(function (m, i) {
+      (m.jumps || []).forEach(function (j) { jrows.push({ label: sessLabel(i, m.mtimeMs, m.workspace), id8: m.id8, turn: j.turn, delta: j.delta, driver: j.driver }); });
+    });
+    jrows.sort(function (a, b) { return b.delta - a.delta; });
+    jrows = jrows.slice(0, 12);
+    if (jrows.length === 0) {
+      jumpsCard.appendChild(emptyState("No notable jumps."));
+    } else {
+      jumpsCard.appendChild(el("table", {}, [
+        el("thead", {}, el("tr", {}, [
+          el("th", { text: "session" }), el("th", { class: "num", text: "turn" }),
+          el("th", { class: "num", text: "Δ ctx" }), el("th", { text: "driver" }),
+        ])),
+        el("tbody", {}, jrows.map(function (j) {
+          return el("tr", {}, [
+            el("td", { title: j.id8, text: j.label }),
+            el("td", { class: "num", text: "t" + j.turn }),
+            el("td", { class: "num", html: "+" + k(j.delta) }),
+            el("td", { text: j.driver || "(prompt/output)" }),
+          ]);
+        })),
+      ]));
+    }
+    s.appendChild(jumpsCard);
+    return s;
+  }
+
+  // ======================= Section 3 — FRICTION =======================
+  function renderFriction(f) {
+    var s = sectionEl("3", "Friction",
+      "Where work snagged: tool errors, rule violations, permission denials, and user corrections. Totals and the per-session trend up top; the actual offending items below, so you can see what broke — not just how often.");
+
+    var tot = f.totals || { errors: 0, ruleViolations: 0, permissionDenials: 0, corrections: 0 };
+    var cards = el("div", { class: "grid cols-4" }, [
+      stat("tool errors", String(tot.errors), tot.errors ? "bad" : "good"),
+      stat("rule violations", String(tot.ruleViolations), tot.ruleViolations ? "bad" : "good"),
+      stat("permission denials", String(tot.permissionDenials), tot.permissionDenials ? "bad" : "good"),
+      stat("corrections", String(tot.corrections), tot.corrections ? "bad" : "good"),
+    ]);
+    s.appendChild(cards);
+
+    var series = f.series || [];
+    var chart = el("div", { class: "card", style: "margin-top:14px" }, [el("h3", { text: "Friction over time (per session)" })]);
+    if (series.length === 0) {
+      chart.appendChild(emptyState("No sessions to chart."));
+    } else {
+      chart.appendChild(groupedBars(series));
+      chart.appendChild(el("div", { class: "legend" }, [
+        legendItem("var(--bad)", "errors"),
+        legendItem("var(--warn)", "rule viol"),
+        legendItem("var(--accent)", "perm denials"),
+        legendItem("var(--neutral)", "corrections"),
+      ]));
+    }
+    s.appendChild(chart);
+    s.appendChild(frictionDetails(f.details || {}));
+    return s;
+  }
+
+  // The concrete "what went wrong" list: rule violations, error/denial snippets, and corrections.
+  function frictionDetails(d) {
+    var card = el("div", { class: "card", style: "margin-top:14px" }, [el("h3", { text: "What actually went wrong" })]);
+    var any = false;
+    if ((d.ruleViolations || []).length) {
+      any = true;
+      card.appendChild(el("div", { class: "hint", html: "<b>Rule violations</b>" }));
+      card.appendChild(el("ul", {}, d.ruleViolations.map(function (v) {
+        return el("li", { class: "mono", text: v.rule + " — " + v.detail });
+      })));
+    }
+    if ((d.errors || []).length) {
+      any = true;
+      card.appendChild(el("div", { class: "hint", html: "<b>Errors &amp; denials</b>" }));
+      card.appendChild(el("ul", {}, d.errors.map(function (e) {
+        return el("li", {}, [
+          el("span", { class: "tag " + (e.permission ? "denied" : "error"), text: e.permission ? "denied" : "error" }),
+          " ", el("span", { class: "mono", text: e.tool }), ": " + e.snippet,
+        ]);
+      })));
+    }
+    if ((d.corrections || []).length) {
+      any = true;
+      card.appendChild(el("div", { class: "hint", html: "<b>User corrections</b>" }));
+      card.appendChild(el("ul", {}, d.corrections.map(function (c) {
+        return el("li", { text: "“" + c + "”" });
+      })));
+    }
+    if (!any) card.appendChild(emptyState("No friction events captured in this window — clean run."));
+    return card;
+  }
+
+  function legendItem(color, label) { return el("span", {}, [el("i", { style: "background:" + color }), label]); }
+
+  // Grouped vertical bars: one cluster per session (time-ordered), 4 metrics per cluster.
+  function groupedBars(series) {
+    var keys = [
+      { k: "errors", c: "var(--bad)" },
+      { k: "ruleViolations", c: "var(--warn)" },
+      { k: "permissionDenials", c: "var(--accent)" },
+      { k: "corrections", c: "var(--neutral)" },
+    ];
+    var max = 1;
+    series.forEach(function (d) { keys.forEach(function (kk) { max = Math.max(max, d[kk.k] || 0); }); });
+    var H = 120, pad = 18, clusterW = Math.max(34, Math.min(70, 720 / series.length));
+    var W = Math.max(series.length * clusterW, 320);
+    var svg = svgEl("svg", { viewBox: "0 0 " + W + " " + H, width: "100%", height: H, preserveAspectRatio: "xMinYMid meet" });
+    var bw = (clusterW - 8) / keys.length;
+    var base = H - pad;
+    svg.appendChild(svgEl("line", { x1: 0, y1: base, x2: W, y2: base, stroke: "var(--line)", "stroke-width": 1 }));
+    series.forEach(function (d, i) {
+      var x0 = i * clusterW + 4;
+      keys.forEach(function (kk, ki) {
+        var v = d[kk.k] || 0;
+        var h = (v / max) * (H - 2 * pad);
+        var rect = svgEl("rect", {
+          x: (x0 + ki * bw).toFixed(1), y: (base - h).toFixed(1),
+          width: (bw - 1).toFixed(1), height: h.toFixed(1), fill: kk.c, rx: 1,
+        });
+        rect.appendChild(svgEl("title", {}));
+        rect.lastChild.textContent = d.id8 + " · " + kk.k + ": " + v;
+        svg.appendChild(rect);
+      });
+      svg.appendChild(svgEl("text", {
+        x: (x0 + clusterW / 2 - 4).toFixed(1), y: H - 4, fill: "var(--faint)",
+        "font-size": 9, "text-anchor": "middle",
+      })).textContent = "S" + (i + 1);
+    });
+    return svg;
+  }
+
+  // ======================= Section 4 — KNOWLEDGE HEALTH =======================
+  function renderKnowledge(kn) {
+    var s = sectionEl("4", "Knowledge health",
+      "Is the knowledge base high-quality, fresh, and actually used? Confidence cross-referenced against usage, recall consume rate, where notes concentrate by repo, and the specific dead / stale / rotted notes worth pruning.");
+
+    var conf = kn.confidence || { high: 0, medium: 0, low: 0 };
+    var top = el("div", { class: "grid cols-4" }, [
+      stat("notes", String(kn.totalNotes) + ' <small>' + (kn.byScope.project || 0) + "p / " + (kn.byScope.topic || 0) + "t</small>"),
+      stat("dead", String(kn.dead), kn.dead ? "bad" : "good"),
+      stat("stale &gt;6mo", String(kn.stale), kn.stale ? "bad" : "good"),
+      stat("rotted", String((kn.rotted || []).length), (kn.rotted || []).length ? "bad" : "good"),
+    ]);
+    s.appendChild(top);
+
+    var twocol = el("div", { class: "grid cols-2", style: "margin-top:14px" });
+
+    // Confidence × usage: for each tier, how many notes are actually used vs dead.
+    var cu = kn.confidenceUsage || { high: { used: 0, dead: 0 }, medium: { used: 0, dead: 0 }, low: { used: 0, dead: 0 } };
+    var confCard = el("div", { class: "card" }, [el("h3", { text: "Confidence × usage" })]);
+    if (kn.totalNotes === 0) {
+      confCard.appendChild(emptyState("No notes yet."));
+    } else {
+      confCard.appendChild(el("table", {}, [
+        el("thead", {}, el("tr", {}, [
+          el("th", { text: "confidence" }), el("th", { class: "num", text: "notes" }),
+          el("th", { class: "num", text: "used" }), el("th", { class: "num", text: "dead" }),
+        ])),
+        el("tbody", {}, ["high", "medium", "low"].map(function (lvl) {
+          var u = cu[lvl] || { used: 0, dead: 0 };
+          return el("tr", {}, [
+            el("td", { text: lvl }),
+            el("td", { class: "num", text: String(conf[lvl] || 0) }),
+            el("td", { class: "num good", text: String(u.used) }),
+            el("td", { class: "num " + (u.dead ? "bad" : ""), text: String(u.dead) }),
+          ]);
+        })),
+      ]));
+      confCard.appendChild(el("div", { class: "hint", text: "\"Dead\" = never read or surfaced by recall across the scanned sessions. High-confidence-but-dead notes are prime prune/promote candidates." }));
+    }
+    twocol.appendChild(confCard);
+
+    var rc = kn.recall || { invocations: 0, consumed: 0, distinctNotesUsed: 0 };
+    var ratio = rc.invocations ? Math.round(rc.consumed / rc.invocations * 100) + "%" : "—";
+    var recallCard = el("div", { class: "card" }, [
+      el("h3", { text: "Recall: surfaced vs consumed" }),
+      barChart([
+        { name: "invocations", value: rc.invocations },
+        { name: "consumed", value: rc.consumed },
+        { name: "distinct notes used", value: rc.distinctNotesUsed },
+      ], function (v) { return String(v); }),
+      el("div", { class: "hint", text: "Consume rate " + ratio + " (" + rc.consumed + " of " + rc.invocations + " recalls surfaced/read a note). " + (kn.dead || 0) + " of " + (kn.totalNotes || 0) + " notes were never used." }),
+    ]);
+    twocol.appendChild(recallCard);
+    s.appendChild(twocol);
+
+    // Notes by repo/scope — where the knowledge base concentrates.
+    var byRepo = kn.byRepo || [];
+    var repoCard = el("div", { class: "card", style: "margin-top:14px" }, [el("h3", { text: "Notes by repo / scope" })]);
+    if (!byRepo.length && !(kn.byScope && kn.byScope.topic)) {
+      repoCard.appendChild(emptyState("No notes yet."));
+    } else {
+      var repoRows = byRepo.map(function (r) { return { name: r.repo, value: r.count }; });
+      if (kn.byScope && kn.byScope.topic) repoRows.push({ name: "(topic notes)", value: kn.byScope.topic });
+      repoCard.appendChild(barChart(repoRows, function (v) { return String(v); }));
+    }
+    s.appendChild(repoCard);
+
+    var hasAttention = (kn.rotted || []).length || (kn.orphanTags || []).length ||
+      (kn.deadNotes || []).length || (kn.staleNotes || []).length;
+    if (hasAttention) {
+      var detail = el("div", { class: "card", style: "margin-top:14px" }, [el("h3", { text: "Attention" })]);
+      if ((kn.rotted || []).length) {
+        detail.appendChild(el("div", { class: "hint", html: "<b>Rotted</b> (cite a missing file):" }));
+        detail.appendChild(el("ul", {}, kn.rotted.map(function (r) {
+          return el("li", { class: "mono", text: r.name + " → " + r.missing });
+        })));
+      }
+      if ((kn.deadNotes || []).length) {
+        detail.appendChild(el("div", { class: "hint", html: "<b>Dead</b> (never read or recalled): " + kn.dead }));
+        detail.appendChild(el("ul", {}, kn.deadNotes.map(function (n) {
+          return el("li", { class: "mono", text: n });
+        })));
+      }
+      if ((kn.staleNotes || []).length) {
+        detail.appendChild(el("div", { class: "hint", html: "<b>Stale</b> (&gt;6mo old): " + kn.stale }));
+        detail.appendChild(el("ul", {}, kn.staleNotes.map(function (sn) {
+          return el("li", { class: "mono", text: sn.name + (sn.date ? " · " + sn.date : "") });
+        })));
+      }
+      if ((kn.orphanTags || []).length) {
+        detail.appendChild(el("div", { class: "hint", html: "<b>Orphan tags</b> (used once): " + kn.orphanTags.join(", ") }));
+      }
+      s.appendChild(detail);
+    }
+    return s;
+  }
+
+  // ======================= mount =======================
+  function mount() {
+    var m = DATA.meta || {};
+    document.getElementById("subhead").innerHTML =
+      "<b>" + (m.sessionCount || 0) + "</b> session(s) · " +
+      (m.workspaceLabel || "all workspaces") + " · " + (m.windowLabel || "") +
+      " · <b>" + (m.fingerprintCount || 0) + "</b> setup fingerprint(s)";
+
+    var app = document.getElementById("app");
+    if (!m.sessionCount) {
+      app.appendChild(emptyState("No servant sessions in this window yet — spawn a workspace and come back."));
+    } else {
+      app.appendChild(renderTuning(DATA.tuning || {}));
+      app.appendChild(renderContext(DATA.context || {}));
+      app.appendChild(renderFriction(DATA.friction || {}));
+      app.appendChild(renderKnowledge(DATA.knowledge || {}));
+    }
+    document.getElementById("foot").textContent =
+      "Generated " + fmtDate(m.generatedAt) + " · servant insights --deep · deterministic, offline, no model involved.";
+  }
+  mount();
+</script>

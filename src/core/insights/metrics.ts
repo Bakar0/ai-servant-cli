@@ -1,6 +1,6 @@
 import { stat } from "node:fs/promises";
 import { relative, resolve, sep } from "node:path";
-import { readJsonlLines } from "../claude-session.ts";
+import { readJsonlLinesWithLineNumbers } from "../claude-session.ts";
 import { renderWorkspaceKnowledgeSection } from "../knowledge.ts";
 import { workspacesRoot } from "../paths.ts";
 import { composeSetupParts, extractEmbeddedClaudeMd, fingerprintFromParts } from "./fingerprint.ts";
@@ -10,7 +10,50 @@ import { type RuleViolation, type ToolCall, checkRules } from "./rules.ts";
 // insight area (tokens, instructions, knowledge) reads from this one record, so a session is parsed
 // exactly once. The record is cached by `session-id + mtime` in the store; the digest only rolls up.
 
-export const METRICS_SCHEMA_VERSION = 3;
+// Bumping this invalidates every cached metrics record (the store keys on
+// `sessionId + mtime + schema`), so a bump forces all records to recompute on next read.
+// v4 adds transcript anchors on moment-bearing metrics + the deterministic `candidates` list.
+// v5 attributes notes a `servant recall` surfaced inline (recallSurfacedNotes + recallsConsumed),
+// so the recall path counts as knowledge use even with zero `Read` calls.
+// v6 splits Bash tool buckets by command head (`Bash: git`, `Bash: npm`, …) so one catch-all "Bash"
+// bucket no longer swamps the spend chart, and captures friction samples (error/correction snippets)
+// so the dashboard can show *what* went wrong, not just how many.
+export const METRICS_SCHEMA_VERSION = 6;
+
+/**
+ * A stable pointer back into a transcript so a later (qualitative) pass can re-locate the exact
+ * moment a number came from. All fields are derived purely from the transcript, so re-extracting
+ * the same file yields identical anchors. `turnUuid` is the primary key (it matches the event
+ * stream's `turnId`); `toolUseId` and `line` narrow it to a specific tool call / file line.
+ */
+export interface TranscriptAnchor {
+  /** uuid of the transcript turn this moment belongs to (assistant turn for token moments; the
+   *  user turn for corrections/commands). The stable cross-recompute key. */
+  turnUuid: string | null;
+  /** Originating `tool_use_id`, when the moment is a specific tool call or its result. */
+  toolUseId: string | null;
+  /** 1-based physical line number of the moment's record in the transcript. */
+  line: number | null;
+}
+
+/** A moment flagged as worth a later qualitative judgment. Deterministic — no LLM involved. */
+export type CandidateKind =
+  | "large-tool-result"
+  | "context-jump"
+  | "skill-or-command"
+  | "repeated-read"
+  | "user-correction"
+  | "rule-violation";
+
+export interface Candidate {
+  kind: CandidateKind;
+  /** Where in the transcript this moment lives. */
+  anchor: TranscriptAnchor;
+  /** Kind-appropriate size: approx tokens (token kinds) or a count (count kinds). Sorts the list. */
+  magnitude: number;
+  /** One-line, factual description of the moment (no judgment — that is a later phase). */
+  summary: string;
+}
 
 export interface ToolBucket {
   tool: string;
@@ -28,6 +71,8 @@ export interface LargeToolResult {
   target: string | null;
   chars: number;
   approxTokens: number;
+  /** Where this result sits in the transcript (issuing turn uuid, tool_use_id, line). */
+  anchor: TranscriptAnchor;
 }
 
 export interface SlashCommandUse {
@@ -47,11 +92,23 @@ export interface ContextPoint {
   delta: number;
   /** Tool results that landed since the previous point — the drivers of this jump, largest first. */
   drivers: { tool: string; approxTokens: number }[];
+  /** The assistant turn whose usage produced this point. */
+  anchor: TranscriptAnchor;
 }
 
 export interface RepeatedRead {
   path: string;
   count: number;
+}
+
+/** One concrete friction event sampled from the transcript (a tool error or permission denial). */
+export interface FrictionSample {
+  /** Bucket label of the tool that errored (Bash split by command head, e.g. `Bash: git`). */
+  tool: string;
+  /** A short, single-line snippet of the error payload. */
+  snippet: string;
+  /** Whether the error read as a permission denial (vs a plain tool error). */
+  permission: boolean;
 }
 
 export interface SessionMetrics {
@@ -96,8 +153,12 @@ export interface SessionMetrics {
     errorToolResults: number;
     /** Subset of errors that look like permission denials. */
     permissionDenials: number;
+    /** A bounded sample of the actual error/denial payloads — so the report can show what broke. */
+    errorSamples: FrictionSample[];
     /** User turns shortly after an assistant action that read as a correction/redirect. */
     userCorrections: number;
+    /** A bounded sample of the actual correction snippets — so the report can show what was redirected. */
+    correctionSamples: string[];
     /** Files read more than once (instruction/context not retained). */
     repeatedReads: RepeatedRead[];
   };
@@ -107,15 +168,44 @@ export interface SessionMetrics {
     recallInvocations: number;
     /** Knowledge note files (knowledge/**\/*.md) opened with Read. */
     knowledgeReads: string[];
-    /** Recalls that were followed by a knowledge-note Read (result actually consumed). */
+    /**
+     * Distinct knowledge note paths a `servant recall` printed inline in its Bash result. Recall
+     * returns note bodies to stdout (each hit ends with its absolute path), so these notes are used
+     * without ever being `Read`. Deduped and sorted for stable recompute. Knowledge *usage* is the
+     * union of `knowledgeReads` and these. */
+    recallSurfacedNotes: string[];
+    /**
+     * Recalls that were followed by a knowledge-note Read. Legacy signal kept unchanged for the
+     * direct grep/Read path; structurally ~0 on the inline-recall path (see `recallsConsumed`). */
     recallFollowedByRead: number;
+    /**
+     * Recalls whose result was actually consumed: it surfaced ≥1 note inline, or it was followed by
+     * a knowledge-note Read. The honest "consumed" count — no longer near-zero on the recall path. */
+    recallsConsumed: number;
   };
+
+  /**
+   * A deterministic, bounded worklist of moments worth a later qualitative judgment. Each carries
+   * a transcript anchor so a downstream pass can read only the relevant span. Ordered by magnitude
+   * (largest first) and capped per session (see `maxCandidates`).
+   */
+  candidates: Candidate[];
 }
 
 const TOP_TOOL_RESULTS = 5;
 const APPROX_CHARS_PER_TOKEN = 4;
 const DEFAULT_CONTEXT_WINDOW = 200_000;
 const ONE_MILLION_WINDOW = 1_000_000;
+
+// --- candidate flagging (deterministic heuristics; thresholds tunable) ---
+/** Default cap on candidates per session (largest-magnitude first). Configurable per call. */
+const DEFAULT_MAX_CANDIDATES = 24;
+/** A single tool result at/above this many approx tokens is worth a "justified or wasted?" look. */
+const LARGE_RESULT_CANDIDATE_TOKENS = 1500;
+/** A turn whose context grew by at least this many tokens is worth a "was it worth it?" look. */
+const CONTEXT_JUMP_CANDIDATE_TOKENS = 8000;
+
+const EMPTY_ANCHOR: TranscriptAnchor = { turnUuid: null, toolUseId: null, line: null };
 
 const approxTokens = (chars: number): number => Math.round(chars / APPROX_CHARS_PER_TOKEN);
 
@@ -148,6 +238,7 @@ function repoFromCwd(workspace: string | null, cwd: string): string | null {
 
 interface AnyRecord {
   type?: string;
+  uuid?: string;
   cwd?: string | null;
   version?: string;
   subtype?: string;
@@ -174,6 +265,36 @@ function asString(v: unknown): string {
   return typeof v === "string" ? v : "";
 }
 
+/** A tool_result block's text payload (string content or concatenated text blocks). */
+function resultText(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    const parts: string[] = [];
+    for (const item of content) {
+      if (item && typeof item === "object") {
+        const t = item as { text?: unknown };
+        if (typeof t.text === "string") parts.push(t.text);
+      }
+    }
+    return parts.join("\n");
+  }
+  return "";
+}
+
+/**
+ * Extract the knowledge-note file paths a `servant recall` printed. Recall renders each hit ending
+ * with the note's absolute path on its own line (see `renderNote`), so a line that is a knowledge
+ * note path is a surfaced note. Deduped and sorted so re-parsing the same result is deterministic.
+ */
+function extractRecallNotePaths(text: string): string[] {
+  const out = new Set<string>();
+  for (const line of text.split(/\r?\n/)) {
+    const p = line.trim();
+    if (p && KNOWLEDGE_PATH_RE.test(p)) out.add(p);
+  }
+  return [...out].toSorted();
+}
+
 /** Length of a tool_result block's payload (string content or stringified array). */
 function resultChars(content: unknown): number {
   if (typeof content === "string") return content.length;
@@ -197,6 +318,39 @@ function resultIsError(block: { is_error?: unknown; content?: unknown }): boolea
   return /^Error:|tool ran without|is_error/i.test(text) && /error/i.test(text);
 }
 
+/** Max number of error / correction samples kept per session (largest signal, bounded payload). */
+const MAX_FRICTION_SAMPLES = 8;
+
+/**
+ * The leading program of a shell command (basename), skipping leading env assignments (`FOO=bar`)
+ * and `sudo`. `git commit -m …` → `git`; `servant recall x` → `servant`; `/usr/bin/node a.js` → `node`.
+ * Returns null when there's no clean program token (e.g. a bare subshell), so the caller falls back.
+ */
+function bashHead(command: string): string | null {
+  const tokens = command.trim().split(/\s+/);
+  let i = 0;
+  while (i < tokens.length) {
+    const t = tokens[i] ?? "";
+    if (t === "sudo" || /^[A-Za-z_][A-Za-z0-9_]*=/.test(t)) i += 1;
+    else break;
+  }
+  const tok = tokens[i];
+  if (!tok) return null;
+  const base = tok.replace(/^.*\//, "");
+  return /^[\w.-]+$/.test(base) ? base : null;
+}
+
+/**
+ * The spend-bucket label for a tool result. Bash is split by command head so a single catch-all
+ * "Bash" bucket doesn't swamp the chart (`Bash: git`, `Bash: npm`, `Bash: servant`, …); every other
+ * tool keeps its own name.
+ */
+function bucketLabel(tool: string, input: Record<string, unknown>): string {
+  if (tool !== "Bash") return tool;
+  const head = bashHead(asString(input.command));
+  return head ? `Bash: ${head}` : "Bash";
+}
+
 /** Extract the human target of a tool call for the "largest results" list. */
 function targetOf(tool: string, input: Record<string, unknown>): string | null {
   if (tool === "Bash") return asString(input.command).slice(0, 80) || null;
@@ -209,7 +363,11 @@ function targetOf(tool: string, input: Record<string, unknown>): string | null {
  * Parse one transcript into a deterministic metrics record. Single pass over records, then derived
  * fields (fingerprint, rule checks) computed at the end.
  */
-export async function extractSessionMetrics(jsonlPath: string): Promise<SessionMetrics> {
+export async function extractSessionMetrics(
+  jsonlPath: string,
+  opts: { maxCandidates?: number } = {},
+): Promise<SessionMetrics> {
+  const maxCandidates = opts.maxCandidates ?? DEFAULT_MAX_CANDIDATES;
   const sessionId = jsonlPath.replace(/^.*\//, "").replace(/\.jsonl$/, "");
 
   let launchCwd = "";
@@ -228,9 +386,15 @@ export async function extractSessionMetrics(jsonlPath: string): Promise<SessionM
 
   const toolUseName = new Map<string, string>(); // tool_use_id -> tool name
   const toolUseInput = new Map<string, Record<string, unknown>>();
+  const toolUseTurnUuid = new Map<string, string>(); // tool_use_id -> issuing assistant turn uuid
   const toolCalls: ToolCall[] = [];
   const bucketChars = new Map<string, { count: number; chars: number }>();
   const largeResults: LargeToolResult[] = [];
+
+  // Moment lists for candidate flagging — collected with anchors during the single pass.
+  const commandUses: { name: string; anchor: TranscriptAnchor }[] = [];
+  const corrections: { summary: string; anchor: TranscriptAnchor }[] = [];
+  const readAnchors = new Map<string, TranscriptAnchor>(); // path -> first read's anchor
 
   // Context-growth curve: one point per assistant turn that carried usage, with the tool results
   // that landed since the previous such turn (those are what the next turn's context absorbed).
@@ -243,20 +407,26 @@ export async function extractSessionMetrics(jsonlPath: string): Promise<SessionM
   let errorToolResults = 0;
   let permissionDenials = 0;
   let userCorrections = 0;
+  const errorSamples: FrictionSample[] = [];
+  const correctionSamples: string[] = [];
   const readCounts = new Map<string, number>();
 
   let recallInvocations = 0;
   const knowledgeReads = new Set<string>();
+  const recallSurfacedNotes = new Set<string>();
   let recallFollowedByRead = 0;
-  let pendingRecall = false; // a recall awaiting a knowledge Read
+  let recallsConsumed = 0;
+  let pendingRecall = false; // a recall awaiting a knowledge Read (feeds recallFollowedByRead)
+  let recallAwaitingConsume = false; // a recall not yet counted consumed (surfaced ∪ read)
 
   const reposSeen = new Set<string>();
   const allRecords: AnyRecord[] = [];
   let lastTurnWasAssistantAction = false;
 
-  for await (const entry of readJsonlLines(jsonlPath)) {
-    const rec = entry as AnyRecord;
+  for await (const { record, line: lineNo } of readJsonlLinesWithLineNumbers(jsonlPath)) {
+    const rec = record as AnyRecord;
     allRecords.push(rec);
+    const recUuid = typeof rec.uuid === "string" ? rec.uuid : null;
 
     if (typeof rec.cwd === "string" && rec.cwd.length > 0 && !launchCwd) {
       launchCwd = rec.cwd;
@@ -298,6 +468,7 @@ export async function extractSessionMetrics(jsonlPath: string): Promise<SessionM
             output: usage.output_tokens ?? 0,
             delta: ctx - prevContext,
             drivers,
+            anchor: { turnUuid: recUuid, toolUseId: null, line: lineNo },
           });
           prevContext = ctx;
           pendingDrivers.clear();
@@ -319,18 +490,34 @@ export async function extractSessionMetrics(jsonlPath: string): Promise<SessionM
           if (block.type === "tool_use" && typeof block.name === "string") {
             sawAction = true;
             const input = (block.input ?? {}) as Record<string, unknown>;
+            const callAnchor: TranscriptAnchor = {
+              turnUuid: recUuid,
+              toolUseId: block.id ?? null,
+              line: lineNo,
+            };
             if (block.id) {
               toolUseName.set(block.id, block.name);
               toolUseInput.set(block.id, input);
+              if (recUuid) toolUseTurnUuid.set(block.id, recUuid);
             }
-            toolCalls.push({ tool: block.name, input });
+            toolCalls.push({ tool: block.name, input, anchor: callAnchor });
             if (block.name === "Read") {
               const p = asString(input.file_path ?? input.path);
-              if (p) readCounts.set(p, (readCounts.get(p) ?? 0) + 1);
+              if (p) {
+                readCounts.set(p, (readCounts.get(p) ?? 0) + 1);
+                if (!readAnchors.has(p)) readAnchors.set(p, callAnchor);
+              }
+            }
+            // A skill invoked via the Skill tool is a "skill-or-command" moment (its slash-command
+            // sibling is caught in the user-record branch below).
+            if (block.name === "Skill") {
+              const skill = asString(input.skill ?? input.command) || "Skill";
+              commandUses.push({ name: skill, anchor: callAnchor });
             }
             if (block.name === "Bash" && /\bservant recall\b/.test(asString(input.command))) {
               recallInvocations += 1;
               pendingRecall = true;
+              recallAwaitingConsume = true;
             }
           }
         }
@@ -352,19 +539,26 @@ export async function extractSessionMetrics(jsonlPath: string): Promise<SessionM
           if (block.type !== "tool_result") continue;
           toolResultOnly = true;
           const tool = (block.tool_use_id && toolUseName.get(block.tool_use_id)) || "unknown";
+          const input = (block.tool_use_id && toolUseInput.get(block.tool_use_id)) || {};
+          // Bash splits into per-command-head buckets; every other tool keeps its own name.
+          const bucket = bucketLabel(tool, input);
           const chars = resultChars(block.content);
-          const b = bucketChars.get(tool) ?? { count: 0, chars: 0 };
+          const b = bucketChars.get(bucket) ?? { count: 0, chars: 0 };
           b.count += 1;
           b.chars += chars;
-          bucketChars.set(tool, b);
+          bucketChars.set(bucket, b);
           // Stage this result as a driver of the next assistant turn's context jump.
-          pendingDrivers.set(tool, (pendingDrivers.get(tool) ?? 0) + approxTokens(chars));
-          const input = (block.tool_use_id && toolUseInput.get(block.tool_use_id)) || {};
+          pendingDrivers.set(bucket, (pendingDrivers.get(bucket) ?? 0) + approxTokens(chars));
           largeResults.push({
-            tool,
+            tool: bucket,
             target: targetOf(tool, input),
             chars,
             approxTokens: approxTokens(chars),
+            anchor: {
+              turnUuid: (block.tool_use_id && toolUseTurnUuid.get(block.tool_use_id)) || null,
+              toolUseId: block.tool_use_id ?? null,
+              line: lineNo,
+            },
           });
           if (resultIsError(block)) {
             errorToolResults += 1;
@@ -372,7 +566,11 @@ export async function extractSessionMetrics(jsonlPath: string): Promise<SessionM
               typeof block.content === "string"
                 ? block.content
                 : JSON.stringify(block.content ?? "");
-            if (PERMISSION_RE.test(text)) permissionDenials += 1;
+            const permission = PERMISSION_RE.test(text);
+            if (permission) permissionDenials += 1;
+            if (errorSamples.length < MAX_FRICTION_SAMPLES) {
+              errorSamples.push({ tool: bucket, snippet: oneLine(text, 120), permission });
+            }
           }
           // A recall is "consumed" if a knowledge note is Read after it.
           if (tool === "Read") {
@@ -383,6 +581,20 @@ export async function extractSessionMetrics(jsonlPath: string): Promise<SessionM
                 recallFollowedByRead += 1;
                 pendingRecall = false;
               }
+              if (recallAwaitingConsume) {
+                recallsConsumed += 1;
+                recallAwaitingConsume = false;
+              }
+            }
+          }
+          // `servant recall` returns note bodies inline (each hit prints its absolute path), so the
+          // surfaced notes are used without any Read. Attribute them off the Bash *result* text.
+          if (tool === "Bash" && /\bservant recall\b/.test(asString(input.command))) {
+            const surfaced = extractRecallNotePaths(resultText(block.content));
+            for (const p of surfaced) recallSurfacedNotes.add(p);
+            if (surfaced.length > 0 && recallAwaitingConsume) {
+              recallsConsumed += 1;
+              recallAwaitingConsume = false;
             }
           }
         }
@@ -399,14 +611,28 @@ export async function extractSessionMetrics(jsonlPath: string): Promise<SessionM
           if (!name) continue;
           isCommandTurn = true;
           slashCounts.set(name, (slashCounts.get(name) ?? 0) + 1);
+          commandUses.push({
+            name,
+            anchor: { turnUuid: recUuid, toolUseId: null, line: lineNo },
+          });
           if (/\/servant:recall\b/.test(name) || name === "/recall") {
             recallInvocations += 1;
             pendingRecall = true;
+            recallAwaitingConsume = true;
           }
         }
         if (!isCommandTurn) {
           userTurns += 1;
-          if (lastTurnWasAssistantAction && CORRECTION_RE.test(text)) userCorrections += 1;
+          if (lastTurnWasAssistantAction && CORRECTION_RE.test(text)) {
+            userCorrections += 1;
+            corrections.push({
+              summary: `user correction: "${oneLine(text)}"`,
+              anchor: { turnUuid: recUuid, toolUseId: null, line: lineNo },
+            });
+            if (correctionSamples.length < MAX_FRICTION_SAMPLES) {
+              correctionSamples.push(oneLine(text, 120));
+            }
+          }
         }
       }
     }
@@ -450,6 +676,19 @@ export async function extractSessionMetrics(jsonlPath: string): Promise<SessionM
     .toSorted((a, b) => b.count - a.count || a.name.localeCompare(b.name));
 
   const ruleViolations = checkRules({ toolCalls, launchCwd });
+
+  const candidates = buildCandidates(
+    {
+      largeResults,
+      contextCurve,
+      commandUses,
+      repeatedReads,
+      readAnchors,
+      corrections,
+      ruleViolations,
+    },
+    maxCandidates,
+  );
 
   const embeddedClaudeMd = extractEmbeddedClaudeMd(allRecords);
   const composed = await composeSetupParts();
@@ -503,15 +742,106 @@ export async function extractSessionMetrics(jsonlPath: string): Promise<SessionM
       ruleViolations,
       errorToolResults,
       permissionDenials,
+      errorSamples,
       userCorrections,
+      correctionSamples,
       repeatedReads,
     },
     knowledge: {
       recallInvocations,
       knowledgeReads: [...knowledgeReads].toSorted(),
+      recallSurfacedNotes: [...recallSurfacedNotes].toSorted(),
       recallFollowedByRead,
+      recallsConsumed,
     },
+    candidates,
   };
+}
+
+/** Collapse a possibly-multiline string into a short, single-line factual snippet. */
+function oneLine(text: string, max = 60): string {
+  const flat = text.replace(/\s+/g, " ").trim();
+  return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
+}
+
+interface CandidateInputs {
+  largeResults: LargeToolResult[];
+  contextCurve: ContextPoint[];
+  commandUses: { name: string; anchor: TranscriptAnchor }[];
+  repeatedReads: RepeatedRead[];
+  readAnchors: Map<string, TranscriptAnchor>;
+  corrections: { summary: string; anchor: TranscriptAnchor }[];
+  ruleViolations: RuleViolation[];
+}
+
+/**
+ * Turn the moment lists into a single deterministic, bounded candidate worklist. Every kind is
+ * gathered, then the whole set is ordered largest-magnitude-first (with stable tiebreakers so the
+ * order never depends on insertion or object identity) and truncated to `maxCandidates`.
+ */
+function buildCandidates(inp: CandidateInputs, maxCandidates: number): Candidate[] {
+  const out: Candidate[] = [];
+
+  for (const r of inp.largeResults) {
+    if (r.approxTokens < LARGE_RESULT_CANDIDATE_TOKENS) continue;
+    out.push({
+      kind: "large-tool-result",
+      anchor: r.anchor,
+      magnitude: r.approxTokens,
+      summary: `${r.tool} result ~${r.approxTokens} tok${r.target ? ` (${oneLine(r.target, 50)})` : ""}`,
+    });
+  }
+
+  for (const p of inp.contextCurve) {
+    if (p.delta < CONTEXT_JUMP_CANDIDATE_TOKENS) continue;
+    const driver = p.drivers[0];
+    out.push({
+      kind: "context-jump",
+      anchor: p.anchor,
+      magnitude: p.delta,
+      summary: `turn ${p.turn} context +~${p.delta} tok${driver ? ` (driven by ${driver.tool})` : ""}`,
+    });
+  }
+
+  for (const c of inp.commandUses) {
+    out.push({
+      kind: "skill-or-command",
+      anchor: c.anchor,
+      magnitude: 1,
+      summary: `invoked ${c.name}`,
+    });
+  }
+
+  for (const rr of inp.repeatedReads) {
+    out.push({
+      kind: "repeated-read",
+      anchor: inp.readAnchors.get(rr.path) ?? EMPTY_ANCHOR,
+      magnitude: rr.count,
+      summary: `read ${oneLine(rr.path, 50)} ×${rr.count}`,
+    });
+  }
+
+  for (const c of inp.corrections) {
+    out.push({ kind: "user-correction", anchor: c.anchor, magnitude: 1, summary: c.summary });
+  }
+
+  for (const v of inp.ruleViolations) {
+    out.push({
+      kind: "rule-violation",
+      anchor: v.anchor ?? EMPTY_ANCHOR,
+      magnitude: 1,
+      summary: `rule ${v.rule}: ${oneLine(v.detail, 50)}`,
+    });
+  }
+
+  out.sort(
+    (a, b) =>
+      b.magnitude - a.magnitude ||
+      a.kind.localeCompare(b.kind) ||
+      (a.anchor.line ?? 0) - (b.anchor.line ?? 0) ||
+      a.summary.localeCompare(b.summary),
+  );
+  return out.slice(0, maxCandidates);
 }
 
 function arrayOrStringText(content: unknown): string | null {

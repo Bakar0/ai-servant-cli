@@ -3,13 +3,20 @@ import { servantReinvokeArgv } from "../core/self-exec.ts";
 
 export interface PickSessionOpts {
   workspaceName?: string;
+  /** fzf prompt label (default "resume> "). */
+  promptLabel?: string;
+  /**
+   * The servant subcommand whose `--preview <id>` renders the fzf preview pane (default "resume").
+   * Pass e.g. "insights" to preview a session's metrics/candidates instead of its messages.
+   */
+  previewSubcommand?: string;
 }
 
 export async function pickSession(opts: PickSessionOpts = {}): Promise<string | null> {
   const fzfPath = Bun.which("fzf");
   if (!fzfPath) {
     throw new Error(
-      "fzf is required for `servant resume` without an id. Install it (e.g. `brew install fzf`) or pass a session id.",
+      "fzf is required to pick a session interactively. Install it (e.g. `brew install fzf`) or pass a session id.",
     );
   }
 
@@ -18,14 +25,13 @@ export async function pickSession(opts: PickSessionOpts = {}): Promise<string | 
     const scope = opts.workspaceName
       ? `workspace "${opts.workspaceName}"`
       : "any servant workspace";
-    throw new Error(
-      `No resumable Claude sessions found for ${scope} (looked in ~/.claude/projects/).`,
-    );
+    throw new Error(`No Claude sessions found for ${scope} (looked in ~/.claude/projects/).`);
   }
 
   const lines = sessions.map((s) => `${s.sessionId}\t${formatListLine(s)}`);
 
-  const previewCmd = `${servantReinvokeArgv().map(shellQuote).join(" ")} resume --preview {1}`;
+  const previewSub = opts.previewSubcommand ?? "resume";
+  const previewCmd = `${servantReinvokeArgv().map(shellQuote).join(" ")} ${previewSub} --preview {1}`;
 
   const proc = Bun.spawn(
     [
@@ -35,7 +41,7 @@ export async function pickSession(opts: PickSessionOpts = {}): Promise<string | 
       "--delimiter=\t",
       `--preview=${previewCmd}`,
       "--preview-window=right:55%:wrap",
-      "--prompt=resume> ",
+      `--prompt=${opts.promptLabel ?? "resume> "}`,
       "--height=80%",
       "--layout=reverse",
       "--border",

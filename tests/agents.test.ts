@@ -44,4 +44,32 @@ describe("claudeCodeAgent.launchCommand", () => {
       `claude 'it'\\''s a brief'`,
     );
   });
+
+  test("separates a variadic --add-dir from the prompt with `--`", () => {
+    // `--add-dir` is variadic; without the `--` terminator it would swallow the prompt as a dir.
+    expect(
+      claudeCodeAgent.launchCommand("/x", {
+        prompt: "analyze insights",
+        addDirs: ["/home/u/.claude/projects"],
+      }),
+    ).toBe("claude --add-dir '/home/u/.claude/projects' -- 'analyze insights'");
+  });
+
+  test("passes multiple dirs to one --add-dir flag and omits `--` when there is no prompt", () => {
+    expect(claudeCodeAgent.launchCommand("/x", { addDirs: ["/a", "/b"] })).toBe(
+      "claude --add-dir '/a' '/b'",
+    );
+  });
+
+  test("ignores blank add-dir entries", () => {
+    expect(claudeCodeAgent.launchCommand("/x", { prompt: "go", addDirs: ["", "  "] })).toBe(
+      "claude 'go'",
+    );
+  });
+
+  test("safely escapes add-dir paths with shell metacharacters", () => {
+    expect(claudeCodeAgent.launchCommand("/x", { addDirs: [`/tmp/a'b $(x)`] })).toBe(
+      `claude --add-dir '/tmp/a'\\''b $(x)'`,
+    );
+  });
 });

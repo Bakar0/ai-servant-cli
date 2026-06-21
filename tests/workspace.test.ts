@@ -111,17 +111,19 @@ describe("ensureWorkspaceDir", () => {
     expectBaseClaudeMd(await readFile(path, "utf8"));
   });
 
-  test("scaffolds a per-workspace .claude/settings.json with the extraction + telemetry hooks", async () => {
+  test("scaffolds a per-workspace .claude/settings.json with the SessionEnd enqueue hooks", async () => {
     const name = `settings-${process.pid}-${Date.now()}`;
     const dir = await ensureWorkspaceDir(name);
     const settings = JSON.parse(await readFile(join(dir, ".claude", "settings.json"), "utf8"));
-    // SessionEnd carries both the knowledge-extraction enqueue and the telemetry recorder.
-    const sessionEnd = settings.hooks?.SessionEnd?.[0]?.hooks ?? [];
-    expect(sessionEnd.map((h: { command: string }) => h.command)).toEqual([
+    // SessionEnd carries both servant enqueue hooks: knowledge extraction + insight judgment.
+    const commands = (settings.hooks?.SessionEnd ?? []).flatMap(
+      (g: { hooks: { command: string }[] }) => g.hooks.map((h) => h.command),
+    );
+    expect(commands).toEqual([
       "servant extract-memories --from-hook",
-      "servant record",
+      "servant insights-judge --from-hook",
     ]);
-    // The hot-path telemetry events all run the recorder.
+    // The deprecated telemetry recorder is no longer wired into any event (ADR-002).
     for (const event of [
       "SessionStart",
       "UserPromptSubmit",
@@ -130,8 +132,10 @@ describe("ensureWorkspaceDir", () => {
       "PreCompact",
       "Stop",
     ]) {
-      expect(settings.hooks?.[event]?.[0]?.hooks?.[0]?.command).toBe("servant record");
+      expect(settings.hooks?.[event]).toBeUndefined();
     }
+    const allCommands = JSON.stringify(settings.hooks);
+    expect(allCommands).not.toContain("servant record");
   });
 
   test("merges the hooks into existing workspace settings without clobbering other keys", async () => {
@@ -144,10 +148,59 @@ describe("ensureWorkspaceDir", () => {
     const settings = JSON.parse(await readFile(path, "utf8"));
     expect(settings.model).toBe("opus"); // preserved
     expect(settings.hooks.Notification).toEqual([]); // preserved (unmanaged event)
-    expect(settings.hooks.SessionEnd[0].hooks[0].command).toBe(
-      "servant extract-memories --from-hook",
+    const mergedCommands = settings.hooks.SessionEnd.flatMap(
+      (g: { hooks: { command: string }[] }) => g.hooks.map((h) => h.command),
     );
-    expect(settings.hooks.PostToolUse[0].hooks[0].command).toBe("servant record");
+    expect(mergedCommands).toEqual([
+      "servant extract-memories --from-hook",
+      "servant insights-judge --from-hook",
+    ]);
+    expect(settings.hooks.PostToolUse).toBeUndefined(); // recorder no longer added
+  });
+
+  test("heals a pre-ADR-002 settings.json by stripping the servant record hooks", async () => {
+    const name = `settings-heal-${process.pid}-${Date.now()}`;
+    const dir = await ensureWorkspaceDir(name);
+    const path = join(dir, ".claude", "settings.json");
+    // Simulate the old shape: recorder on the hot-path events + alongside extraction on SessionEnd,
+    // plus an unrelated user hook that must be preserved.
+    await writeFile(
+      path,
+      JSON.stringify({
+        hooks: {
+          PreToolUse: [{ hooks: [{ type: "command", command: "servant record", timeout: 10 }] }],
+          PostToolUse: [
+            { hooks: [{ type: "command", command: "my-own-hook" }] },
+            { hooks: [{ type: "command", command: "servant record", timeout: 10 }] },
+          ],
+          SessionEnd: [
+            {
+              hooks: [
+                { type: "command", command: "servant extract-memories --from-hook", timeout: 15 },
+                { type: "command", command: "servant record", timeout: 10 },
+              ],
+            },
+          ],
+        },
+      }),
+    );
+    await ensureWorkspaceDir(name); // re-scaffold heals it
+    const settings = JSON.parse(await readFile(path, "utf8"));
+    expect(JSON.stringify(settings.hooks)).not.toContain("servant record");
+    // hot-path event left empty → key removed entirely
+    expect(settings.hooks.PreToolUse).toBeUndefined();
+    // unrelated user hook preserved (the record-only group was dropped)
+    expect(settings.hooks.PostToolUse).toEqual([
+      { hooks: [{ type: "command", command: "my-own-hook" }] },
+    ]);
+    // extraction hook preserved on SessionEnd; the judgment hook is healed in alongside it
+    const healedCommands = settings.hooks.SessionEnd.flatMap(
+      (g: { hooks: { command: string }[] }) => g.hooks.map((h) => h.command),
+    );
+    expect(healedCommands).toEqual([
+      "servant extract-memories --from-hook",
+      "servant insights-judge --from-hook",
+    ]);
   });
 
   test("inlines a per-repo knowledge section for each mounted repo and creates its store index", async () => {

@@ -2,7 +2,14 @@ import { existsSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { $ } from "bun";
-import { insightsIndexPath, insightsMetricsDir, insightsRoot } from "../paths.ts";
+import {
+  insightsDashboardPath,
+  insightsIndexPath,
+  insightsJudgmentsDir,
+  insightsMetricsDir,
+  insightsRoot,
+} from "../paths.ts";
+import { JUDGMENTS_SCHEMA_VERSION, type JudgmentRecord } from "./judgments.ts";
 import { METRICS_SCHEMA_VERSION, type SessionMetrics, extractSessionMetrics } from "./metrics.ts";
 
 export { type ChangeEntry, appendChange, readChanges } from "./changes.ts";
@@ -16,9 +23,15 @@ function gitInitialized(): boolean {
   return existsSync(join(insightsRoot(), ".git"));
 }
 
+// The regenerated `--deep` dashboard is an artifact, not a data record, so the store git-ignores it.
+const STORE_GITIGNORE = "dashboard.html\n";
+
 /** Create the store dirs and git-init on first use. Idempotent and cheap. */
 export async function ensureInsightsStore(): Promise<void> {
   await mkdir(insightsMetricsDir(), { recursive: true });
+  await mkdir(insightsJudgmentsDir(), { recursive: true });
+  const ignorePath = join(insightsRoot(), ".gitignore");
+  if (!existsSync(ignorePath)) await writeFile(ignorePath, STORE_GITIGNORE);
   if (!gitInitialized()) {
     await $`git -C ${insightsRoot()} init -q`.nothrow().quiet();
   }
@@ -73,8 +86,38 @@ export async function getOrComputeMetrics(
   return record;
 }
 
+// --- Per-session judgment records (Tier 2; sibling to metrics, same store lifecycle) ---
+
+function judgmentPath(sessionId: string): string {
+  return join(insightsJudgmentsDir(), `${sessionId}.json`);
+}
+
+/** Read a session's judgment record, or null when absent / schema-stale / unreadable. */
+export async function readJudgment(sessionId: string): Promise<JudgmentRecord | null> {
+  try {
+    const parsed = JSON.parse(await readFile(judgmentPath(sessionId), "utf8")) as JudgmentRecord;
+    return parsed.schema === JUDGMENTS_SCHEMA_VERSION ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Persist a session's judgment record (pretty JSON), creating the judgments area if needed. */
+export async function writeJudgment(record: JudgmentRecord): Promise<void> {
+  await mkdir(insightsJudgmentsDir(), { recursive: true });
+  await writeFile(judgmentPath(record.sessionId), `${JSON.stringify(record, null, 2)}\n`);
+}
+
 /** Write the thin digest snapshot (regenerated, like knowledge/INDEX.md). */
 export async function rebuildInsightsIndex(body: string): Promise<void> {
   await mkdir(insightsRoot(), { recursive: true });
   await writeFile(insightsIndexPath(), body.endsWith("\n") ? body : `${body}\n`);
+}
+
+/** Write the rendered `--deep` dashboard HTML (git-ignored artifact); returns its path. */
+export async function writeDashboard(html: string): Promise<string> {
+  await mkdir(insightsRoot(), { recursive: true });
+  const path = insightsDashboardPath();
+  await writeFile(path, html);
+  return path;
 }

@@ -1,5 +1,5 @@
 import type { KnowledgeHealth } from "./knowledge-health.ts";
-import type { SessionMetrics } from "./metrics.ts";
+import type { Candidate, CandidateKind, SessionMetrics } from "./metrics.ts";
 import type { ChangeEntry } from "./changes.ts";
 
 // Roll metric records up into a human report, segmented by setup fingerprint and aligned to the
@@ -32,6 +32,8 @@ export interface FingerprintGroup {
   // knowledge
   recallInvocations: number;
   recallFollowedByRead: number;
+  recallsConsumed: number;
+  /** Distinct notes used = union of notes Read and notes a recall surfaced inline. */
   distinctKnowledgeReads: number;
 }
 
@@ -74,7 +76,9 @@ function aggregateGroup(fingerprint: string, recs: SessionMetrics[]): Fingerprin
     }
     for (const c of r.instructions.slashCommands)
       slash.set(c.name, (slash.get(c.name) ?? 0) + c.count);
+    // Knowledge "use" is surfacing ∪ reading: count notes a recall surfaced inline alongside reads.
     for (const p of r.knowledge.knowledgeReads) reads.add(p);
+    for (const p of r.knowledge.recallSurfacedNotes) reads.add(p);
   }
   return {
     fingerprint,
@@ -101,6 +105,7 @@ function aggregateGroup(fingerprint: string, recs: SessionMetrics[]): Fingerprin
     userCorrections: recs.reduce((a, r) => a + r.instructions.userCorrections, 0),
     recallInvocations: recs.reduce((a, r) => a + r.knowledge.recallInvocations, 0),
     recallFollowedByRead: recs.reduce((a, r) => a + r.knowledge.recallFollowedByRead, 0),
+    recallsConsumed: recs.reduce((a, r) => a + r.knowledge.recallsConsumed, 0),
     distinctKnowledgeReads: reads.size,
   };
 }
@@ -195,7 +200,7 @@ function renderInstructions(g: FingerprintGroup, lines: string[]): void {
 
 function renderKnowledge(g: FingerprintGroup, lines: string[]): void {
   lines.push(
-    `    know:    recalls: ${g.recallInvocations} (consumed: ${g.recallFollowedByRead}) · distinct notes read: ${g.distinctKnowledgeReads}`,
+    `    know:    recalls: ${g.recallInvocations} (consumed: ${g.recallsConsumed}) · distinct notes used: ${g.distinctKnowledgeReads}`,
   );
 }
 
@@ -335,10 +340,43 @@ export function renderSessionTimeline(m: SessionMetrics): string {
     lines.push("single largest tool results:");
     for (const r of t.topToolResults) {
       lines.push(
-        `  ~${k(r.approxTokens).padStart(7)}  ${r.tool}${r.target ? ` — ${r.target}` : ""}`,
+        `  ~${k(r.approxTokens).padStart(7)}  ${anchorTag(r.anchor)}  ${r.tool}${r.target ? ` — ${r.target}` : ""}`,
+      );
+    }
+  }
+
+  if (m.candidates.length) {
+    lines.push("");
+    lines.push(`candidates worth a closer look (${m.candidates.length} · deterministic, no LLM):`);
+    for (const c of m.candidates) {
+      lines.push(
+        `  ${CANDIDATE_TAG[c.kind]}  ${magLabel(c).padStart(8)}  ${anchorTag(c.anchor)}  ${c.summary}`,
       );
     }
   }
 
   return lines.join("\n");
+}
+
+/** Short, fixed-width tag per candidate kind so the worklist columns line up. */
+const CANDIDATE_TAG: Record<CandidateKind, string> = {
+  "large-tool-result": "big-result ",
+  "context-jump": "ctx-jump   ",
+  "skill-or-command": "skill/cmd  ",
+  "repeated-read": "re-read    ",
+  "user-correction": "correction ",
+  "rule-violation": "rule-break ",
+};
+
+/** Token-magnitude kinds read as "~Nk tok"; count kinds read as "×N". */
+const TOKEN_KINDS = new Set<CandidateKind>(["large-tool-result", "context-jump"]);
+function magLabel(c: Candidate): string {
+  return TOKEN_KINDS.has(c.kind) ? `~${k(c.magnitude)}` : `×${c.magnitude}`;
+}
+
+/** A compact transcript locator for an anchor: the line plus a short turn-uuid prefix. */
+function anchorTag(a: { line: number | null; turnUuid: string | null }): string {
+  const line = a.line != null ? `L${a.line}` : "L?";
+  const uuid = a.turnUuid ? `@${a.turnUuid.slice(0, 8)}` : "";
+  return `${line.padEnd(5)}${uuid}`.padEnd(14);
 }

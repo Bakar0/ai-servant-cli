@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { scanKnowledgeHealth } from "../src/core/insights/knowledge-health.ts";
+import { readNoteFilesFrom, scanKnowledgeHealth } from "../src/core/insights/knowledge-health.ts";
 import { type KnowledgeNote, noteFilePath, upsertNote } from "../src/core/knowledge.ts";
 import { setRootOverride } from "../src/core/paths.ts";
 
@@ -73,6 +73,24 @@ describe("scanKnowledgeHealth", () => {
     // dead = never read: everything except fresh-used.
     const deadNames = h.dead.map((d) => d.name).toSorted();
     expect(deadNames).toEqual(["low-orphan", "stale-note"]);
+  });
+
+  test("a note only ever recall-surfaced (never Read) is live, not dead", async () => {
+    await upsertNote(note({ name: "recalled-only", source: { date: "2026-06-01" } }));
+    await upsertNote(note({ name: "never-touched", source: { date: "2026-06-01" } }));
+
+    const surfacedPath = noteFilePath("topic", "recalled-only");
+    // Build the "used notes" set the way the insights command does: per session, the union of Read
+    // notes and recall-surfaced notes. Here the note was only surfaced inline (knowledgeReads = []).
+    const knowledgeReads: string[] = [];
+    const recallSurfacedNotes = [surfacedPath];
+    const readNoteFiles = readNoteFilesFrom([[...knowledgeReads, ...recallSurfacedNotes]]);
+    const h = await scanKnowledgeHealth({ readNoteFiles, now: NOW });
+
+    const deadNames = h.dead.map((d) => d.name);
+    // The recall-surfaced note is NOT dead; only the genuinely untouched note is.
+    expect(deadNames).not.toContain("recalled-only");
+    expect(deadNames).toContain("never-touched");
   });
 
   test("flags a note that cites a missing absolute file path as rotted", async () => {

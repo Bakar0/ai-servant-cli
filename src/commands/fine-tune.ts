@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { defineCommand } from "citty";
 import { DEFAULT_AGENT, getAgent } from "../agents/index.ts";
+import { claudeProjectsRoot } from "../core/claude-session.ts";
 import { ensureServantAssets } from "../core/claude-setup.ts";
 import { requireInit } from "../core/config.ts";
 import {
@@ -22,19 +23,26 @@ const SESSION_TITLE = "fine-tune";
 function interviewPrompt(aspectId?: string): string {
   return aspectId
     ? `Run the /servant:fine-tune command to help me fine-tune servant's \`${aspectId}\` instructions.`
-    : "Run the /servant:fine-tune command to help me customize servant's instructions.";
+    : "Run the /servant:fine-tune command: analyze my servant insights and help me act on them.";
 }
 
 /**
- * Open an interactive servant session that interviews the user and writes the overlay via the
- * CLI. Mirrors `servant spawn`: a new terminal tab running the agent — but global, with cwd at
- * the servant root so `/servant:fine-tune` resolves and the root CLAUDE.md auto-loads.
+ * Open an interactive servant session that runs the insights analyst loop (or, with an aspect,
+ * jumps straight to tuning it) and writes overlays via the CLI. Mirrors `servant spawn`: a new
+ * terminal tab running the agent — but global, with cwd at the servant root so
+ * `/servant:fine-tune` resolves and the root CLAUDE.md auto-loads. The Claude projects root is
+ * added to tool scope so the analyst can drill metric anchors into raw transcripts without a
+ * permission prompt per drill. This `--add-dir` is interactive-only — the headless `claude -p`
+ * judge/extraction runners never get it.
  */
 async function openSession(aspectId: string | undefined, terminal?: string): Promise<void> {
   await requireInit();
   await ensureServantAssets();
   const cwd = aiServantRoot();
-  const command = getAgent(DEFAULT_AGENT).launchCommand(cwd, { prompt: interviewPrompt(aspectId) });
+  const command = getAgent(DEFAULT_AGENT).launchCommand(cwd, {
+    prompt: interviewPrompt(aspectId),
+    addDirs: [claudeProjectsRoot()],
+  });
   const driver = terminal ? getDriver(terminal) : await detectTerminal();
   await driver.openTab({ cwd, command, title: SESSION_TITLE });
   console.log(

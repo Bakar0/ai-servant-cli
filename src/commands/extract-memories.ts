@@ -14,6 +14,7 @@ import {
   writeDrainStatus,
 } from "../core/extract-queue.ts";
 import { readOverlayBody } from "../core/fine-tune.ts";
+import { headlessModelArgs } from "../core/headless-model.ts";
 import { commitKnowledge, reconcileAllIndexes } from "../core/knowledge.ts";
 import { applyRootOverride, knowledgeRoot, workspacesRoot } from "../core/paths.ts";
 import { servantReinvokeArgv } from "../core/self-exec.ts";
@@ -55,9 +56,11 @@ interface HookPayload {
  * The single most important guard is `SERVANT_EXTRACTION`: the drainer runs its headless
  * `claude -p` with that env set, the hook subprocess inherits it, so the extraction's own
  * session end is ignored here — closing the capture loop without depending on CLI flags.
+ * `SERVANT_INSIGHTS` is honored the same way so the insight-judging headless run (which sets it)
+ * never triggers a memory extraction of itself either.
  */
 export async function runFromHook(stdin: string, opts: { kick?: boolean } = {}): Promise<void> {
-  if (process.env.SERVANT_EXTRACTION) return; // the extraction's own session — never re-enqueue
+  if (process.env.SERVANT_EXTRACTION || process.env.SERVANT_INSIGHTS) return; // servant's own run
 
   let payload: HookPayload;
   try {
@@ -109,26 +112,32 @@ function kickDrainer(): void {
  */
 export type ExtractionRunner = (job: ExtractJob, prompt: string) => Promise<string>;
 
+/**
+ * Argv for the headless extraction `claude -p`. `headlessModelArgs()` injects `--model` (default
+ * `sonnet`) — see ADR-005. Exported so tests can assert the headless model without spawning claude.
+ */
+export function extractionArgv(prompt: string): string[] {
+  return [
+    "claude",
+    "-p",
+    prompt,
+    ...headlessModelArgs(),
+    "--output-format",
+    "text",
+    "--dangerously-skip-permissions",
+    "--add-dir",
+    knowledgeRoot(),
+  ];
+}
+
 const defaultRunner: ExtractionRunner = async (job, prompt) => {
-  const proc = Bun.spawn(
-    [
-      "claude",
-      "-p",
-      prompt,
-      "--output-format",
-      "text",
-      "--dangerously-skip-permissions",
-      "--add-dir",
-      knowledgeRoot(),
-    ],
-    {
-      cwd: job.cwd,
-      stdin: "ignore",
-      stdout: "pipe",
-      stderr: "pipe",
-      env: { ...process.env, SERVANT_EXTRACTION: "1" },
-    },
-  );
+  const proc = Bun.spawn(extractionArgv(prompt), {
+    cwd: job.cwd,
+    stdin: "ignore",
+    stdout: "pipe",
+    stderr: "pipe",
+    env: { ...process.env, SERVANT_EXTRACTION: "1" },
+  });
   const code = await proc.exited;
   if (code !== 0) {
     const err = await new Response(proc.stderr).text();
