@@ -34,6 +34,12 @@ export function workspacePath(name: string): string {
   return join(workspacesRoot(), name);
 }
 
+/** The workspace's declarative architecture source — the single file feeding the dashboard's
+ * architecture diagram and component map (human-maintained). */
+export function workspaceArchitecturePath(name: string): string {
+  return join(workspacePath(name), "context", "architecture.yaml");
+}
+
 export function configPath(): string {
   return join(aiServantRoot(), "config.json");
 }
@@ -114,6 +120,20 @@ export function insightsIndexPath(): string {
  */
 export function insightsDashboardPath(): string {
   return join(insightsRoot(), "dashboard.html");
+}
+
+/**
+ * Regenerated per-workspace HTML dashboards live here — a git-ignored sibling area inside the
+ * insights store, consistent with where `insights --deep` writes its dashboard. Overwritten on
+ * every `servant dashboard` run, so it is an artifact, not a data record.
+ */
+export function workspaceDashboardsDir(): string {
+  return join(insightsRoot(), "dashboards");
+}
+
+/** The rendered dashboard for one workspace (`<name>.html`). */
+export function workspaceDashboardPath(name: string): string {
+  return join(workspaceDashboardsDir(), `${name}.html`);
 }
 
 /** Queue of pending session-end extraction jobs (one JSON object per line). */

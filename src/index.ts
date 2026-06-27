@@ -1,5 +1,6 @@
 #!/usr/bin/env bun
 import { defineCommand, runMain } from "citty";
+import { dashboardCommand } from "./commands/dashboard.ts";
 import { extractMemoriesCommand } from "./commands/extract-memories.ts";
 import { fineTuneCommand } from "./commands/fine-tune.ts";
 import { initCommand } from "./commands/init.ts";
@@ -24,6 +25,7 @@ const main = defineCommand({
     spawn: spawnCommand,
     repo: repoCommand,
     resume: resumeCommand,
+    dashboard: dashboardCommand,
     recall: recallCommand,
     memories: memoriesCommand,
     insights: insightsCommand,

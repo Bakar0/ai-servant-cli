@@ -14,6 +14,8 @@ export interface ClaudeSessionMeta {
   firstUserMessage: string | null;
   lastUserMessage: string | null;
   lastAssistantMessage: string | null;
+  /** Model id of the first assistant turn that declared one (for cost estimation); null if absent. */
+  model: string | null;
   userTurns: number;
   assistantTurns: number;
   mtimeMs: number;
@@ -99,6 +101,7 @@ interface TurnRecord {
   cwd?: string | null;
   message?: {
     role?: string;
+    model?: string;
     content?: unknown;
   };
 }
@@ -155,6 +158,7 @@ export async function readSessionMeta(jsonlPath: string): Promise<ClaudeSessionM
   let firstUserMessage: string | null = null;
   let lastUserMessage: string | null = null;
   let lastAssistantMessage: string | null = null;
+  let model: string | null = null;
   let userTurns = 0;
   let assistantTurns = 0;
 
@@ -173,6 +177,7 @@ export async function readSessionMeta(jsonlPath: string): Promise<ClaudeSessionM
         lastUserMessage = text;
       }
     } else if (role === "assistant") {
+      if (!model && typeof rec.message?.model === "string") model = rec.message.model;
       const text = extractTextFromContent(rec.message?.content);
       if (text) {
         assistantTurns += 1;
@@ -192,6 +197,7 @@ export async function readSessionMeta(jsonlPath: string): Promise<ClaudeSessionM
     firstUserMessage,
     lastUserMessage,
     lastAssistantMessage,
+    model,
     userTurns,
     assistantTurns,
     mtimeMs: s.mtimeMs,
