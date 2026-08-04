@@ -1,13 +1,15 @@
 import { claudeCodeAgent } from "./claude-code.ts";
-import type { CodingAgent } from "./types.ts";
+import { codexAgent } from "./codex.ts";
+import type { AgentBackend } from "./types.ts";
 
-const AGENTS: Record<string, CodingAgent> = {
+const AGENTS: Record<string, AgentBackend> = {
   "claude-code": claudeCodeAgent,
+  codex: codexAgent,
 };
 
 export const DEFAULT_AGENT = "claude-code";
 
-export function getAgent(name: string): CodingAgent {
+export function getAgent(name: string): AgentBackend {
   const agent = AGENTS[name];
   if (!agent) {
     const supported = Object.keys(AGENTS).join(", ");
@@ -15,3 +17,6 @@ export function getAgent(name: string): CodingAgent {
   }
   return agent;
 }
+
+/** Alias for {@link getAgent} that reads better where the full backend surface is used. */
+export const getBackend = getAgent;

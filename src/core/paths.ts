@@ -40,6 +40,12 @@ export function workspaceArchitecturePath(name: string): string {
   return join(workspacePath(name), "context", "architecture.yaml");
 }
 
+/** The workspace's declarative delivery-roadmap source — the agent-maintained phase timeline
+ * feeding the dashboard's "where we are" panel. */
+export function workspaceRoadmapPath(name: string): string {
+  return join(workspacePath(name), "context", "roadmap.yaml");
+}
+
 export function configPath(): string {
   return join(aiServantRoot(), "config.json");
 }
@@ -198,4 +204,21 @@ export function userClaudeSettingsPath(): string {
 
 export function statuslineScriptPath(): string {
   return join(aiServantRoot(), "claude", "statusline.sh");
+}
+
+/** The user's real Codex home (`~/.codex`), overridable via `CODEX_HOME` for tests/CI. */
+export function userCodexDir(): string {
+  const override = process.env.CODEX_HOME;
+  if (override && override.length > 0) return override;
+  return join(homedir(), ".codex");
+}
+
+/** Where Codex discovers custom slash-command prompt files (top-level `*.md`). */
+export function codexPromptsDir(): string {
+  return join(userCodexDir(), "prompts");
+}
+
+/** Root of Codex's session (rollout) logs: `<codex>/sessions/YYYY/MM/DD/rollout-*.jsonl`. */
+export function codexSessionsDir(): string {
+  return join(userCodexDir(), "sessions");
 }

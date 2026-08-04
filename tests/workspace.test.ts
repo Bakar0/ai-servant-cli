@@ -22,7 +22,10 @@ const {
   ensureWorkspaceDir,
   isGoalUnfilled,
   mountedRepoSubdirs,
+  readWorkspaceAgent,
+  syncWorkspaceAgentsMd,
   syncWorkspaceClaudeMd,
+  writeWorkspaceAgent,
 } = await import("../src/core/workspace.ts");
 const { workspacePath, workspacesRoot, knowledgeProjectIndexPath } = await import(
   "../src/core/paths.ts"
@@ -222,6 +225,41 @@ describe("ensureWorkspaceDir", () => {
     // Per-repo indexes were still created in the store (for recall / browsing).
     expect(await readFile(knowledgeProjectIndexPath("api-gw"), "utf8")).toContain("# api-gw");
     expect(await readFile(knowledgeProjectIndexPath("web"), "utf8")).toContain("# web");
+  });
+
+  test("scaffolds AGENTS.md as the Codex twin: inlines root conventions + GOAL + knowledge, no @-imports", async () => {
+    const name = `agents-md-${process.pid}-${Date.now()}`;
+    // A root conventions doc (what CLAUDE.md would @-import) must be inlined into AGENTS.md.
+    await writeFile(join(tmpRoot, "CLAUDE.md"), "# Root conventions\nBe a good servant.\n");
+    await ensureWorkspaceDir(name);
+    const repos = workspacePath(name);
+    await mkdir(join(repos, "repos", "api-gw__main"), { recursive: true });
+    await syncWorkspaceAgentsMd(name);
+
+    const agents = await readFile(join(repos, "AGENTS.md"), "utf8");
+    expect(agents).toContain("Managed by servant"); // header
+    expect(agents).not.toMatch(/^@/m); // inlined, never @-imported
+    expect(agents).toContain("# Root conventions"); // root doc inlined
+    expect(agents).toContain("Be a good servant.");
+    expect(agents).toContain("# Workspace goal (GOAL.md)"); // GOAL inlined
+    expect(agents).toContain("## Mission");
+    expect(agents).toContain("## api-gw (project knowledge)"); // same knowledge section as CLAUDE.md
+
+    // Both docs coexist so the workspace works under either backend.
+    expect(await stat(join(repos, "CLAUDE.md"))).toBeTruthy();
+  });
+
+  test("records and reads back the workspace's agent backend (null before any is set)", async () => {
+    const name = `agent-marker-${process.pid}-${Date.now()}`;
+    await ensureWorkspaceDir(name);
+    expect(await readWorkspaceAgent(name)).toBeNull();
+    await writeWorkspaceAgent(name, "codex");
+    expect(await readWorkspaceAgent(name)).toBe("codex");
+    // idempotent + overwritable
+    await writeWorkspaceAgent(name, "codex");
+    expect(await readWorkspaceAgent(name)).toBe("codex");
+    await writeWorkspaceAgent(name, "claude-code");
+    expect(await readWorkspaceAgent(name)).toBe("claude-code");
   });
 
   test("scaffolds an intent-only GOAL.md placeholder with the unfilled marker", async () => {

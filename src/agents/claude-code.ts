@@ -1,7 +1,13 @@
+import { claudeCommandsDir } from "../core/paths.ts";
 import { shellSingleQuote } from "../core/shell.ts";
-import type { CodingAgent, LaunchOptions } from "./types.ts";
+import type {
+  AgentBackend,
+  ExtractionArgvOptions,
+  JudgeArgvOptions,
+  LaunchOptions,
+} from "./types.ts";
 
-export const claudeCodeAgent: CodingAgent = {
+export const claudeCodeAgent: AgentBackend = {
   name: "claude-code",
   launchCommand(_cwd: string, opts?: LaunchOptions): string {
     const addDirs = (opts?.addDirs ?? []).filter((d) => d.trim().length > 0);
@@ -16,5 +22,63 @@ export const claudeCodeAgent: CodingAgent = {
       parts.push(shellSingleQuote(prompt));
     }
     return parts.join(" ");
+  },
+
+  resumeCommand(sessionId: string, prompt?: string): string {
+    const base = `claude --resume ${shellSingleQuote(sessionId)}`;
+    const trimmed = prompt?.trim();
+    return trimmed ? `${base} ${shellSingleQuote(trimmed)}` : base;
+  },
+
+  resumeArgv(sessionId: string, prompt?: string): string[] {
+    const argv = ["claude", "--resume", sessionId];
+    const trimmed = prompt?.trim();
+    if (trimmed) argv.push(trimmed);
+    return argv;
+  },
+
+  conventions: { filename: "CLAUDE.md", supportsImports: true },
+
+  prompts: {
+    dir: () => claudeCommandsDir(),
+    // Claude namespaces commands by directory (`servant/goal.md` → `/servant:goal`); the caller
+    // writes under `<dir>/servant/`, so the filename itself is just `<id>.md`.
+    filename: (commandId: string) => `${commandId}.md`,
+  },
+
+  headless: {
+    selfExclusion: "session-id",
+    // `--dangerously-skip-permissions`: the headless pass reads the transcript, writes notes, and
+    // runs `servant … --reconcile` unattended; in `-p` mode any tool needing approval is auto-DENIED
+    // (no way to prompt), which would silently produce zero notes. Acceptable — it only touches the
+    // servant's own store. `--add-dir` brings that store (outside cwd) into tool scope.
+    extractionArgv(prompt: string, opts: ExtractionArgvOptions): string[] {
+      return [
+        "claude",
+        "-p",
+        prompt,
+        ...opts.modelArgs,
+        "--output-format",
+        "text",
+        "--dangerously-skip-permissions",
+        "--add-dir",
+        opts.addDir,
+      ];
+    },
+    judgeArgv(prompt: string, opts: JudgeArgvOptions): string[] {
+      return [
+        "claude",
+        "-p",
+        prompt,
+        ...opts.modelArgs,
+        "--output-format",
+        "text",
+        "--dangerously-skip-permissions",
+        "--session-id",
+        opts.sessionId,
+        "--add-dir",
+        opts.addDir,
+      ];
+    },
   },
 };

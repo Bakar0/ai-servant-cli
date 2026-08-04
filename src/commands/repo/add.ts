@@ -15,7 +15,7 @@ import { type DiscoveredRepo, discoverRepos } from "../../core/repo-discovery.ts
 import {
   ensureWorkspaceDir,
   resolveWorkspaceName,
-  syncWorkspaceClaudeMd,
+  syncWorkspaceConventions,
 } from "../../core/workspace.ts";
 import {
   generateBranchName,
@@ -278,8 +278,8 @@ export async function addReposInteractive(opts: AddReposOptions): Promise<void> 
   }
 
   // Wire project knowledge for the newly mounted repos: ensure a per-repo index exists
-  // and @-reference it from the workspace CLAUDE.md, then commit any scaffold changes.
-  await syncWorkspaceClaudeMd(workspace);
+  // and reference it from the workspace conventions docs (CLAUDE.md + AGENTS.md), then commit.
+  await syncWorkspaceConventions(workspace);
   await commitKnowledge("memory: scaffold project indexes");
 }
 

@@ -1,8 +1,10 @@
 import { rm } from "node:fs/promises";
 import { join } from "node:path";
+import { DEFAULT_AGENT, getBackend } from "../../agents/index.ts";
 import { headlessModelArgs } from "../headless-model.ts";
 import { registerHeadlessSession } from "../headless-sessions.ts";
-import { cacheDir } from "../paths.ts";
+import { cacheDir, workspacesRoot } from "../paths.ts";
+import { detectWorkspaceNameFromCwd, readWorkspaceAgent } from "../workspace.ts";
 import type { Candidate, CandidateKind, TranscriptAnchor } from "./metrics.ts";
 
 // Tier 2 of the insights model: a headless agent reads ONLY the anchored spans of a session's
@@ -197,32 +199,35 @@ export type JudgeRunner = (input: {
  * Argv for the headless judge `claude -p`. `headlessModelArgs()` injects `--model` (default
  * `sonnet`) — see ADR-005. Exported so tests can assert the headless model without spawning claude.
  */
-export function judgeArgv(prompt: string, sessionId: string): string[] {
-  return [
-    "claude",
-    "-p",
-    prompt,
-    ...headlessModelArgs(),
-    "--output-format",
-    "text",
-    "--dangerously-skip-permissions",
-    "--session-id",
+export function judgeArgv(prompt: string, sessionId: string, backendName = "claude-code"): string[] {
+  return getBackend(backendName).headless.judgeArgv(prompt, {
+    modelArgs: headlessModelArgs(backendName),
+    addDir: cacheDir(),
     sessionId,
-    "--add-dir",
-    cacheDir(),
-  ];
+  });
 }
 
 export const defaultJudgeRunner: JudgeRunner = async ({ job, candidates }) => {
-  const sessionId = crypto.randomUUID();
-  await registerHeadlessSession(sessionId); // exclude before spawn — robust against a crash mid-run
-  const outPath = join(cacheDir(), `judge-out-${sessionId}.json`);
+  const workspace = detectWorkspaceNameFromCwd(job.cwd, workspacesRoot());
+  const backendName = (workspace ? await readWorkspaceAgent(workspace) : null) ?? DEFAULT_AGENT;
+  const backend = getBackend(backendName);
+  // `runId` names the temp output file. For `"session-id"` backends (Claude) it's also the headless
+  // run's session id, registered up-front so the run is excluded from measurement even on a crash.
+  // For `"ephemeral"` backends (Codex) the run never persists a session, so there's nothing to
+  // register or exclude (excludeId stays null).
+  const runId = crypto.randomUUID();
+  let excludeId: string | null = null;
+  if (backend.headless.selfExclusion === "session-id") {
+    await registerHeadlessSession(runId);
+    excludeId = runId;
+  }
+  const outPath = join(cacheDir(), `judge-out-${runId}.json`);
   const prompt = buildJudgePrompt({
     transcriptPath: job.transcript_path,
     candidates,
     outPath,
   });
-  const proc = Bun.spawn(judgeArgv(prompt, sessionId), {
+  const proc = Bun.spawn(judgeArgv(prompt, runId, backendName), {
     cwd: job.cwd,
     stdin: "ignore",
     stdout: "ignore",
@@ -239,7 +244,7 @@ export const defaultJudgeRunner: JudgeRunner = async ({ job, candidates }) => {
   await rm(outPath, { force: true });
   if (!raw) {
     const err = await new Response(proc.stderr).text();
-    throw new Error(`claude -p judge exited ${code}: ${err.trim().slice(0, 200)}`);
+    throw new Error(`${backendName} judge exited ${code}: ${err.trim().slice(0, 200)}`);
   }
-  return { sessionId, judgments: parseJudgments(raw, candidates) };
+  return { sessionId: excludeId, judgments: parseJudgments(raw, candidates) };
 };

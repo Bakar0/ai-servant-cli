@@ -1,5 +1,5 @@
-import { type ClaudeSessionMeta, listWorkspaceSessions } from "../core/claude-session.ts";
 import { servantReinvokeArgv } from "../core/self-exec.ts";
+import { type SessionMeta, type SessionSource, getSessionSource } from "../core/session-source.ts";
 
 export interface PickSessionOpts {
   workspaceName?: string;
@@ -10,6 +10,8 @@ export interface PickSessionOpts {
    * Pass e.g. "insights" to preview a session's metrics/candidates instead of its messages.
    */
   previewSubcommand?: string;
+  /** Which backend's session store to pick from (default: Claude). */
+  source?: SessionSource;
 }
 
 export async function pickSession(opts: PickSessionOpts = {}): Promise<string | null> {
@@ -20,18 +22,20 @@ export async function pickSession(opts: PickSessionOpts = {}): Promise<string | 
     );
   }
 
-  const sessions = await listWorkspaceSessions({ workspaceName: opts.workspaceName });
+  const source = opts.source ?? getSessionSource(null);
+  const sessions = await source.listWorkspaceSessions({ workspaceName: opts.workspaceName });
   if (sessions.length === 0) {
     const scope = opts.workspaceName
       ? `workspace "${opts.workspaceName}"`
       : "any servant workspace";
-    throw new Error(`No Claude sessions found for ${scope} (looked in ~/.claude/projects/).`);
+    throw new Error(`No ${source.backend} sessions found for ${scope} (looked in ${source.storeLabel}).`);
   }
 
   const lines = sessions.map((s) => `${s.sessionId}\t${formatListLine(s)}`);
 
   const previewSub = opts.previewSubcommand ?? "resume";
-  const previewCmd = `${servantReinvokeArgv().map(shellQuote).join(" ")} ${previewSub} --preview {1}`;
+  // Thread the backend into the preview reinvocation so the pane renders from the right store.
+  const previewCmd = `${servantReinvokeArgv().map(shellQuote).join(" ")} ${previewSub} --agent ${shellQuote(source.backend)} --preview {1}`;
 
   const proc = Bun.spawn(
     [
@@ -64,7 +68,7 @@ export async function pickSession(opts: PickSessionOpts = {}): Promise<string | 
   return sessionId ?? null;
 }
 
-export function formatListLine(meta: ClaudeSessionMeta): string {
+export function formatListLine(meta: SessionMeta): string {
   const age = relativeAge(meta.mtimeMs);
   const message = (meta.firstUserMessage ?? "(no user message)").replace(/\s+/g, " ").slice(0, 120);
   return `${pad(age, 4)}  ${message}`;

@@ -6,16 +6,24 @@
 // Interactive spawns (`servant spawn`, `servant fine-tune`) go through a separate code path
 // (`claudeCodeAgent.launchCommand`) that never calls this, so they stay on the user's default model.
 
-/** Default headless model. An alias (not a pinned id) so it tracks the latest Sonnet without churn. */
-const DEFAULT_HEADLESS_MODEL = "sonnet";
+/**
+ * Per-backend default headless model. Aliases (not pinned ids) so they track the latest without
+ * churn. Codex has no cheap-tier alias worth pinning here — omitting `--model` lets it inherit the
+ * user's `~/.codex/config.toml` model, so its default is empty.
+ */
+const DEFAULT_HEADLESS_MODEL: Record<string, string> = {
+  "claude-code": "sonnet",
+  codex: "",
+};
 
 /**
- * `--model` args for the two headless `claude -p` runners, read from `SERVANT_HEADLESS_MODEL`
- * (default `"sonnet"`). An empty value or `"default"` returns `[]` — the escape hatch that omits
- * `--model` so the headless passes inherit the user's default model (today's pre-ADR-005 behavior).
+ * `--model` args for the headless runners, read from `SERVANT_HEADLESS_MODEL`, else the backend's
+ * default (Claude → `"sonnet"`; Codex → inherit its config). An empty value or `"default"` returns
+ * `[]` — the escape hatch that omits `--model` so the pass inherits the CLI's own default model.
  */
-export function headlessModelArgs(): string[] {
-  const raw = (process.env.SERVANT_HEADLESS_MODEL ?? DEFAULT_HEADLESS_MODEL).trim();
+export function headlessModelArgs(backend = "claude-code"): string[] {
+  const fallback = DEFAULT_HEADLESS_MODEL[backend] ?? "";
+  const raw = (process.env.SERVANT_HEADLESS_MODEL ?? fallback).trim();
   if (raw === "" || raw === "default") return [];
   return ["--model", raw];
 }

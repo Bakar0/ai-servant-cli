@@ -1,9 +1,16 @@
 import { defineCommand } from "citty";
 import { DEFAULT_AGENT, getAgent } from "../agents/index.ts";
 import { ensureServantAssets } from "../core/claude-setup.ts";
+import { ensureCodexAssets } from "../core/codex-setup.ts";
 import { requireInit } from "../core/config.ts";
 import { applyRootOverride } from "../core/paths.ts";
-import { ensureWorkspaceDir, isGoalUnfilled, resolveWorkspaceName } from "../core/workspace.ts";
+import {
+  ensureWorkspaceDir,
+  isGoalUnfilled,
+  readWorkspaceAgent,
+  resolveWorkspaceName,
+  writeWorkspaceAgent,
+} from "../core/workspace.ts";
 import { detectTerminal, getDriver } from "../terminals/index.ts";
 import { addReposInteractive } from "./repo/add.ts";
 
@@ -35,8 +42,7 @@ export const spawnCommand = defineCommand({
     agent: {
       type: "string",
       required: false,
-      default: DEFAULT_AGENT,
-      description: `Coding agent to launch (default: ${DEFAULT_AGENT}).`,
+      description: `Coding agent to launch: claude-code | codex. Defaults to the workspace's recorded agent, else ${DEFAULT_AGENT}.`,
     },
     prompt: {
       type: "string",
@@ -100,7 +106,15 @@ export const spawnCommand = defineCommand({
       });
     }
 
-    const agent = getAgent(args.agent);
+    // Resolve the backend: an explicit --agent wins; otherwise reuse whatever this workspace was
+    // last spawned with (so a Codex workspace stays Codex, including via `/servant:delegate`), then
+    // fall back to the default. Record the choice so future spawns and delegations inherit it.
+    const agentName =
+      args.agent?.trim() || (await readWorkspaceAgent(workspace)) || DEFAULT_AGENT;
+    const agent = getAgent(agentName);
+    await writeWorkspaceAgent(workspace, agent.name);
+    // Codex discovers its slash-command prompts from ~/.codex/prompts; install servant's there.
+    if (agent.name === "codex") await ensureCodexAssets();
     // If the caller gave a real task, run it. A blank prompt counts as no task — e.g.
     // `-repo` parses as the short-flag cluster `-r -e -p -o`, setting `-p` to "".
     const task = args.prompt?.trim() ? args.prompt : undefined;

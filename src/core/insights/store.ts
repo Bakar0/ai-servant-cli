@@ -9,6 +9,7 @@ import {
   insightsMetricsDir,
   insightsRoot,
 } from "../paths.ts";
+import { type SessionSource, getSessionSource } from "../session-source.ts";
 import { JUDGMENTS_SCHEMA_VERSION, type JudgmentRecord } from "./judgments.ts";
 import { METRICS_SCHEMA_VERSION, type SessionMetrics, extractSessionMetrics } from "./metrics.ts";
 
@@ -77,11 +78,17 @@ async function writeMetric(record: SessionMetrics): Promise<void> {
 export async function getOrComputeMetrics(
   jsonlPath: string,
   mtimeMs: number,
+  opts: { source?: SessionSource; sessionId?: string } = {},
 ): Promise<SessionMetrics> {
-  const sessionId = jsonlPath.replace(/^.*\//, "").replace(/\.jsonl$/, "");
+  const source = opts.source ?? getSessionSource(null);
+  // Claude's session id is the file basename; Codex passes it explicitly (rollout names are prefixed).
+  const sessionId = opts.sessionId ?? jsonlPath.replace(/^.*\//, "").replace(/\.jsonl$/, "");
   const cached = await readCachedMetric(sessionId);
   if (cached && cached.mtimeMs === mtimeMs) return cached;
-  const record = await extractSessionMetrics(jsonlPath);
+  const record = await extractSessionMetrics(jsonlPath, {
+    sessionId,
+    readRecords: (file) => source.readRecords(file),
+  });
   await writeMetric(record);
   return record;
 }

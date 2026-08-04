@@ -2,7 +2,7 @@ import { existsSync } from "node:fs";
 import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { ensureProjectIndex, renderWorkspaceKnowledgeSection } from "./knowledge.ts";
-import { workspacePath, workspacesRoot } from "./paths.ts";
+import { aiServantRoot, workspacePath, workspacesRoot } from "./paths.ts";
 import { parseWorktreeDirName, reposRoot } from "./worktree-naming.ts";
 
 // Imports at the top of a workspace's CLAUDE.md: the servant-root conventions doc and the
@@ -135,7 +135,7 @@ export async function ensureWorkspaceDir(name: string): Promise<string> {
     await writeIfMissing(full, body);
   }
   await ensureWorkspaceSettings(dir);
-  await syncWorkspaceClaudeMd(name);
+  await syncWorkspaceConventions(name);
   return dir;
 }
 
@@ -234,6 +234,81 @@ export async function syncWorkspaceClaudeMd(workspace: string): Promise<void> {
     // missing, will write
   }
   if (existing !== desired) await writeFile(claudeMdPath, desired);
+}
+
+// Header for the generated AGENTS.md, explaining that it is servant-managed and why content is
+// inlined rather than imported (Codex reads AGENTS.md and has no `@path` import mechanism).
+const WORKSPACE_AGENTS_MD_HEADER =
+  "<!-- Managed by servant — do not edit by hand. This is the Codex-facing twin of CLAUDE.md.\n" +
+  "     Codex reads AGENTS.md and has no @-import mechanism, so the servant-root conventions and\n" +
+  "     this workspace's GOAL.md are inlined below (CLAUDE.md @-imports them instead). -->";
+
+async function readFileOr(path: string, fallback: string): Promise<string> {
+  try {
+    return await readFile(path, "utf8");
+  } catch {
+    return fallback;
+  }
+}
+
+async function buildWorkspaceAgentsMd(
+  workspace: string,
+  repoSubdirs: readonly string[],
+): Promise<string> {
+  // Codex has no @-imports, so inline what CLAUDE.md would import: the servant-root conventions
+  // doc and the workspace GOAL.md, plus the same inlined knowledge index.
+  const rootConventions = (await readFileOr(join(aiServantRoot(), "CLAUDE.md"), "")).trim();
+  const goal = (await readFileOr(join(workspacePath(workspace), "GOAL.md"), "")).trim();
+  const knowledge = await renderWorkspaceKnowledgeSection(repoSubdirs);
+  const sections = [WORKSPACE_AGENTS_MD_HEADER];
+  if (rootConventions) sections.push(rootConventions);
+  if (goal) sections.push(`# Workspace goal (GOAL.md)\n\n${goal}`);
+  sections.push(knowledge.trimEnd());
+  return `${sections.join("\n\n")}\n`;
+}
+
+/**
+ * Rewrite the workspace AGENTS.md — the Codex-facing twin of CLAUDE.md. Same substance (servant-root
+ * conventions + GOAL.md + inlined knowledge index) but everything is inlined, since Codex reads
+ * AGENTS.md as plain text with no `@`-import mechanism. Idempotent — only writes on real change.
+ */
+export async function syncWorkspaceAgentsMd(workspace: string): Promise<void> {
+  const repoSubdirs = await mountedRepoSubdirs(workspace);
+  for (const repo of repoSubdirs) await ensureProjectIndex(repo);
+  const agentsMdPath = join(workspacePath(workspace), "AGENTS.md");
+  const desired = await buildWorkspaceAgentsMd(workspace, repoSubdirs);
+  const existing = await readFileOr(agentsMdPath, " missing");
+  if (existing !== desired) await writeFile(agentsMdPath, desired);
+}
+
+/**
+ * Sync both agent-conventions docs for the workspace so it works under either backend: CLAUDE.md
+ * (Claude, via @-imports) and AGENTS.md (Codex, inlined). Called on every spawn / repo add / repo rm.
+ */
+export async function syncWorkspaceConventions(workspace: string): Promise<void> {
+  await syncWorkspaceClaudeMd(workspace);
+  await syncWorkspaceAgentsMd(workspace);
+}
+
+// Records which agent backend a workspace was last spawned with, so a later `servant spawn` (or a
+// `/servant:delegate` that shells out to `servant spawn`) reuses it instead of silently reverting to
+// the default. Lives in the workspace's own `.servant/` state dir.
+function workspaceAgentMarkerPath(workspace: string): string {
+  return join(workspacePath(workspace), ".servant", "agent");
+}
+
+/** The backend name recorded for this workspace, or null if none has been recorded yet. */
+export async function readWorkspaceAgent(workspace: string): Promise<string | null> {
+  const raw = (await readFileOr(workspaceAgentMarkerPath(workspace), "")).trim();
+  return raw.length > 0 ? raw : null;
+}
+
+/** Record the backend name this workspace is being driven with (idempotent). */
+export async function writeWorkspaceAgent(workspace: string, agent: string): Promise<void> {
+  const path = workspaceAgentMarkerPath(workspace);
+  if ((await readWorkspaceAgent(workspace)) === agent) return;
+  await mkdir(dirname(path), { recursive: true });
+  await writeFile(path, `${agent}\n`);
 }
 
 // True when the workspace's goal has not been defined yet (GOAL.md still carries the
