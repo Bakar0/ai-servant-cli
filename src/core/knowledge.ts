@@ -3,6 +3,7 @@ import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { $ } from "bun";
 import {
+  hubRoot,
   knowledgeIndexPath,
   knowledgeProjectDir,
   knowledgeProjectIndexPath,
@@ -153,16 +154,23 @@ export function parseNote(text: string): KnowledgeNote {
 
 // --- Store lifecycle ---
 
+// The git repo is the hub clone (majordomo/), not knowledge/ — knowledge/ is a tracked
+// subdirectory of it. All git ops target the hub root.
 function gitInitialized(): boolean {
-  return existsSync(join(knowledgeRoot(), ".git"));
+  return existsSync(join(hubRoot(), ".git"));
 }
 
-/** Create the store dirs and git-init on first use. Idempotent and cheap. */
+/**
+ * Create the store dirs on first use. If the hub clone isn't present (fresh machine,
+ * or a throwaway `--root` test setup with no majordomo clone), fall back to a local-only
+ * `git init` at the hub root so commits still work offline; a real clone from GitHub is
+ * set up separately by `servant init`. Idempotent and cheap.
+ */
 export async function ensureKnowledgeStore(): Promise<void> {
   await mkdir(knowledgeProjectsDir(), { recursive: true });
   await mkdir(knowledgeTopicsDir(), { recursive: true });
   if (!gitInitialized()) {
-    await $`git -C ${knowledgeRoot()} init -q`.nothrow().quiet();
+    await $`git -C ${hubRoot()} init -q`.nothrow().quiet();
   }
   if (!existsSync(knowledgeIndexPath())) {
     await rebuildMasterIndex();
@@ -173,14 +181,19 @@ export async function ensureKnowledgeStore(): Promise<void> {
 // the user has no global git identity. -c flags don't touch the user's git config.
 const GIT_IDENTITY = ["-c", "user.name=servant", "-c", "user.email=servant@localhost"];
 
-/** Stage everything under knowledge/ and commit. No-op if nothing changed. */
+/**
+ * Stage the knowledge notes and commit at the hub root, then push to the hub remote.
+ * No-op if nothing changed. Push is best-effort: offline or a local-only fallback repo
+ * (no `origin`) just leaves the commit local to be pushed on a later capture.
+ */
 export async function commitKnowledge(message: string): Promise<void> {
-  const root = knowledgeRoot();
+  const root = hubRoot();
   if (!gitInitialized()) return;
-  await $`git -C ${root} add -A`.nothrow().quiet();
-  const status = await $`git -C ${root} status --porcelain`.nothrow().quiet();
+  await $`git -C ${root} add knowledge`.nothrow().quiet();
+  const status = await $`git -C ${root} status --porcelain -- knowledge`.nothrow().quiet();
   if (status.stdout.toString().trim() === "") return;
-  await $`git -C ${root} ${GIT_IDENTITY} commit -q -m ${message}`.nothrow().quiet();
+  await $`git -C ${root} ${GIT_IDENTITY} commit -q -m ${message} -- knowledge`.nothrow().quiet();
+  await $`git -C ${root} push --quiet`.nothrow().quiet();
 }
 
 // --- Note read/write + dedup ---
@@ -364,9 +377,9 @@ export async function renderWorkspaceKnowledgeSection(repos: readonly string[]):
     "# Servant knowledge",
     "",
     "Durable knowledge prior servants captured about these repos and related topics lives in " +
-      "`~/.ai_servant/knowledge/` (git-tracked). Search it with `servant recall <query>` to pull " +
-      "full note bodies. Notes that name a specific file, function, or flag may have rotted — " +
-      "re-verify before relying on them.",
+      "`~/.ai_servant/majordomo/knowledge/` (the git-tracked servant hub). Search it with " +
+      "`servant recall <query>` to pull full note bodies. Notes that name a specific file, " +
+      "function, or flag may have rotted — re-verify before relying on them.",
   ];
 
   const tags = await topicTagCounts();

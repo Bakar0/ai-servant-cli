@@ -1,7 +1,7 @@
 import { mkdir } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
-import { configPath } from "./paths.ts";
+import { configPath, DEFAULT_HUB_REPO } from "./paths.ts";
 
 export type Config = {
   /** Schema version. Bump when the shape changes so `init` can migrate older files. */
@@ -10,6 +10,8 @@ export type Config = {
   scanMaxDepth: number;
   /** Show the rotating servant tip in the status line. Set false to hide it. */
   showTips: boolean;
+  /** Hub repo slug (owner/name) — issue tracker + knowledge/ notes. */
+  hubRepo: string;
 };
 
 /** Current config schema version. */
@@ -24,6 +26,7 @@ export function defaultConfig(): Config {
     repoSearchRoots: [...DEFAULT_SEARCH_ROOTS],
     scanMaxDepth: DEFAULT_SCAN_MAX_DEPTH,
     showTips: true,
+    hubRepo: DEFAULT_HUB_REPO,
   };
 }
 
@@ -49,6 +52,9 @@ function coerce(raw: unknown): Config {
     }
     if (typeof obj.showTips === "boolean") {
       cfg.showTips = obj.showTips;
+    }
+    if (typeof obj.hubRepo === "string" && obj.hubRepo.trim().length > 0) {
+      cfg.hubRepo = obj.hubRepo.trim();
     }
   }
   return cfg;

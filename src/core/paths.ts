@@ -67,9 +67,26 @@ export function fineTuneAspectPath(id: string): string {
   return join(fineTuneDir(), `${id}.md`);
 }
 
-/** Durable, git-tracked knowledge store, sibling to workspaces/. */
+/**
+ * The servant hub: a clone of the majordomo repo (issue tracker on GitHub +
+ * `knowledge/` notes on disk). The git repo lives here, at the hub root — knowledge/
+ * is just a tracked subdirectory of it.
+ */
+export function hubRoot(): string {
+  return join(aiServantRoot(), "majordomo");
+}
+
+/** Default hub repo slug (owner/name); overridable via config `hubRepo`. */
+export const DEFAULT_HUB_REPO = "Barak-Zen/majordomo";
+
+/** HTTPS git URL for a `owner/name` hub slug. */
+export function hubRemoteUrl(slug: string = DEFAULT_HUB_REPO): string {
+  return `https://github.com/${slug}.git`;
+}
+
+/** Durable, git-tracked knowledge store — a subdirectory of the hub clone. */
 export function knowledgeRoot(): string {
-  return join(aiServantRoot(), "knowledge");
+  return join(hubRoot(), "knowledge");
 }
 
 export function knowledgeIndexPath(): string {
