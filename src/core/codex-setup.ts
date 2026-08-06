@@ -20,7 +20,7 @@ export function toCodexPrompt(body: string): string {
 
 /**
  * Install servant's slash-command prompts into `~/.codex/prompts/` so a Codex session gets
- * `/servant-goal`, `/servant-delegate`, etc. Derived from the bundled Claude command templates via
+ * `/servant-goal`, `/servant-handoff`, etc. Derived from the bundled Claude command templates via
  * {@link toCodexPrompt}. Overwrites only on content change; idempotent and cheap to run per spawn.
  */
 export async function ensureCodexAssets(): Promise<void> {

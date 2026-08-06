@@ -324,7 +324,7 @@ export async function syncWorkspaceConventions(workspace: string): Promise<void>
 }
 
 // Records which agent backend a workspace was last spawned with, so a later `servant spawn` (or a
-// `/servant:delegate` that shells out to `servant spawn`) reuses it instead of silently reverting to
+// `/servant:handoff` that shells out to `servant spawn`) reuses it instead of silently reverting to
 // the default. Lives in the workspace's own `.servant/` state dir.
 function workspaceAgentMarkerPath(workspace: string): string {
   return join(workspacePath(workspace), ".servant", "agent");

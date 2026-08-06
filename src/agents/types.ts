@@ -31,7 +31,7 @@ export interface PromptsSpec {
    */
   dir(): string;
   /**
-   * Turn a servant command id (`goal`, `delegate`, …) into the filename the agent expects. Claude
+   * Turn a servant command id (`goal`, `handoff`, …) into the filename the agent expects. Claude
    * namespaces via directory (`goal.md` → `/servant:goal`); Codex is flat and has no `:` namespace,
    * so it prefixes the filename (`servant-goal.md` → `/servant-goal`).
    */
