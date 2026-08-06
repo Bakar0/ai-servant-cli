@@ -33,10 +33,10 @@ describe("ensureCodexAssets", () => {
       await ensureCodexAssets();
       const files = (await readdir(join(home, "prompts"))).toSorted();
       expect(files).toEqual([
-        "servant-delegate.md",
         "servant-extract-memories.md",
         "servant-fine-tune.md",
         "servant-goal.md",
+        "servant-handoff.md",
         "servant-recall.md",
       ]);
       const goal = await readFile(join(home, "prompts", "servant-goal.md"), "utf8");
