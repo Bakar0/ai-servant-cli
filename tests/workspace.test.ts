@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { existsSync } from "node:fs";
 import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -283,34 +284,39 @@ describe("ensureWorkspaceDir", () => {
     expect(body).toBe("# Goal\n\n## Mission\nShip the thing.\n");
   });
 
-  test("scaffolds CONTEXT.md, briefs/INDEX.md, plans/INDEX.md, and context/INDEX.md", async () => {
+  test("scaffolds CONTEXT.md, docs/agents/* skills config, and a docs/adr/ dir", async () => {
     const name = `scaffold-${process.pid}-${Date.now()}`;
     const dir = await ensureWorkspaceDir(name);
 
     const contextMd = await readFile(join(dir, "CONTEXT.md"), "utf8");
     expect(contextMd).toContain("# Context");
 
-    const briefsIndex = await readFile(join(dir, "briefs", "INDEX.md"), "utf8");
-    expect(briefsIndex).toContain("# Briefs");
+    // Tasks/plans are GitHub Issues in the hub now — no briefs/ or plans/ dirs.
+    expect(existsSync(join(dir, "briefs"))).toBe(false);
+    expect(existsSync(join(dir, "plans"))).toBe(false);
 
-    const plansIndex = await readFile(join(dir, "plans", "INDEX.md"), "utf8");
-    expect(plansIndex).toContain("# Plans");
+    // mattpocock skills config, hub-pinned to this workspace's label.
+    const tracker = await readFile(join(dir, "docs", "agents", "issue-tracker.md"), "utf8");
+    expect(tracker).toContain(`ws:${name}`);
+    expect(tracker).toContain("--repo");
+    const domain = await readFile(join(dir, "docs", "agents", "domain.md"), "utf8");
+    expect(domain).toContain("docs/adr/");
+    await readFile(join(dir, "docs", "agents", "triage-labels.md"), "utf8");
 
-    const contextIndex = await readFile(join(dir, "context", "INDEX.md"), "utf8");
-    expect(contextIndex).toContain("# Context");
+    expect(existsSync(join(dir, "docs", "adr"))).toBe(true);
   });
 
   test("does not overwrite scaffold files that the user has edited", async () => {
     const name = `scaffold-preserve-${process.pid}-${Date.now()}`;
     const dir = await ensureWorkspaceDir(name);
 
-    const briefsIndex = join(dir, "briefs", "INDEX.md");
-    await writeFile(briefsIndex, "# Briefs\n\n- existing entry\n");
+    const domain = join(dir, "docs", "agents", "domain.md");
+    await writeFile(domain, "# Domain\n\n- existing entry\n");
 
     await ensureWorkspaceDir(name);
 
-    const body = await readFile(briefsIndex, "utf8");
-    expect(body).toBe("# Briefs\n\n- existing entry\n");
+    const body = await readFile(domain, "utf8");
+    expect(body).toBe("# Domain\n\n- existing entry\n");
   });
 });
 

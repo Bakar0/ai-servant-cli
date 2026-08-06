@@ -26,6 +26,15 @@ export function aiServantRoot(): string {
   return rootOverride ?? join(homedir(), ".ai_servant");
 }
 
+/**
+ * True when servant is running against the real `~/.ai_servant` root (no `--root` override).
+ * Network-touching setup (plugin install, hub clone) gates on this so throwaway/test roots
+ * never reach out.
+ */
+export function isDefaultRoot(): boolean {
+  return rootOverride === null;
+}
+
 export function workspacesRoot(): string {
   return join(aiServantRoot(), "workspaces");
 }

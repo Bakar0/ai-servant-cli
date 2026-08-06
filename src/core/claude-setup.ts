@@ -11,11 +11,12 @@ import { aiServantRoot, claudeCommandsDir } from "./paths.ts";
 const SERVANT_ROOT_PREFIX = "servant_root/";
 
 // Slash commands used to live flat at `.claude/commands/<name>.md` (un-prefixed `/goal`,
-// `/delegate`). They are now namespaced under `commands/servant/` so they surface as
-// `/servant:goal` / `/servant:delegate`. The sync below never deletes, so on upgrade the
-// stale flat copies would linger and shadow the namespaced ones with duplicate commands.
-// Remove the specific legacy files we know we shipped.
+// `/delegate`). They are now namespaced under `commands/servant/`. The sync below never deletes,
+// so on upgrade stale copies would linger and shadow current commands. Remove the specific files
+// we know we retired: the pre-namespace flat copies, plus `servant/delegate.md` — delegation is
+// now the mattpocock `/handoff` → `servant spawn` flow, so the bespoke command is gone.
 const LEGACY_FLAT_COMMANDS = ["goal.md", "delegate.md"];
+const RETIRED_NAMESPACED_COMMANDS = ["servant/delegate.md"];
 
 /**
  * Sync the bundled servant-root templates into `~/.ai_servant/`. This includes
@@ -61,10 +62,10 @@ export async function ensureServantAssets(): Promise<void> {
   }
 }
 
-/** Delete pre-namespace flat command files so upgraded installs don't keep duplicate commands. */
+/** Delete retired command files so upgraded installs don't keep stale/duplicate commands. */
 async function removeLegacyFlatCommands(): Promise<void> {
   const dir = claudeCommandsDir();
-  for (const name of LEGACY_FLAT_COMMANDS) {
+  for (const name of [...LEGACY_FLAT_COMMANDS, ...RETIRED_NAMESPACED_COMMANDS]) {
     await rm(join(dir, name), { force: true });
   }
 }

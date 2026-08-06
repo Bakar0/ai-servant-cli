@@ -25,16 +25,6 @@ const { ensureServantAssets } = await import("../src/core/claude-setup.ts");
 const { aiServantRoot, claudeDir, claudeCommandsDir } = await import("../src/core/paths.ts");
 
 describe("ensureServantAssets", () => {
-  test("creates .claude/commands/servant/delegate.md under the servant root", async () => {
-    await ensureServantAssets();
-    const target = join(claudeCommandsDir(), "servant", "delegate.md");
-    const s = await stat(target);
-    expect(s.isFile()).toBe(true);
-    const body = await readFile(target, "utf8");
-    expect(body).toContain("Agent Brief");
-    expect(body).toContain("argument-hint");
-  });
-
   test("creates .claude/commands/servant/goal.md under the servant root", async () => {
     await ensureServantAssets();
     const target = join(claudeCommandsDir(), "servant", "goal.md");
@@ -58,7 +48,7 @@ describe("ensureServantAssets", () => {
 
   test("is idempotent and resyncs when content drifts", async () => {
     await ensureServantAssets();
-    const target = join(claudeCommandsDir(), "servant", "delegate.md");
+    const target = join(claudeCommandsDir(), "servant", "goal.md");
     const original = await readFile(target, "utf8");
 
     // user / drift modifies the file
@@ -70,20 +60,24 @@ describe("ensureServantAssets", () => {
   });
 
   test("removes pre-namespace flat command files on upgrade", async () => {
-    // Simulate an install made before commands were namespaced under servant/.
+    // Simulate an install made before commands were namespaced under servant/, plus the retired
+    // (namespaced) delegate command — both must be cleaned up on sync.
     const commands = claudeCommandsDir();
-    await mkdir(commands, { recursive: true });
+    await mkdir(join(commands, "servant"), { recursive: true });
     const legacyGoal = join(commands, "goal.md");
     const legacyDelegate = join(commands, "delegate.md");
+    const retiredDelegate = join(commands, "servant", "delegate.md");
     await writeFile(legacyGoal, "old /goal");
     await writeFile(legacyDelegate, "old /delegate");
+    await writeFile(retiredDelegate, "old /servant:delegate");
 
     await ensureServantAssets();
 
     expect(await Bun.file(legacyGoal).exists()).toBe(false);
     expect(await Bun.file(legacyDelegate).exists()).toBe(false);
     expect(await Bun.file(join(commands, "servant", "goal.md")).exists()).toBe(true);
-    expect(await Bun.file(join(commands, "servant", "delegate.md")).exists()).toBe(true);
+    // delegate is retired — its namespaced command must be removed, not resynced.
+    expect(await Bun.file(retiredDelegate).exists()).toBe(false);
   });
 
   test("ships the recall and extract-memories slash commands", async () => {

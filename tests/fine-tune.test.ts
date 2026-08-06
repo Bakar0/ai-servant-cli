@@ -36,17 +36,17 @@ function aspect(id: string) {
   return a;
 }
 
-const delegatePath = () => join(claudeCommandsDir(), "servant", "delegate.md");
+const goalPath = () => join(claudeCommandsDir(), "servant", "goal.md");
 
 describe("composeAsset", () => {
   test("returns the base unchanged when there is no overlay", () => {
-    expect(composeAsset("delegate", "BASE", null)).toBe("BASE");
+    expect(composeAsset("goal", "BASE", null)).toBe("BASE");
   });
 
   test("appends the overlay after the base, fenced by markers", () => {
-    const out = composeAsset("delegate", "BASE", "do it my way");
+    const out = composeAsset("goal", "BASE", "do it my way");
     expect(out.startsWith("BASE")).toBe(true);
-    expect(out).toContain("<!-- servant:fine-tune:start id=delegate -->");
+    expect(out).toContain("<!-- servant:fine-tune:start id=goal -->");
     expect(out).toContain("do it my way");
     expect(out).toContain("<!-- servant:fine-tune:end -->");
     // base must come before the overlay section
@@ -56,55 +56,55 @@ describe("composeAsset", () => {
 
 describe("overlay read/write", () => {
   test("writeOverlay strips comments on read and reports customized", async () => {
-    await writeOverlay(aspect("delegate"), "always use the RFC template");
-    expect(await isCustomized("delegate")).toBe(true);
-    expect(await readOverlayBody("delegate")).toBe("always use the RFC template");
+    await writeOverlay(aspect("goal"), "always use the RFC template");
+    expect(await isCustomized("goal")).toBe(true);
+    expect(await readOverlayBody("goal")).toBe("always use the RFC template");
     // the raw file carries the guidance scaffold comment
-    const raw = await readFile(fineTuneAspectPath("delegate"), "utf8");
-    expect(raw).toContain("servant fine-tune — `delegate`");
+    const raw = await readFile(fineTuneAspectPath("goal"), "utf8");
+    expect(raw).toContain("servant fine-tune — `goal`");
   });
 
   test("a scaffold-only overlay (no real content) is not customized", async () => {
-    await writeOverlay(aspect("delegate"), "   ");
-    expect(await isCustomized("delegate")).toBe(false);
-    expect(await readOverlayBody("delegate")).toBeNull();
+    await writeOverlay(aspect("goal"), "   ");
+    expect(await isCustomized("goal")).toBe(false);
+    expect(await readOverlayBody("goal")).toBeNull();
   });
 });
 
 describe("ensureServantAssets composition", () => {
   test("missing overlay → delivered asset equals pure base", async () => {
     await ensureServantAssets();
-    const delivered = await readFile(delegatePath(), "utf8");
+    const delivered = await readFile(goalPath(), "utf8");
     expect(delivered).not.toContain("servant:fine-tune:start");
-    expect(delivered).toContain("Agent Brief");
+    expect(delivered).toContain("GOAL.md");
   });
 
   test("overlay is appended into the delivered slash command", async () => {
-    await writeOverlay(aspect("delegate"), "always use the RFC template");
+    await writeOverlay(aspect("goal"), "always use the RFC template");
     await ensureServantAssets();
-    const delivered = await readFile(delegatePath(), "utf8");
-    expect(delivered).toContain("Agent Brief"); // base preserved
+    const delivered = await readFile(goalPath(), "utf8");
+    expect(delivered).toContain("GOAL.md"); // base preserved
     expect(delivered).toContain("always use the RFC template"); // overlay applied
-    expect(delivered).toContain("## Local fine-tuning");
+    expect(delivered).toContain("The following are user customizations"); // overlay wrapper
   });
 
   test("overlay content survives a re-sync (simulated CLI update)", async () => {
-    await writeOverlay(aspect("delegate"), "always use the RFC template");
+    await writeOverlay(aspect("goal"), "always use the RFC template");
     await ensureServantAssets();
-    const first = await readFile(delegatePath(), "utf8");
+    const first = await readFile(goalPath(), "utf8");
     // Re-running sync (as an update would) must not drop the overlay and must be idempotent.
     await ensureServantAssets();
-    const second = await readFile(delegatePath(), "utf8");
+    const second = await readFile(goalPath(), "utf8");
     expect(second).toBe(first);
     expect(second).toContain("always use the RFC template");
   });
 
   test("reset reverts the delivered asset to pure base", async () => {
-    await writeOverlay(aspect("delegate"), "always use the RFC template");
+    await writeOverlay(aspect("goal"), "always use the RFC template");
     await ensureServantAssets();
-    await resetOverlay("delegate");
+    await resetOverlay("goal");
     await ensureServantAssets();
-    const delivered = await readFile(delegatePath(), "utf8");
+    const delivered = await readFile(goalPath(), "utf8");
     expect(delivered).not.toContain("always use the RFC template");
     expect(delivered).not.toContain("servant:fine-tune:start");
   });

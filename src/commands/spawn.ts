@@ -49,7 +49,7 @@ export const spawnCommand = defineCommand({
       required: false,
       alias: "p",
       description:
-        "Initial prompt delivered to the agent as its first user message. Use to kick off a delegated task (e.g. point the agent at a brief file).",
+        "Initial prompt delivered to the agent as its first user message. Use to kick off a task (e.g. point the agent at a /handoff doc or a hub issue to continue).",
     },
     repo: {
       type: "boolean",

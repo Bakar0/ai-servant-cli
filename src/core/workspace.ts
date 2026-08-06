@@ -1,8 +1,15 @@
 import { existsSync } from "node:fs";
 import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { dirname, join, relative, resolve, sep } from "node:path";
+import { loadConfig } from "./config.ts";
 import { ensureProjectIndex, renderWorkspaceKnowledgeSection } from "./knowledge.ts";
 import { aiServantRoot, workspacePath, workspacesRoot } from "./paths.ts";
+import {
+  renderAgentSkillsBlock,
+  renderDomainDoc,
+  renderIssueTrackerDoc,
+  renderTriageLabelsDoc,
+} from "./skills-config.ts";
 import { parseWorktreeDirName, reposRoot } from "./worktree-naming.ts";
 
 // Imports at the top of a workspace's CLAUDE.md: the servant-root conventions doc and the
@@ -72,7 +79,7 @@ function stripRecordHooks(groups: unknown): unknown[] {
 export const GOAL_UNFILLED_MARKER = "servant:goal:unfilled";
 
 // Placeholder GOAL.md. Intent-only (mission / KPIs / out-of-scope); architecture
-// decisions live in context/ ADRs, operating instructions in CLAUDE.md.
+// decisions live in docs/adr/ ADRs, operating instructions in CLAUDE.md.
 const GOAL_PLACEHOLDER = `# Goal
 
 > [!NOTE]
@@ -88,15 +95,26 @@ _Concrete, verifiable signals that it's working (a behavior works, a test passes
 _Anything explicitly NOT part of this workspace._
 `;
 
-// Scaffold files seeded once when a workspace is created. Only written if missing
-// so user edits are never clobbered. Layout matches `~/.ai_servant/CLAUDE.md`.
+// Static scaffold files seeded once when a workspace is created. Only written if missing so user
+// edits are never clobbered. Tasks/plans no longer live as files — they are GitHub Issues in the
+// hub (see docs/agents/issue-tracker.md, generated per workspace below). ADRs live in docs/adr/.
 const SCAFFOLD_FILES: ReadonlyArray<readonly [string, string]> = [
   ["GOAL.md", GOAL_PLACEHOLDER],
   ["CONTEXT.md", "# Context\n\nShared language / domain glossary for this workspace.\n"],
-  ["briefs/INDEX.md", "# Briefs\n"],
-  ["plans/INDEX.md", "# Plans\n"],
-  ["context/INDEX.md", "# Context\n"],
 ];
+
+// Per-workspace mattpocock-skills config (docs/agents/*). Parameterized by workspace name + hub
+// repo, so generated in ensureWorkspaceDir rather than listed statically. Written if missing.
+function skillsConfigFiles(
+  workspace: string,
+  hubRepo: string,
+): ReadonlyArray<readonly [string, string]> {
+  return [
+    ["docs/agents/issue-tracker.md", renderIssueTrackerDoc(workspace, hubRepo)],
+    ["docs/agents/domain.md", renderDomainDoc()],
+    ["docs/agents/triage-labels.md", renderTriageLabelsDoc()],
+  ];
+}
 
 async function writeIfMissing(path: string, body: string): Promise<void> {
   try {
@@ -129,11 +147,15 @@ export async function ensureWorkspaceDir(name: string): Promise<string> {
   assertValidWorkspaceName(name);
   const dir = workspacePath(name);
   await mkdir(dir, { recursive: true });
-  for (const [rel, body] of SCAFFOLD_FILES) {
+  const { hubRepo } = await loadConfig();
+  const scaffold = [...SCAFFOLD_FILES, ...skillsConfigFiles(name, hubRepo)];
+  for (const [rel, body] of scaffold) {
     const full = join(dir, rel);
     await mkdir(dirname(full), { recursive: true });
     await writeIfMissing(full, body);
   }
+  // ADRs live here (created lazily by /domain-modeling); seed the dir so the layout is visible.
+  await mkdir(join(dir, "docs", "adr"), { recursive: true });
   await ensureWorkspaceSettings(dir);
   await syncWorkspaceConventions(name);
   return dir;
@@ -209,10 +231,15 @@ export async function mountedRepoSubdirs(workspace: string): Promise<string[]> {
   return [...subdirs].toSorted();
 }
 
-async function buildWorkspaceClaudeMd(repoSubdirs: readonly string[]): Promise<string> {
+async function buildWorkspaceClaudeMd(
+  workspace: string,
+  repoSubdirs: readonly string[],
+  hubRepo: string,
+): Promise<string> {
   const header = `${WORKSPACE_CLAUDE_MD_BASE.join("\n")}\n`;
+  const agentSkills = renderAgentSkillsBlock(workspace, hubRepo);
   const knowledge = await renderWorkspaceKnowledgeSection(repoSubdirs);
-  return `${header}\n${knowledge}`;
+  return `${header}\n${agentSkills}\n${knowledge}`;
 }
 
 /**
@@ -225,8 +252,9 @@ async function buildWorkspaceClaudeMd(repoSubdirs: readonly string[]): Promise<s
 export async function syncWorkspaceClaudeMd(workspace: string): Promise<void> {
   const repoSubdirs = await mountedRepoSubdirs(workspace);
   for (const repo of repoSubdirs) await ensureProjectIndex(repo);
+  const { hubRepo } = await loadConfig();
   const claudeMdPath = join(workspacePath(workspace), "CLAUDE.md");
-  const desired = await buildWorkspaceClaudeMd(repoSubdirs);
+  const desired = await buildWorkspaceClaudeMd(workspace, repoSubdirs, hubRepo);
   let existing: string | null = null;
   try {
     existing = await readFile(claudeMdPath, "utf8");
@@ -254,15 +282,19 @@ async function readFileOr(path: string, fallback: string): Promise<string> {
 async function buildWorkspaceAgentsMd(
   workspace: string,
   repoSubdirs: readonly string[],
+  hubRepo: string,
 ): Promise<string> {
   // Codex has no @-imports, so inline what CLAUDE.md would import: the servant-root conventions
-  // doc and the workspace GOAL.md, plus the same inlined knowledge index.
+  // doc and the workspace GOAL.md, the per-workspace Agent skills block (hub pin), plus the same
+  // inlined knowledge index.
   const rootConventions = (await readFileOr(join(aiServantRoot(), "CLAUDE.md"), "")).trim();
   const goal = (await readFileOr(join(workspacePath(workspace), "GOAL.md"), "")).trim();
+  const agentSkills = renderAgentSkillsBlock(workspace, hubRepo).trim();
   const knowledge = await renderWorkspaceKnowledgeSection(repoSubdirs);
   const sections = [WORKSPACE_AGENTS_MD_HEADER];
   if (rootConventions) sections.push(rootConventions);
   if (goal) sections.push(`# Workspace goal (GOAL.md)\n\n${goal}`);
+  sections.push(agentSkills);
   sections.push(knowledge.trimEnd());
   return `${sections.join("\n\n")}\n`;
 }
@@ -275,8 +307,9 @@ async function buildWorkspaceAgentsMd(
 export async function syncWorkspaceAgentsMd(workspace: string): Promise<void> {
   const repoSubdirs = await mountedRepoSubdirs(workspace);
   for (const repo of repoSubdirs) await ensureProjectIndex(repo);
+  const { hubRepo } = await loadConfig();
   const agentsMdPath = join(workspacePath(workspace), "AGENTS.md");
-  const desired = await buildWorkspaceAgentsMd(workspace, repoSubdirs);
+  const desired = await buildWorkspaceAgentsMd(workspace, repoSubdirs, hubRepo);
   const existing = await readFileOr(agentsMdPath, " missing");
   if (existing !== desired) await writeFile(agentsMdPath, desired);
 }
