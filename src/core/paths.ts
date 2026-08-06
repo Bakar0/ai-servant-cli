@@ -67,6 +67,11 @@ export function discoveryCachePath(): string {
   return join(cacheDir(), "repo-discovery.json");
 }
 
+/** Offline snapshot of the hub's issues, so `servant tasks` still renders without network. */
+export function tasksCachePath(): string {
+  return join(cacheDir(), "tasks.json");
+}
+
 /** User-owned fine-tune overlays (one file per tunable aspect), sibling to workspaces/. */
 export function fineTuneDir(): string {
   return join(aiServantRoot(), "fine-tune");

@@ -12,6 +12,7 @@ import { repoCommand } from "./commands/repo/index.ts";
 import { resumeCommand } from "./commands/resume.ts";
 import { spawnCommand } from "./commands/spawn.ts";
 import { statuslineCommand } from "./commands/statusline.ts";
+import { tasksCommand } from "./commands/tasks.ts";
 import { getVersion } from "./version.ts";
 
 const main = defineCommand({
@@ -28,6 +29,7 @@ const main = defineCommand({
     dashboard: dashboardCommand,
     recall: recallCommand,
     memories: memoriesCommand,
+    tasks: tasksCommand,
     insights: insightsCommand,
     "insights-judge": insightsJudgeCommand,
     "extract-memories": extractMemoriesCommand,
