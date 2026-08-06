@@ -8,23 +8,50 @@ You are running inside a **servant workspace** at `~/.ai_servant/workspaces/<nam
 <workspace>/
   GOAL.md                 # the workspace's intent / north star (auto-loaded every session)
   CONTEXT.md              # shared language / domain glossary (workspace-wide)
-  briefs/
-    INDEX.md              # list of briefs + status + one-line summary
-    <YYYY-MM-DD-HHMM>-<slug>.md   # an Agent Brief (the contract for one delegated task)
-  plans/
-    INDEX.md              # list of plans + status + one-line summary
-    <YYYY-MM-DD-HHMM>-<slug>.md   # an implementation plan (phases / sequencing)
-  context/
-    INDEX.md              # list of context docs + when each applies
-    adr-NNN-<slug>.md     # architecture decision records
-    <topic>.md            # reusable reference docs
+  docs/
+    adr/
+      NNNN-<slug>.md      # architecture decision records
+    agents/               # per-workspace config the engineering skills read (auto-generated)
+      issue-tracker.md    # how/where issues are filed — pinned to the shared hub
+      domain.md           # domain-doc consumer rules (CONTEXT.md + docs/adr/)
+      triage-labels.md    # triage label vocabulary
+  repos/                  # mounted repo worktrees (one per `servant repo add` / `spawn -r`)
 ```
 
-- **Briefs are contracts.** Each brief is a self-contained spec for one delegated task. The brief — not the spawning prompt — is the source of truth.
-- **Plans are working scaffolds.** A plan captures procedural sequencing — phases, milestones, investigation steps — for work whose *how* is non-trivial. Plans pair with the brief they implement via backlinks; you will edit a plan as execution reveals reality.
+- **Tasks and plans are GitHub Issues in the shared hub** — not files in the workspace. See "The task tracker" below.
 - **`GOAL.md`** holds the workspace's intent — what it's ultimately for. See "The workspace goal" below.
-- **`CONTEXT.md`** holds the workspace's shared language: domain terms and ubiquitous vocabulary that briefs, plans, and ADRs reference.
-- **`context/`** holds reusable reference docs. Briefs and plans link to them via relative paths like `../context/adr-001-jwt-rotation.md`.
+- **`CONTEXT.md`** holds the workspace's shared language: domain terms the ADRs, specs, and tickets reference.
+- **`docs/adr/`** holds architecture decision records. **`docs/agents/`** holds the engineering-skills config (auto-generated; you rarely edit it by hand).
+
+## The engineering workflow (mattpocock skills)
+
+This workspace uses the **mattpocock engineering skills** (installed as the `mattpocock-skills` plugin). Reach for them by name; they read their per-workspace config from `docs/agents/` (see the `## Agent skills` block below, injected per workspace):
+
+```
+/grill-me       align on the task before building — resolve ambiguity first
+/to-spec        turn the conversation into a spec issue in the hub
+/to-tickets     break a spec/plan into tracer-bullet tickets (issues with blocking edges)
+/implement      build a ticket end-to-end
+/tdd            tight red-green loop while implementing
+/code-review    two-axis review (standards + spec) of the diff
+/handoff        write a handoff doc so a fresh session can continue  (see "Spawning & handoff")
+/teach          explain a concept or a slice of the codebase
+/wait-what      stop and get unstuck when something doesn't add up
+```
+
+Specs and tickets are **published to the hub as issues**, not written as files here. Domain terms and decisions live in `CONTEXT.md` + `docs/adr/` (created lazily by `/domain-modeling`).
+
+## The task tracker (the hub)
+
+Every workspace's tasks, specs, and tickets live as **GitHub Issues in one shared hub repo**, labeled `ws:<workspace>`. This makes the whole backlog navigable in one place, across workspaces:
+
+```
+servant tasks                # every workspace's open issues, grouped
+servant tasks --ws <name>    # just this workspace
+gh issue list --repo <hub> --label ws:<name>
+```
+
+The concrete hub repo + label for this workspace are in the `## Agent skills` block (per workspace) and `docs/agents/issue-tracker.md`. **Do not** create per-workspace `briefs/` or `plans/` files — file issues instead.
 
 ## The workspace goal
 
@@ -39,44 +66,41 @@ guide scope and priority decisions; if a request conflicts with it, surface that
 - **Changes need approval.** `GOAL.md` only changes by direct user approval. Never edit it
   silently — propose the change and let the user confirm. The `/servant:goal` command handles the
   interview and writes only after sign-off.
-- Keep it intent-only: design decisions belong in `context/` ADRs, operating instructions here
+- Keep it intent-only: design decisions belong in `docs/adr/`, operating instructions here
   in `CLAUDE.md` — `GOAL.md` should not duplicate either.
 
 ## Where artifacts go
 
-All servant artifacts — briefs, plans, ADRs, context docs — live in **this workspace**, never in the repo you are working on. The repo holds code; the workspace holds the cross-session reasoning around the code.
+Cross-session reasoning lives with the workspace or the hub — never inside the repo you are editing. The repo holds code.
 
-- **DO** write to `<workspace>/plans/<YYYY-MM-DD-HHMM>-<slug>.md` and update `<workspace>/plans/INDEX.md`.
-- **DO NOT** write to `<repo>/docs/plans/`, `<repo>/.scratch/`, `<repo>/PLAN.md`, or any path inside the repo you are editing.
+- **Tasks / specs / tickets** → GitHub Issues in the hub (`/to-spec`, `/to-tickets`, or `gh issue create`), labeled `ws:<workspace>`.
+- **Architecture decisions** → `<workspace>/docs/adr/NNNN-<slug>.md`.
+- **DO NOT** write plans/specs/tickets to `<repo>/docs/`, `<repo>/.scratch/`, `<repo>/PLAN.md`, or any path inside the repo. If a planning skill defaults to writing inside the repo, override it — file an issue in the hub instead.
 
-This applies even when a planning skill or slash command (e.g. `/plan`, `planning`) would default to writing inside the repo — override the default and write into `<workspace>/plans/` instead, then append an entry to `plans/INDEX.md`. If the plan implements a specific brief, link the brief from the plan and link the plan from the brief.
+## Spawning & handoff
 
-## If you were spawned to execute a brief
+There are two ways to move work to another agent — pick by layer:
 
-If your first user message points you at a brief (e.g. `Read briefs/<x>.md and execute the Agent Brief`):
+- **In-session subagent (the `Agent` tool)** — ephemeral, runs inside *your* session and returns a report to your context. This is what `/code-review`, `/research`, `/wayfinder`, and the design skills use to fan out. Reach for it for tightly-scoped, AFK work you want back in this thread.
+- **`servant spawn` (a new tab / fresh top-level agent)** — persistent, its own context, human-visible. Reach for it when a chunk of work deserves its own session: continuing after a `/handoff`, an independent subtask you want running in parallel, or a sibling agent. **Proactively suggest `servant spawn`** when you notice work that should live in its own session rather than crowding this one.
 
-1. Read the brief file in full — it is the contract.
-2. Read every file linked under the brief's **Context** section (`../CONTEXT.md`, `../context/*.md`).
-3. Execute the brief's **Acceptance criteria**. Do not work outside its **Out of scope** list.
-4. When finished (or blocked), update `briefs/INDEX.md` to mark this brief's status: `[status: done]`, `[status: blocked: <reason>]`, or `[status: in-progress]`.
+**Handoff is automatic.** After `/handoff` writes its doc to the OS temp dir, immediately continue it in a fresh session — don't make the user open it by hand:
 
-## Brief format (mattpocock Agent Brief)
+```
+servant spawn --prompt "Read <handoff-doc> and continue the work; follow its suggested-skills section"
+```
 
-Briefs follow this template:
+`servant spawn` auto-detects the current workspace, so this opens a new tab right here.
 
-- **Category** — bug / enhancement
-- **Summary** — one-line description
-- **Current behavior** — status quo
-- **Desired behavior** — what should happen after the work
-- **Key interfaces** — types, signatures, config shapes that change (no file paths or line numbers — they go stale)
-- **Acceptance criteria** — concrete, independently testable checklist
-- **Out of scope** — explicit boundaries
-- **Context** — links to relevant `CONTEXT.md` / ADRs / topic docs
+**Worktree safety for research/wayfinder.** A mounted repo under `repos/` is a live git **worktree**. A subagent that does `git checkout -b research/<name>` there would switch the shared checkout's branch out from under the main agent. Research/wayfinder subagents must stay **read-only** or use their own worktree, and write `/research` findings into `docs/` — never switch the shared checkout.
 
-Briefs describe **what**, not **how**. Behavioral, not procedural.
+## servant commands you'll reach for
 
-## Delegating onward
-
-To hand a piece of work to a fresh servant in this workspace, use the `/servant:delegate` slash command. It writes a new Agent Brief into `briefs/`, updates the INDEX files, then runs `servant spawn --prompt "Read briefs/<file>.md and execute the Agent Brief."` (which opens a new tab in this same workspace).
+```
+servant tasks [--ws <name>]     # cross-workspace issue view (grouped, deep-linked)
+servant recall <query>          # search accumulated knowledge notes
+servant spawn -w <name> [-r]    # new workspace / tab; -r mounts repo worktrees
+servant resume                  # re-attach to an earlier session
+```
 
 To define or amend the workspace's intent, use the `/servant:goal` slash command — it interviews the user and writes `GOAL.md` only after approval.

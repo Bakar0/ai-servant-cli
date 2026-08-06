@@ -42,8 +42,8 @@ describe("ensureServantAssets", () => {
     expect(s.isFile()).toBe(true);
     const body = await readFile(target, "utf8");
     expect(body).toContain("Servant Workspace");
-    expect(body).toContain("briefs/");
-    expect(body).toContain("Agent Brief");
+    expect(body).toContain("mattpocock");
+    expect(body).toContain("servant tasks");
   });
 
   test("is idempotent and resyncs when content drifts", async () => {

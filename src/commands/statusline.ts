@@ -39,7 +39,7 @@ export const STATUSLINE_EXAMPLE = [
   "     opus · 102k/200k · 12%",
   "   ▸ api ⎇ feat-login · ✎3 +1 · #482",
   "     web ⎇ feat-login · clean",
-  "     ※ tip: servant spawn -w fix-login-bug -r — workspace for a task, pick repos",
+  "     ※ tip: /to-tickets — break a spec into tracer-bullet issues in the hub",
   "",
   'Hide the tip anytime: set "showTips": false in ~/.ai_servant/config.json.',
   "",

@@ -24,7 +24,7 @@ delivered asset files (those get clobbered on the next sync).
 - **`$ARGUMENTS` names an aspect → the fast path.** The user already knows what they want to change.
   Skip the analysis and jump straight to **§ Tuning an aspect** for that aspect.
 
-Aspects: `general` · `memory-extraction` · `delegate` · `goal` · `recall`.
+Aspects: `general` · `memory-extraction` · `goal` · `recall`.
 
 ## Core rule: nothing is written without explicit approval
 
@@ -119,7 +119,6 @@ Run `servant fine-tune --list` to see the aspects and which are already customiz
 |--------|---------------|------------------------------------------|
 | `general` | Workspace conventions every agent loads | `CLAUDE.md` |
 | `memory-extraction` | How sessions distill into the knowledge base | `.claude/commands/servant/extract-memories.md` (also the headless extractor) |
-| `delegate` | How work is handed off as Agent Briefs | `.claude/commands/servant/delegate.md` |
 | `goal` | How a workspace's GOAL.md is defined | `.claude/commands/servant/goal.md` |
 | `recall` | How prior knowledge is searched/surfaced | `.claude/commands/servant/recall.md` |
 
@@ -138,14 +137,16 @@ Briefly summarize both back to the user.
 ### 3. Interview — what should change?
 
 Ask, with **concrete options**, what to change. One or two questions at a time; let each answer
-steer the next. Typical shapes: add a house rule the default doesn't cover; override a default; or
-change tone, defaults, or when the agent should stop and ask. Keep it light. When you arrived here
-from the analyst loop, anchor the interview in the finding ("the data shows X — should we Y?").
+steer the next. Typical shapes: add a house rule the default doesn't cover; override a default (e.g.
+for `memory-extraction`, extra things to always capture or skip; for `goal`, a different interview
+style; for `recall`, how results are ranked); or change tone, defaults, or when the agent should
+stop and ask. Keep it light. When you arrived here from the analyst loop, anchor the interview in
+the finding ("the data shows X — should we Y?").
 
 ### 4. Draft the overlay and confirm
 
 Write the overlay as plain instructions, **phrased to be appended after the base**. When you mean to
-override a default, say so explicitly ("Override the brief template below: …"). Show the user the
+override a default, say so explicitly ("Override the default interview style below: …"). Show the user the
 full draft and get approval. Revise and re-present until they confirm.
 
 ### 5. Write it via the CLI
