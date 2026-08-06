@@ -3,7 +3,13 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setRootOverride } from "../src/core/paths.ts";
-import { fetchHubTasks, groupByWorkspace, parseGhIssues } from "../src/core/tasks.ts";
+import {
+  computeFrontier,
+  fetchHubTasks,
+  groupByWorkspace,
+  parseBlockedBy,
+  parseGhIssues,
+} from "../src/core/tasks.ts";
 
 let tmpRoot: string;
 beforeAll(async () => {
@@ -41,6 +47,32 @@ describe("groupByWorkspace", () => {
     const grouped = groupByWorkspace(parseGhIssues(SAMPLE));
     expect([...grouped.keys()]).toEqual(["(unlabeled)", "auth", "pay"]);
     expect(grouped.get("auth")).toHaveLength(1);
+  });
+});
+
+describe("parseBlockedBy", () => {
+  test("pulls issue numbers from a Blocked by line", () => {
+    expect(parseBlockedBy("Some body.\n\nBlocked by: #13, #14\nmore")).toEqual([13, 14]);
+    expect(parseBlockedBy("blocked by #7")).toEqual([7]);
+    expect(parseBlockedBy("no dependency here")).toEqual([]);
+  });
+});
+
+describe("computeFrontier", () => {
+  const FRONTIER = JSON.stringify([
+    { number: 13, title: "core", state: "OPEN", url: "u/13", labels: [{ name: "ws:x" }], body: "" },
+    { number: 14, title: "mw", state: "OPEN", url: "u/14", labels: [{ name: "ws:x" }], body: "independent" },
+    { number: 15, title: "tenant", state: "OPEN", url: "u/15", labels: [{ name: "ws:x" }], body: "Blocked by: #13" },
+    { number: 16, title: "later", state: "OPEN", url: "u/16", labels: [{ name: "ws:x" }], body: "Blocked by: #99" },
+  ]);
+
+  test("ready = no open blockers; blocked lists only still-open blockers", () => {
+    const { ready, blocked } = computeFrontier(parseGhIssues(FRONTIER));
+    // #13 and #14 have none; #16's blocker #99 isn't in the open set → treated satisfied → ready.
+    expect(ready.map((i) => i.number)).toEqual([13, 14, 16]);
+    expect(blocked).toHaveLength(1);
+    expect(blocked[0]?.issue.number).toBe(15);
+    expect(blocked[0]?.openBlockers).toEqual([13]);
   });
 });
 

@@ -88,6 +88,14 @@ describe("ensureServantAssets", () => {
     expect(await readFile(extract, "utf8")).toContain("--reconcile");
   });
 
+  test("ships the /servant:handoff continuation skill", async () => {
+    await ensureServantAssets();
+    const handoff = await readFile(join(claudeCommandsDir(), "servant", "handoff.md"), "utf8");
+    expect(handoff).toContain("/servant:handoff");
+    expect(handoff).toContain("servant tasks --frontier");
+    expect(handoff).toContain("disable-model-invocation: true");
+  });
+
   test("places .claude/ as a sibling of workspaces/ under the servant root", async () => {
     await ensureServantAssets();
     expect(claudeDir()).toBe(join(tmpRoot, ".claude"));

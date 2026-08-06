@@ -18,6 +18,8 @@ export interface HubIssue {
   labels: string[];
   /** The `ws:` label with the prefix stripped, or null if the issue carries none. */
   workspace: string | null;
+  /** Issue numbers this ticket declares as blockers (parsed from a "Blocked by: #N" body line). */
+  blockedBy: number[];
 }
 
 interface TasksCache {
@@ -32,7 +34,7 @@ export type GhRunner = (hubRepo: string, state: IssueState) => Promise<string>;
 
 const defaultGhRunner: GhRunner = async (hubRepo, state) => {
   const res =
-    await $`gh issue list --repo ${hubRepo} --state ${state} --limit 500 --json number,title,state,url,labels`
+    await $`gh issue list --repo ${hubRepo} --state ${state} --limit 500 --json number,title,state,url,labels,body`
       .nothrow()
       .quiet();
   if (res.exitCode !== 0) throw new Error(res.stderr.toString().trim() || "gh issue list failed");
@@ -42,6 +44,18 @@ const defaultGhRunner: GhRunner = async (hubRepo, state) => {
 function workspaceOf(labels: string[]): string | null {
   const ws = labels.find((l) => l.startsWith(WS_LABEL_PREFIX));
   return ws ? ws.slice(WS_LABEL_PREFIX.length) : null;
+}
+
+/** Parse blocker issue numbers from a "Blocked by: #12, #34" line anywhere in the body. */
+export function parseBlockedBy(body: string): number[] {
+  const out = new Set<number>();
+  const re = /blocked by:?\s*((?:#\d+[\s,]*)+)/gi;
+  let m: RegExpExecArray | null;
+  // biome-ignore lint/suspicious/noAssignInExpressions: standard regex exec loop
+  while ((m = re.exec(body)) !== null) {
+    for (const ref of m[1]?.match(/#\d+/g) ?? []) out.add(Number(ref.slice(1)));
+  }
+  return [...out];
 }
 
 /** Parse `gh issue list --json ...` output into HubIssues. Tolerates missing/extra fields. */
@@ -69,6 +83,7 @@ export function parseGhIssues(json: string): HubIssue[] {
       url: String(o.url ?? ""),
       labels,
       workspace: workspaceOf(labels),
+      blockedBy: parseBlockedBy(String(o.body ?? "")),
     });
   }
   return issues;
@@ -84,6 +99,32 @@ export function groupByWorkspace(issues: readonly HubIssue[]): Map<string, HubIs
     else out.set(key, [issue]);
   }
   return new Map([...out.entries()].toSorted((a, b) => a[0].localeCompare(b[0])));
+}
+
+export interface Frontier {
+  /** Open tickets whose blockers (if any) are all closed — safe to dispatch now. */
+  ready: HubIssue[];
+  /** Open tickets still waiting, each with the subset of blockers that are still open. */
+  blocked: { issue: HubIssue; openBlockers: number[] }[];
+}
+
+/**
+ * Split open tickets into ready vs blocked from their declared blocking edges. A blocker counts
+ * only while it's still open in the given set; a closed or unknown blocker is treated as satisfied.
+ */
+export function computeFrontier(issues: readonly HubIssue[]): Frontier {
+  const open = issues.filter((i) => i.state === "open");
+  const openNums = new Set(open.map((i) => i.number));
+  const ready: HubIssue[] = [];
+  const blocked: { issue: HubIssue; openBlockers: number[] }[] = [];
+  for (const issue of open) {
+    const openBlockers = issue.blockedBy.filter((n) => openNums.has(n));
+    if (openBlockers.length === 0) ready.push(issue);
+    else blocked.push({ issue, openBlockers });
+  }
+  ready.sort((a, b) => a.number - b.number);
+  blocked.sort((a, b) => a.issue.number - b.issue.number);
+  return { ready, blocked };
 }
 
 async function writeCache(cache: TasksCache): Promise<void> {

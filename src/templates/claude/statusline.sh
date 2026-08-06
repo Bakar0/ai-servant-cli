@@ -132,7 +132,7 @@ if [ "$show_tips" = "true" ]; then
     "/to-spec — turn this conversation into a spec in the hub"
     "/to-tickets — break a spec into tracer-bullet tickets (issues)"
     "/implement + /tdd — build a ticket with a tight test loop"
-    "/handoff — hand off cleanly; servant spawn continues it in a new tab"
+    "/servant:handoff — hand the work forward; it spawns the next session(s) for you"
     "/teach — have the agent explain a concept or a slice of the code"
     "/wait-what — stop and get unstuck when something doesn't add up"
     "servant tasks — open tasks across all your workspaces"
