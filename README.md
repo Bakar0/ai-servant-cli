@@ -13,22 +13,21 @@
 
 ---
 
-`servant` puts coding agents to work in the engineer's service. Every task gets its own workspace: a dedicated folder, git worktrees of the repos you're working in, and a coding agent (Claude Code) launched in a fresh terminal tab. Sessions are resumable, durable knowledge is captured automatically, and ongoing context is shared across every session in the workspace - so the agent does the heavy lifting while you stay the architect. Like the compiler before it, servant raises the level you work at without taking your hands off the wheel.
+`servant` puts coding agents to work in the engineer's service. Every task gets its own workspace: a dedicated folder, git worktrees of the repos you're working in, and a coding agent (Claude Code or Codex) launched in a fresh terminal tab. Work is shaped and tracked with [mattpocock/skills](https://github.com/mattpocock/skills) against a shared GitHub **hub** repo (tasks = Issues, plus a git-tracked knowledge base), so sessions are resumable, agents get smarter, and the backlog stays navigable across every workspace - the agent does the heavy lifting while you stay the architect. Like the compiler before it, servant raises the level you work at without taking your hands off the wheel.
 
 ```bash
 servant spawn -w add-rate-limiter -r    # -w names the workspace; -r picks repos + adds worktrees
-servant repo add                        # interactively add another repo's worktree (picker)
-servant memories                        # browse what past sessions learned (fzf)
-servant insights                        # see how the setup steers agents (tokens, rules, knowledge)
-servant insights --deep                 # render an offline HTML dashboard of the same data
+servant tasks                           # every workspace's open tasks (GitHub Issues in the hub)
+servant recall "rate limit"             # search accumulated knowledge, ranked
+servant insights --deep                 # render an offline HTML dashboard of how the setup steers agents
 servant fine-tune                       # insights analyst: read your metrics, then tune the instructions
 ```
 
-> **The everyday move - `/servant:delegate`.** From inside a session, distill what you've
-> figured out into an **Agent Brief** (a self-contained contract) and spawn a fresh agent in the
-> same workspace to execute it. Briefs, plans, and context docs live in the workspace - not the
-> repo - so ongoing context is shared across sessions: each new agent picks up exactly where the
-> last one left off, instead of starting cold. This is how you keep command while the work fans out.
+> **The everyday move - `/servant:handoff`.** From inside a session, take the work forward:
+> write a handoff doc, route to the next step of the flow, and spawn the continuation session(s) -
+> one per ready ticket. Specs and tickets live as Issues in the shared hub - not in the repo - so
+> ongoing context is shared across sessions: each new agent picks up exactly where the last one
+> left off, instead of starting cold. This is how you keep command while the work fans out.
 
 ---
 
@@ -38,6 +37,7 @@ servant fine-tune                       # insights analyst: read your metrics, t
 - [Installation](#installation) - `brew install` + first-time setup
 - [Quick start](#quick-start)
 - [How it works](#how-it-works)
+- [The workflow & the hub](#the-workflow--the-hub)
 - [Commands](#commands)
 - [In-session slash commands](#in-session-slash-commands)
 - [Configuration](#configuration)
@@ -79,8 +79,9 @@ servant init
 
 `init` is idempotent and:
 - creates the servant root at `~/.ai_servant/`
-- writes `config.json` (your repo search roots)
-- syncs the bundled agent assets (workspace `CLAUDE.md`, `/servant:*` slash commands, the knowledge-capture hook)
+- writes `config.json` (your repo search roots + `hubRepo`)
+- syncs the bundled agent assets (workspace `CLAUDE.md`/`AGENTS.md`, `/servant:*` slash commands, the knowledge-capture hook)
+- clones the **hub** repo to `~/.ai_servant/majordomo/` and installs the [mattpocock/skills](https://github.com/mattpocock/skills) plugin (best-effort; skipped offline or without the `claude` CLI)
 - offers to install the Claude Code status line
 
 ---
@@ -107,19 +108,56 @@ Everything servant manages lives under a single root, `~/.ai_servant/`:
 
 ```
 ~/.ai_servant/
-├── config.json                  # repo search roots, scan depth
-├── .cache/repo-discovery.json   # cached repo discovery
-├── knowledge/                   # captured memories (git-tracked store)
+├── config.json                  # repo search roots, scan depth, hubRepo
+├── .cache/                      # repo discovery, offline tasks snapshot
+├── majordomo/                   # clone of the hub repo — Issues = tasks; knowledge/ = notes
+│   └── knowledge/               # captured memories (git-tracked, pushed to the hub)
+├── insights/                    # metrics store
 └── workspaces/<workspace>/
-    ├── .claude/                 # synced CLAUDE.md, /servant:* commands, hooks
+    ├── CLAUDE.md · AGENTS.md    # synced conventions (Claude @-imports · Codex inlined)
+    ├── GOAL.md · CONTEXT.md     # workspace intent · shared glossary
+    ├── docs/adr/                # architecture decision records
+    ├── docs/agents/             # per-workspace skills config (hub-pinned issue tracker, etc.)
+    ├── .claude/                 # settings + hooks
     └── repos/<repo>__<branch>/  # git worktree of your local clone
 ```
 
-- A **workspace** is a self-contained folder for one task. The coding agent runs there with its own `CLAUDE.md` and slash commands.
-- **Worktrees** use a flat `repos/<repo>__<branch>/` layout - multiple repos per workspace, each a real `git worktree` of your existing local clone (your original checkout is untouched).
+- A **workspace** is a self-contained folder for one initiative. The coding agent runs there with its own `CLAUDE.md`/`AGENTS.md` and slash commands.
+- **Tasks and plans are not files** — they're GitHub Issues in the shared hub, labeled `ws:<workspace>`. See [The workflow & the hub](#the-workflow--the-hub).
+- **Worktrees** use a flat `repos/<repo>__<branch>/` layout — multiple repos per workspace, each a real `git worktree` of your existing local clone (your original checkout is untouched).
 - **Assets are CLI-owned and self-healing**: they're re-synced on every `spawn`/`resume`, so updating servant updates every workspace's instructions automatically. Your `fine-tune` overlays are layered on top and preserved.
 
 > Override the root on any command with `--root <path>` - handy for throwaway or test setups.
+
+---
+
+## The workflow & the hub
+
+servant embraces [mattpocock/skills](https://github.com/mattpocock/skills) for the engineering
+flow, and points them at one shared **hub** repo (`config.hubRepo`, default `Barak-Zen/majordomo`)
+cloned to `~/.ai_servant/majordomo/`. The hub is two things at once:
+
+- **The issue tracker** — every workspace's tasks, specs, and tickets are GitHub Issues labeled
+  `ws:<workspace>`, so the whole backlog is navigable in one place (`servant tasks`, the label, or
+  a Project board).
+- **The knowledge base** — durable notes captured at `SessionEnd` live in `majordomo/knowledge/`
+  and are searched with `servant recall`.
+
+The idea → ship flow (skills you reach for by name in a session):
+
+```
+/grill-me      align on the task            →  sharpens CONTEXT.md
+/to-spec       publish a spec               →  a hub Issue  [ws:<name>, spec]
+/to-tickets    break it into tracer-bullet tickets  →  hub Issues with blocking edges
+/implement     build a ticket (drives /tdd, closes with /code-review)
+/servant:handoff   take it forward          →  writes a handoff doc, then spawns the next session(s),
+                                               one per ready ticket (see servant tasks --frontier)
+```
+
+Skills are opt-in tools, not a mandatory pipeline — a session opens in plain conversation, and you
+reach for a skill when the situation calls for one. `docs/agents/issue-tracker.md` (generated per
+workspace) pins every `gh` call to the hub, so the skills file issues in the right place
+automatically.
 
 ---
 
@@ -133,6 +171,7 @@ Run any command with `--help` for the full flag list.
 | `servant spawn` | Create/enter a workspace and open a terminal tab running a coding agent. |
 | `servant repo add\|list\|rm` | Manage git worktrees of your local clones inside a workspace. |
 | `servant resume` | Re-attach to a previous Claude Code session. |
+| `servant tasks` | List the hub's tasks (GitHub Issues) grouped by workspace; `--frontier` splits ready vs blocked. |
 | `servant recall` | Search the knowledge base by tag and content; prints matching notes. |
 | `servant memories` | Browse the knowledge base in an fzf picker. |
 | `servant insights` | Transcript-driven observability across instructions, tokens, and the knowledge base; `--deep` renders an offline HTML dashboard. |
@@ -148,7 +187,7 @@ Create a workspace under `~/.ai_servant/workspaces/<name>` and open a new termin
 servant spawn -w my-task                      # open an agent tab in the workspace
 servant spawn -w my-task -r                    # also pick repos + add a worktree per pick first
 servant spawn -w my-task -r --branch topic/x   # use a specific branch name for the worktrees
-servant spawn -w my-task -p "Read brief.md and start"   # deliver a first prompt to the agent
+servant spawn -w my-task -p "Read <handoff-doc> and continue"   # deliver a first prompt to the agent
 ```
 
 | Flag | Description |
@@ -158,7 +197,7 @@ servant spawn -w my-task -p "Read brief.md and start"   # deliver a first prompt
 | `--branch` | With `-r`: override the auto-generated branch name (default `<workspace>-<shortid>`). |
 | `-p, --prompt` | Initial prompt delivered to the agent as its first message. |
 | `--terminal` | `cmux` \| `iterm` (default: auto-detect). |
-| `--agent` | Coding agent to launch (default: `claude-code`). |
+| `--agent` | Coding agent to launch: `claude-code` \| `codex` (default: the workspace's recorded agent, else `claude-code`). |
 
 ### `servant repo`
 
@@ -189,9 +228,20 @@ servant resume <session-id> --new-tab   # resume a specific session in a new tab
 servant resume --prompt "continue"      # resume with a kickoff prompt
 ```
 
-### Knowledge base - `recall` & `memories`
+### `servant tasks`
 
-servant captures durable knowledge from your sessions into `~/.ai_servant/knowledge/` (wired via a Claude Code `SessionEnd` hook). Query it anytime:
+List the hub's Issues (the task tracker) grouped by workspace, with deep links. Falls back to a cached snapshot when offline.
+
+```bash
+servant tasks                        # every workspace's open tasks
+servant tasks --ws add-rate-limiter  # just one workspace
+servant tasks --state all            # include closed
+servant tasks --frontier --ws foo    # ready (blockers closed) vs blocked — what /servant:handoff dispatches
+```
+
+### Knowledge base — `recall` & `memories`
+
+servant captures durable knowledge from your sessions into `~/.ai_servant/majordomo/knowledge/` (wired via a Claude Code `SessionEnd` hook; committed and pushed to the hub). Query it anytime:
 
 ```bash
 servant recall "auth flow" -n 5    # search by tag + content, print top notes inline
@@ -250,13 +300,15 @@ Every workspace ships with a set of `/servant:*` slash commands for Claude Code 
 
 | Command | What it does |
 |---------|--------------|
-| `/servant:goal` | Interview you to define (or amend) `GOAL.md` - a short statement of what the workspace is for. |
-| `/servant:delegate` | Distill the current session into an Agent Brief and spawn a fresh servant in the same workspace to execute it. |
+| `/servant:goal` | Interview you to define (or amend) `GOAL.md` — a short statement of what the workspace is for. |
+| `/servant:handoff` | Take the work forward: write a handoff doc, route to the next flow step, and spawn the continuation session(s) — one per ready ticket. |
 | `/servant:recall` | Search the durable knowledge base for what prior servants learned about a project or topic. |
 | `/servant:extract-memories` | Distill durable knowledge from the current session into the knowledge base (projects + topics). |
 | `/servant:fine-tune` | Insights analyst: read servant's own metrics, investigate them, then tune an instruction aspect via the overlay path. |
 
 These stay in sync automatically - they're re-synced on every `spawn`/`resume`, so updating servant updates the commands in every workspace.
+
+Alongside these, every workspace has the **[mattpocock/skills](https://github.com/mattpocock/skills)** engineering skills installed (the `mattpocock-skills` plugin) — `/grill-me`, `/to-spec`, `/to-tickets`, `/implement`, `/tdd`, `/code-review`, and more. servant pre-configures them (via `docs/agents/`) to file issues into the hub. See [The workflow & the hub](#the-workflow--the-hub).
 
 ---
 
@@ -267,11 +319,12 @@ These stay in sync automatically - they're re-synced on every `spawn`/`resume`, 
 ```jsonc
 {
   "version": 1,
-  "repoSearchRoots": ["~"]   // where `repo add` looks for local git clones
+  "repoSearchRoots": ["~"],            // where `repo add` looks for local git clones
+  "hubRepo": "Barak-Zen/majordomo"     // the shared hub repo (issue tracker + knowledge)
 }
 ```
 
-Narrow `repoSearchRoots` to the directories where you actually keep clones to make discovery faster and the picker shorter. Edit the file directly - these values are never prompted for or clobbered on re-run.
+Narrow `repoSearchRoots` to the directories where you actually keep clones to make discovery faster and the picker shorter. Point `hubRepo` at your own `owner/name` to use a different hub. Edit the file directly — these values are never prompted for or clobbered on re-run.
 
 ### Environment variables
 
