@@ -1,0 +1,174 @@
+// Startup context for a Talk session: everything the agent is told about the workspace before the
+// first word is spoken. Read fresh on every launch, so a Talk session never reports a stale goal,
+// ticket list or repo tree.
+
+import { existsSync } from "node:fs";
+import { readdir } from "node:fs/promises";
+import { join } from "node:path";
+import { loadConfig } from "./config.ts";
+import { workspacePath } from "./paths.ts";
+import { walkScopeFiles } from "./talk-files.ts";
+import { type GhRunner, fetchHubTasks } from "./tasks.ts";
+import { parseWorktreeDirName, reposRoot } from "./worktree-naming.ts";
+
+// The startup tree is orientation, not an inventory — deep enough to show the shape of the
+// workspace, capped so a large repo can't blow out the session's instructions.
+const TREE_MAX_DEPTH = 4;
+const TREE_MAX_ENTRIES = 300;
+
+export interface SnapshotTicket {
+  number: number;
+  title: string;
+  url: string;
+}
+
+/** The workspace state a Talk session opens with. */
+export interface WorkspaceSnapshot {
+  workspace: string;
+  /** Human phrase for what the session can see — the whole workspace, or one mounted repo. */
+  scopeLabel: string;
+  /** GOAL.md, verbatim. */
+  goal: string;
+  /** CONTEXT.md, verbatim — the workspace's shared language. */
+  glossary: string;
+  /** This workspace's open hub tickets. */
+  tickets: SnapshotTicket[];
+  /** Paths under the session's scope, relative to its root. */
+  tree: string[];
+  /** True when the hub was unreachable and `tickets` came from the offline snapshot. */
+  ticketsFromCache: boolean;
+}
+
+const PERSONA = `You are the servant — the spoken voice of a servant workspace. You are talking with
+the user out loud, over an open microphone, so keep replies short and conversational: a couple of
+sentences unless asked for more. Never read out long file contents or lists verbatim; summarize, and
+offer detail if they want it.
+
+You have three tools, all quick local reads: read_file, glob and grep. Use them freely and silently
+— no need to announce or ask permission before reading or searching. Prefer reading over guessing.
+
+You cannot edit files, write files, or run commands, and you never pretend otherwise. Heavy or
+state-changing work — research, editing, multi-step tasks, running anything — is delegated to a
+Claude session with its full harness. Until that delegation exists, say plainly that the work needs
+a Claude session and offer to help the user think it through in the meantime.`;
+
+function section(title: string, body: string): string {
+  return `## ${title}\n\n${body}`;
+}
+
+function renderTickets(snapshot: WorkspaceSnapshot): string {
+  // The agent must never present a cached list as current — say so and let it caveat out loud.
+  const caveat = snapshot.ticketsFromCache
+    ? "The hub could not be reached, so this list is a cached snapshot and may be out of date. Say so if the user asks about tickets.\n\n"
+    : "";
+  if (snapshot.tickets.length === 0) return `${caveat}No open tickets for this workspace.`;
+  return caveat + snapshot.tickets.map((t) => `- #${t.number} ${t.title} (${t.url})`).join("\n");
+}
+
+function renderTree(tree: readonly string[]): string {
+  if (tree.length === 0) return "(no files)";
+  return tree.join("\n");
+}
+
+/**
+ * Compose the Realtime session's opening instructions. A Briefing, when supplied, is prepended —
+ * it is *added* context, so the freshly-read workspace state follows it in full either way.
+ */
+export function composeTalkInstructions(snapshot: WorkspaceSnapshot, briefing?: string): string {
+  const parts = [
+    PERSONA,
+    `You are scoped to ${snapshot.scopeLabel} of the servant workspace "${snapshot.workspace}".`,
+  ];
+  const trimmedBriefing = briefing?.trim();
+  if (trimmedBriefing) {
+    parts.push(
+      section(
+        "Briefing from the previous session",
+        `Start the conversation from here.\n\n${trimmedBriefing}`,
+      ),
+    );
+  }
+  parts.push(
+    section("Workspace goal (GOAL.md)", snapshot.goal.trim() || "Not defined yet."),
+    section("Shared language (CONTEXT.md)", snapshot.glossary.trim() || "Not defined yet."),
+    section("Open tickets", renderTickets(snapshot)),
+    section("Files in scope", renderTree(snapshot.tree)),
+  );
+  return `${parts.join("\n\n")}\n`;
+}
+
+/** What a Talk session can see: the whole workspace by default, or one mounted repo. */
+export interface TalkScope {
+  workspace: string;
+  /** Root the agent's reads, globs and greps are confined to. */
+  root: string;
+  /** Human phrase naming the scope, used in the agent's instructions. */
+  label: string;
+}
+
+/**
+ * Resolve `--repo <name>` against the workspace's mounted worktrees. Naming a repo that isn't
+ * mounted is an error that lists what is, since the mount names are worktree dirs, not repo names.
+ */
+export async function resolveTalkScope(
+  workspace: string,
+  repo: string | undefined,
+): Promise<TalkScope> {
+  const workspaceRoot = workspacePath(workspace);
+  if (!repo) {
+    return { workspace, root: workspaceRoot, label: "the whole workspace" };
+  }
+  const root = reposRoot(workspace);
+  const mounted = existsSync(root) ? await readdir(root) : [];
+  const match = mounted.find((dir) => parseWorktreeDirName(dir)?.repoSubdir === repo);
+  if (!match) {
+    const available = [
+      ...new Set(
+        mounted
+          .map((dir) => parseWorktreeDirName(dir)?.repoSubdir)
+          .filter((name): name is string => Boolean(name)),
+      ),
+    ].toSorted();
+    throw new Error(
+      `Workspace "${workspace}" has no mounted repo "${repo}".\n  Mounted: ${
+        available.length ? available.join(", ") : "(none — add one with `servant repo add`)"
+      }`,
+    );
+  }
+  return { workspace, root: join(root, match), label: `the "${repo}" repo` };
+}
+
+async function readFileOr(path: string, fallback: string): Promise<string> {
+  const file = Bun.file(path);
+  return (await file.exists()) ? file.text() : fallback;
+}
+
+/**
+ * Read the workspace's current state from disk and the hub. Called on every launch — nothing here
+ * is cached, so a Talk session cannot open on a stale goal, ticket list or tree. The goal and
+ * glossary always come from the workspace itself, even when the session is scoped to one repo.
+ */
+export async function readWorkspaceSnapshot(
+  scope: TalkScope,
+  opts: { ghRunner?: GhRunner | undefined } = {},
+): Promise<WorkspaceSnapshot> {
+  const workspaceRoot = workspacePath(scope.workspace);
+  const { hubRepo } = await loadConfig();
+  const [goal, glossary, tree, hub] = await Promise.all([
+    readFileOr(join(workspaceRoot, "GOAL.md"), ""),
+    readFileOr(join(workspaceRoot, "CONTEXT.md"), ""),
+    walkScopeFiles(scope.root, { maxDepth: TREE_MAX_DEPTH, maxEntries: TREE_MAX_ENTRIES }),
+    fetchHubTasks(hubRepo, "open", { ghRunner: opts.ghRunner }),
+  ]);
+  return {
+    workspace: scope.workspace,
+    scopeLabel: scope.label,
+    goal,
+    glossary,
+    tree,
+    ticketsFromCache: hub.fromCache,
+    tickets: hub.issues
+      .filter((issue) => issue.workspace === scope.workspace)
+      .map(({ number, title, url }) => ({ number, title, url })),
+  };
+}
