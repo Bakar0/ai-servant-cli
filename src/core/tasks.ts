@@ -58,6 +58,8 @@ export function parseBlockedBy(body: string): number[] {
   return [...out];
 }
 
+const asString = (v: unknown): string => (typeof v === "string" ? v : "");
+
 /** Parse `gh issue list --json ...` output into HubIssues. Tolerates missing/extra fields. */
 export function parseGhIssues(json: string): HubIssue[] {
   let raw: unknown;
@@ -73,17 +75,17 @@ export function parseGhIssues(json: string): HubIssue[] {
     const o = item as Record<string, unknown>;
     const labels = Array.isArray(o.labels)
       ? o.labels
-          .map((l) => (l && typeof l === "object" ? String((l as { name?: unknown }).name ?? "") : ""))
+          .map((l) => (l && typeof l === "object" ? asString((l as { name?: unknown }).name) : ""))
           .filter(Boolean)
       : [];
     issues.push({
       number: typeof o.number === "number" ? o.number : 0,
-      title: String(o.title ?? ""),
-      state: String(o.state ?? "").toLowerCase(),
-      url: String(o.url ?? ""),
+      title: asString(o.title),
+      state: asString(o.state).toLowerCase(),
+      url: asString(o.url),
       labels,
       workspace: workspaceOf(labels),
-      blockedBy: parseBlockedBy(String(o.body ?? "")),
+      blockedBy: parseBlockedBy(asString(o.body)),
     });
   }
   return issues;
