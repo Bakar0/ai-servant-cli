@@ -1,7 +1,8 @@
 import { existsSync, realpathSync } from "node:fs";
 import { stat } from "node:fs/promises";
 import { defineCommand } from "citty";
-import { countTranscriptEntries } from "../core/claude-session.ts";
+import { DEFAULT_AGENT } from "../agents/index.ts";
+import { getSessionSource } from "../core/session-source.ts";
 import {
   type JudgeJob,
   acquireJudgeLock,
@@ -28,7 +29,12 @@ import {
 } from "../core/insights/store.ts";
 import { applyRootOverride, workspacesRoot } from "../core/paths.ts";
 import { servantReinvokeArgv } from "../core/self-exec.ts";
-import { detectWorkspaceNameFromCwd } from "../core/workspace.ts";
+import { detectWorkspaceNameFromCwd, readWorkspaceAgent } from "../core/workspace.ts";
+
+/** The backend that drives a workspace (its `.servant/agent` marker), defaulting to Claude. */
+async function backendForWorkspace(workspace: string | null): Promise<string> {
+  return (workspace ? await readWorkspaceAgent(workspace) : null) ?? DEFAULT_AGENT;
+}
 
 // The judgment pass (Tier 2 of the insights model) mirrors memory extraction: the SessionEnd hook
 // enqueues a job (instant), a lockfile-serialized drainer runs a headless `claude -p` that reads
@@ -84,12 +90,14 @@ export async function runJudgeFromHook(
   const sessionId = payload.session_id ?? "";
   if (!cwd || !isUnder(cwd, workspacesRoot())) return; // non-servant session
   if (!transcriptPath || !existsSync(transcriptPath)) return;
-  if ((await countTranscriptEntries(transcriptPath)) < MIN_ENTRIES) return;
+  const workspace = detectWorkspaceNameFromCwd(cwd, workspacesRoot());
+  const source = getSessionSource(await backendForWorkspace(workspace));
+  if ((await source.countRecords(transcriptPath)) < MIN_ENTRIES) return;
 
   await enqueueJudgeJob({
     session_id: sessionId,
     transcript_path: transcriptPath,
-    workspace: detectWorkspaceNameFromCwd(cwd, workspacesRoot()),
+    workspace,
     cwd,
     ts: Date.now(),
   });

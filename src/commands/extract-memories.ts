@@ -1,6 +1,7 @@
 import { existsSync, realpathSync } from "node:fs";
 import { defineCommand } from "citty";
-import { countTranscriptEntries } from "../core/claude-session.ts";
+import { DEFAULT_AGENT, getBackend } from "../agents/index.ts";
+import { getSessionSource } from "../core/session-source.ts";
 import { buildExtractionPrompt } from "../core/extract-prompt.ts";
 import {
   type ExtractJob,
@@ -18,7 +19,7 @@ import { headlessModelArgs } from "../core/headless-model.ts";
 import { commitKnowledge, reconcileAllIndexes } from "../core/knowledge.ts";
 import { applyRootOverride, knowledgeRoot, workspacesRoot } from "../core/paths.ts";
 import { servantReinvokeArgv } from "../core/self-exec.ts";
-import { detectWorkspaceNameFromCwd } from "../core/workspace.ts";
+import { detectWorkspaceNameFromCwd, readWorkspaceAgent } from "../core/workspace.ts";
 
 // Minimum transcript entries before a session is worth extracting from. A handful of
 // turns rarely contains a durable fact and isn't worth a headless run.
@@ -49,6 +50,16 @@ interface HookPayload {
 }
 
 /**
+ * The backend that drives a given workspace (from its `.servant/agent` marker), defaulting to
+ * Claude. Codex and Claude use the same SessionEnd hook payload shape, so a Codex session's job
+ * flows through the same queue; the backend only decides how the transcript is read/counted and
+ * which CLI the headless drain spawns.
+ */
+async function backendForWorkspace(workspace: string | null): Promise<string> {
+  return (workspace ? await readWorkspaceAgent(workspace) : null) ?? DEFAULT_AGENT;
+}
+
+/**
  * `--from-hook`: instant, dumb enqueue. Reads the SessionEnd JSON payload on stdin,
  * applies the loop/cwd/size guards, appends a job, and kicks the drainer. NEVER spawns
  * claude and NEVER blocks session close — always resolves quickly.
@@ -74,12 +85,14 @@ export async function runFromHook(stdin: string, opts: { kick?: boolean } = {}):
   const sessionId = payload.session_id ?? "";
   if (!cwd || !isUnder(cwd, workspacesRoot())) return; // non-servant session
   if (!transcriptPath || !existsSync(transcriptPath)) return;
-  if ((await countTranscriptEntries(transcriptPath)) < MIN_ENTRIES) return;
+  const workspace = detectWorkspaceNameFromCwd(cwd, workspacesRoot());
+  const source = getSessionSource(await backendForWorkspace(workspace));
+  if ((await source.countRecords(transcriptPath)) < MIN_ENTRIES) return;
 
   await enqueueJob({
     session_id: sessionId,
     transcript_path: transcriptPath,
-    workspace: detectWorkspaceNameFromCwd(cwd, workspacesRoot()),
+    workspace,
     cwd,
     ts: Date.now(),
   });
@@ -116,22 +129,16 @@ export type ExtractionRunner = (job: ExtractJob, prompt: string) => Promise<stri
  * Argv for the headless extraction `claude -p`. `headlessModelArgs()` injects `--model` (default
  * `sonnet`) — see ADR-005. Exported so tests can assert the headless model without spawning claude.
  */
-export function extractionArgv(prompt: string): string[] {
-  return [
-    "claude",
-    "-p",
-    prompt,
-    ...headlessModelArgs(),
-    "--output-format",
-    "text",
-    "--dangerously-skip-permissions",
-    "--add-dir",
-    knowledgeRoot(),
-  ];
+export function extractionArgv(prompt: string, backendName = "claude-code"): string[] {
+  return getBackend(backendName).headless.extractionArgv(prompt, {
+    modelArgs: headlessModelArgs(backendName),
+    addDir: knowledgeRoot(),
+  });
 }
 
 const defaultRunner: ExtractionRunner = async (job, prompt) => {
-  const proc = Bun.spawn(extractionArgv(prompt), {
+  const backendName = await backendForWorkspace(job.workspace);
+  const proc = Bun.spawn(extractionArgv(prompt, backendName), {
     cwd: job.cwd,
     stdin: "ignore",
     stdout: "pipe",
@@ -141,7 +148,7 @@ const defaultRunner: ExtractionRunner = async (job, prompt) => {
   const code = await proc.exited;
   if (code !== 0) {
     const err = await new Response(proc.stderr).text();
-    throw new Error(`claude -p exited ${code}: ${err.trim().slice(0, 200)}`);
+    throw new Error(`${backendName} extraction exited ${code}: ${err.trim().slice(0, 200)}`);
   }
   // The prompt asks the agent to end with a one-line summary ("added/updated N notes").
   const out = (await new Response(proc.stdout).text()).trim();
@@ -176,7 +183,8 @@ export async function runDrain(
     await clearQueue();
     for (const job of jobs) {
       try {
-        const total = await countTranscriptEntries(job.transcript_path);
+        const source = getSessionSource(await backendForWorkspace(job.workspace));
+        const total = await source.countRecords(job.transcript_path);
         const fromTurn = await getMarker(job.session_id);
         if (total - fromTurn < 1) continue; // nothing new since last extraction
         const prompt = buildExtractionPrompt({

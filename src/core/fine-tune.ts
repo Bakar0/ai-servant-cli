@@ -37,12 +37,6 @@ export const FINE_TUNE_ASPECTS: readonly FineTuneAspect[] = [
     feedsExtractionPrompt: true,
   },
   {
-    id: "delegate",
-    title: "Delegation",
-    blurb: "How work is handed off to a fresh servant as an Agent Brief.",
-    assets: [".claude/commands/servant/delegate.md"],
-  },
-  {
     id: "goal",
     title: "Goal interview",
     blurb: "How a workspace's GOAL.md is defined and amended.",

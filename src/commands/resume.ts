@@ -1,22 +1,47 @@
 import { defineCommand } from "citty";
-import {
-  type ClaudeSessionMeta,
-  assertValidSessionId,
-  findSessionJsonl,
-  readLaunchCwd,
-  readSessionMeta,
-} from "../core/claude-session.ts";
+import { getBackend } from "../agents/index.ts";
+import { ensureCodexAssets } from "../core/codex-setup.ts";
 import { ensureServantAssets } from "../core/claude-setup.ts";
 import { type CmuxLiveState, readCmuxLiveStates } from "../core/cmux-sessions.ts";
 import { applyRootOverride, workspacesRoot } from "../core/paths.ts";
-import { shellSingleQuote } from "../core/shell.ts";
+import { type SessionMeta, type SessionSource, getSessionSource } from "../core/session-source.ts";
 import {
   detectWorkspaceNameFromCwd,
   ensureWorkspaceDir,
+  readWorkspaceAgent,
   resolveWorkspaceName,
 } from "../core/workspace.ts";
 import { detectTerminal, getDriver } from "../terminals/index.ts";
 import { pickSession } from "../ui/resume-picker.ts";
+
+// Backends whose session stores are searched (in order) when resuming a bare id with no --agent.
+const KNOWN_BACKENDS = ["claude-code", "codex"] as const;
+
+/**
+ * Find which backend owns a session id. With an explicit backend, only that store is searched;
+ * otherwise every known store is tried (Claude first) so a bare `servant resume <id>` still works.
+ */
+async function locateSession(
+  id: string,
+  explicitBackend: string | undefined,
+): Promise<{ source: SessionSource; file: string } | null> {
+  const backends = explicitBackend ? [explicitBackend] : [...KNOWN_BACKENDS];
+  let anyValid = false;
+  for (const backend of backends) {
+    const source = getSessionSource(backend);
+    try {
+      source.validateSessionId(id);
+    } catch {
+      continue; // wrong id shape for this backend — try the next store
+    }
+    anyValid = true;
+    const file = await source.findSessionFile(id);
+    if (file) return { source, file };
+  }
+  // Malformed for every candidate backend → surface the validation error (clearer than "not found").
+  if (!anyValid) getSessionSource(backends[0]).validateSessionId(id);
+  return null;
+}
 
 export const resumeCommand = defineCommand({
   meta: {
@@ -28,7 +53,13 @@ export const resumeCommand = defineCommand({
     id: {
       type: "positional",
       required: false,
-      description: "Claude session id (UUID). If omitted, open the interactive picker.",
+      description: "Session id (UUID). If omitted, open the interactive picker.",
+    },
+    agent: {
+      type: "string",
+      required: false,
+      description:
+        "Backend to resume with: claude-code | codex. Defaults to the workspace's recorded agent, else auto-detected from the id's store.",
     },
     workspace: {
       type: "string",
@@ -67,68 +98,81 @@ export const resumeCommand = defineCommand({
   },
   async run({ args }) {
     applyRootOverride(args.root);
+    const explicitBackend = (args.agent as string | undefined)?.trim() || undefined;
     if (typeof args.preview === "string" && args.preview.length > 0) {
-      await renderPreviewToStdout(args.preview);
+      await renderPreviewToStdout(args.preview, getSessionSource(explicitBackend));
       return;
     }
 
-    let sessionId = (args.id as string | undefined) ?? null;
-    if (!sessionId) {
-      const explicitWs = args.workspace as string | undefined;
+    const explicitWs = args.workspace as string | undefined;
+    let source: SessionSource;
+    let file: string;
+    let sessionId: string;
+
+    const providedId = (args.id as string | undefined) ?? null;
+    if (!providedId) {
+      // Picker mode: scope to the workspace and pick from its recorded backend's store.
       const workspaceName =
         explicitWs ?? (await resolveWorkspaceName(undefined, { allowUnresolved: true }));
-      sessionId = await pickSession({ workspaceName: workspaceName ?? undefined });
-      if (!sessionId) return;
+      const backend =
+        explicitBackend ??
+        (workspaceName ? await readWorkspaceAgent(workspaceName) : null) ??
+        "claude-code";
+      source = getSessionSource(backend);
+      const picked = await pickSession({ workspaceName: workspaceName ?? undefined, source });
+      if (!picked) return;
+      sessionId = picked;
+      const found = await source.findSessionFile(sessionId);
+      if (!found) throw new Error(`Session ${sessionId} disappeared from ${source.storeLabel}.`);
+      file = found;
     } else {
-      assertValidSessionId(sessionId);
+      const located = await locateSession(providedId, explicitBackend);
+      if (!located) {
+        const where = explicitBackend
+          ? getSessionSource(explicitBackend).storeLabel
+          : "any known agent's session store";
+        throw new Error(
+          `No session file found for ${providedId} under ${where}. The session may have been deleted.`,
+        );
+      }
+      ({ source, file } = located);
+      sessionId = providedId;
     }
 
-    const jsonlPath = await findSessionJsonl(sessionId);
-    if (!jsonlPath) {
-      throw new Error(
-        `No session file found for ${sessionId} under ~/.claude/projects/. The session may have been deleted.`,
-      );
-    }
-    const launchCwd = await readLaunchCwd(jsonlPath);
+    const launchCwd = await source.readLaunchCwd(file);
     if (!launchCwd) {
       throw new Error(`Session ${sessionId} has no cwd recorded — can't resume safely.`);
     }
 
-    const explicitWs = args.workspace as string | undefined;
     const workspaceTitle = resolveWorkspaceTitle(explicitWs, launchCwd);
     const prompt = args.prompt as string | undefined;
+    const backend = getBackend(source.backend);
 
     if (workspaceTitle && isUnderWorkspacesRoot(launchCwd)) {
       await ensureWorkspaceDir(workspaceTitle);
     }
     await ensureServantAssets();
+    if (backend.name === "codex") await ensureCodexAssets();
 
     const newTab = args["new-tab"];
     if (newTab) {
       const terminalName = args.terminal as string | undefined;
       const driver = terminalName ? getDriver(terminalName) : await detectTerminal();
-      const command = buildResumeCommand(sessionId, prompt);
+      const command = backend.resumeCommand(sessionId, prompt);
       await driver.openTab({ cwd: launchCwd, command, title: workspaceTitle ?? undefined });
       console.log(
-        `servant: resumed session ${sessionId.slice(0, 8)} in ${driver.name} workspace "${workspaceTitle ?? launchCwd}" at ${launchCwd}`,
+        `servant: resumed ${backend.name} session ${sessionId.slice(0, 8)} in ${driver.name} workspace "${workspaceTitle ?? launchCwd}" at ${launchCwd}`,
       );
       return;
     }
 
-    const exitCode = await runClaudeInPlace(sessionId, launchCwd, prompt);
+    const exitCode = await runInPlace(backend.resumeArgv(sessionId, prompt), launchCwd);
     if (exitCode !== 0) process.exit(exitCode);
   },
 });
 
-async function runClaudeInPlace(
-  sessionId: string,
-  cwd: string,
-  prompt: string | undefined,
-): Promise<number> {
-  const args = ["--resume", sessionId];
-  const trimmed = prompt?.trim();
-  if (trimmed) args.push(trimmed);
-  const proc = Bun.spawn(["claude", ...args], {
+async function runInPlace(argv: string[], cwd: string): Promise<number> {
+  const proc = Bun.spawn(argv, {
     cwd,
     stdin: "inherit",
     stdout: "inherit",
@@ -138,10 +182,7 @@ async function runClaudeInPlace(
 }
 
 export function buildResumeCommand(id: string, prompt?: string): string {
-  const base = `claude --resume ${shellSingleQuote(id)}`;
-  const trimmed = prompt?.trim();
-  if (!trimmed) return base;
-  return `${base} ${shellSingleQuote(trimmed)}`;
+  return getBackend("claude-code").resumeCommand(id, prompt);
 }
 
 export function resolveWorkspaceTitle(
@@ -156,16 +197,18 @@ export function isUnderWorkspacesRoot(cwd: string): boolean {
   return detectWorkspaceNameFromCwd(cwd, workspacesRoot()) !== null;
 }
 
-async function renderPreviewToStdout(id: string): Promise<void> {
+async function renderPreviewToStdout(id: string, source: SessionSource): Promise<void> {
   try {
-    assertValidSessionId(id);
-    const jsonlPath = await findSessionJsonl(id);
-    if (!jsonlPath) {
+    source.validateSessionId(id);
+    const file = await source.findSessionFile(id);
+    if (!file) {
       process.stdout.write(`<no session file found for ${id}>\n`);
       return;
     }
-    const meta = await readSessionMeta(jsonlPath);
-    const live = (await readCmuxLiveStates()).get(id);
+    const meta = await source.readSessionMeta(file);
+    // Live state is a cmux/Claude signal; Codex has no equivalent yet, so it degrades to "stored".
+    const live =
+      source.backend === "claude-code" ? (await readCmuxLiveStates()).get(id) : undefined;
     process.stdout.write(formatPreview(meta, live));
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -173,7 +216,7 @@ async function renderPreviewToStdout(id: string): Promise<void> {
   }
 }
 
-export function formatPreview(meta: ClaudeSessionMeta, live: CmuxLiveState | undefined): string {
+export function formatPreview(meta: SessionMeta, live: CmuxLiveState | undefined): string {
   const lines: string[] = [];
   lines.push(`Session   ${meta.sessionId}`);
   lines.push(`Workspace ${meta.workspaceName ?? "(none)"}`);

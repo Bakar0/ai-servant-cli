@@ -1,10 +1,7 @@
 import { stat } from "node:fs/promises";
 import { defineCommand } from "citty";
-import {
-  assertValidSessionId,
-  findSessionJsonl,
-  listWorkspaceSessions,
-} from "../core/claude-session.ts";
+import { DEFAULT_AGENT } from "../agents/index.ts";
+import { type SessionMeta, type SessionSource, getSessionSource } from "../core/session-source.ts";
 import { renderDashboard } from "../core/insights/dashboard.ts";
 import {
   type Area,
@@ -26,8 +23,36 @@ import {
 } from "../core/insights/store.ts";
 import { openInDefaultApp } from "../core/open.ts";
 import { applyRootOverride } from "../core/paths.ts";
-import { resolveWorkspaceName } from "../core/workspace.ts";
+import { readWorkspaceAgent, resolveWorkspaceName } from "../core/workspace.ts";
 import { pickSession } from "../ui/resume-picker.ts";
+
+// Backends whose session stores an unscoped digest unions over; also the search order for a bare
+// `--session <id>` with no `--agent`.
+const KNOWN_BACKENDS = ["claude-code", "codex"] as const;
+
+/** The backend driving a workspace (its `.servant/agent` marker), defaulting to Claude. */
+async function backendForWorkspace(workspace: string | undefined): Promise<string> {
+  return (workspace ? await readWorkspaceAgent(workspace) : null) ?? DEFAULT_AGENT;
+}
+
+/** Locate a session id across the candidate backends' stores (explicit backend, else all). */
+async function locateSession(
+  id: string,
+  explicitBackend: string | undefined,
+): Promise<{ source: SessionSource; file: string } | null> {
+  const backends = explicitBackend ? [explicitBackend] : [...KNOWN_BACKENDS];
+  for (const backend of backends) {
+    const source = getSessionSource(backend);
+    try {
+      source.validateSessionId(id);
+    } catch {
+      continue;
+    }
+    const file = await source.findSessionFile(id);
+    if (file) return { source, file };
+  }
+  return null;
+}
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const DEFAULT_DAYS = 30;
@@ -96,6 +121,12 @@ export const insightsCommand = defineCommand({
       required: false,
       description: "(internal) Render the picker preview pane for a session id and exit.",
     },
+    agent: {
+      type: "string",
+      required: false,
+      description:
+        "Backend whose sessions to read: claude-code | codex. Scopes --pick/--preview; a bare --session id is auto-located across both stores.",
+    },
     area: {
       type: "string",
       required: false,
@@ -131,32 +162,45 @@ export const insightsCommand = defineCommand({
     applyRootOverride(args.root);
     const now = Date.now();
 
+    const explicitBackend = (args.agent as string | undefined)?.trim() || undefined;
+
     // Internal: render the fzf preview pane for one session (used by `--pick`) and exit.
     if (typeof args.preview === "string" && args.preview.length > 0) {
-      await renderSessionPreviewToStdout(args.preview);
+      await renderSessionPreviewToStdout(args.preview, getSessionSource(explicitBackend));
       return;
     }
 
     // Single-session drill-down: the context-growth curve and what drove it, no aggregation.
     // With --pick (and no explicit id), choose a session via the fzf picker first.
-    let sessionId = (args.session as string | undefined) ?? null;
-    if (!sessionId && args.pick) {
+    if (!args.session && args.pick) {
       const ws =
         (args.workspace as string | undefined) ??
         (await resolveWorkspaceName(undefined, { allowUnresolved: true })) ??
         undefined;
-      sessionId = await pickSession({
+      const source = getSessionSource(explicitBackend ?? (await backendForWorkspace(ws)));
+      const picked = await pickSession({
         workspaceName: ws,
         promptLabel: "insights> ",
         previewSubcommand: "insights",
+        source,
       });
-      if (!sessionId) return; // picker cancelled
+      if (!picked) return; // picker cancelled
+      const file = await source.findSessionFile(picked);
+      if (!file) throw new Error(`No transcript found for session "${picked}".`);
+      const { mtimeMs } = await stat(file);
+      const record = await getOrComputeMetrics(file, mtimeMs, { source, sessionId: picked });
+      console.log(args.json ? JSON.stringify(record, null, 2) : renderSessionTimeline(record));
+      return;
     }
+    const sessionId = (args.session as string | undefined) ?? null;
     if (sessionId) {
-      const jsonlPath = await findSessionJsonl(sessionId);
-      if (!jsonlPath) throw new Error(`No transcript found for session "${sessionId}".`);
-      const { mtimeMs } = await stat(jsonlPath);
-      const record = await getOrComputeMetrics(jsonlPath, mtimeMs);
+      const located = await locateSession(sessionId, explicitBackend);
+      if (!located) throw new Error(`No transcript found for session "${sessionId}".`);
+      const { mtimeMs } = await stat(located.file);
+      const record = await getOrComputeMetrics(located.file, mtimeMs, {
+        source: located.source,
+        sessionId,
+      });
       console.log(args.json ? JSON.stringify(record, null, 2) : renderSessionTimeline(record));
       return;
     }
@@ -169,16 +213,30 @@ export const insightsCommand = defineCommand({
     const { maxAgeMs, label: windowLabel } = resolveWindow(args, now);
     const workspaceLabel = args.workspace ? `workspace ${args.workspace}` : "all workspaces";
 
-    const sessions = await listWorkspaceSessions({
-      workspaceName: args.workspace,
-      maxAgeMs,
-    });
+    // Scope to the workspace's backend when given, else union every backend's store so a
+    // cross-workspace digest covers Claude and Codex sessions together.
+    const sourceBackends = explicitBackend
+      ? [explicitBackend]
+      : args.workspace
+        ? [await backendForWorkspace(args.workspace)]
+        : [...KNOWN_BACKENDS];
+    const sessions: { meta: SessionMeta; source: SessionSource }[] = [];
+    for (const backend of sourceBackends) {
+      const source = getSessionSource(backend);
+      const metas = await source.listWorkspaceSessions({ workspaceName: args.workspace, maxAgeMs });
+      for (const meta of metas) sessions.push({ meta, source });
+    }
 
     await ensureInsightsStore();
     const records: SessionMetrics[] = [];
-    for (const s of sessions) {
+    for (const { meta, source } of sessions) {
       try {
-        records.push(await getOrComputeMetrics(s.jsonlPath, s.mtimeMs));
+        records.push(
+          await getOrComputeMetrics(meta.jsonlPath, meta.mtimeMs, {
+            source,
+            sessionId: meta.sessionId,
+          }),
+        );
       } catch {
         // skip sessions we can't parse
       }
@@ -230,16 +288,16 @@ export const insightsCommand = defineCommand({
 });
 
 /** Render one session's timeline (curve, jumps, candidate worklist) for the fzf preview pane. */
-async function renderSessionPreviewToStdout(id: string): Promise<void> {
+async function renderSessionPreviewToStdout(id: string, source: SessionSource): Promise<void> {
   try {
-    assertValidSessionId(id);
-    const jsonlPath = await findSessionJsonl(id);
-    if (!jsonlPath) {
+    source.validateSessionId(id);
+    const file = await source.findSessionFile(id);
+    if (!file) {
       process.stdout.write(`<no session file found for ${id}>\n`);
       return;
     }
-    const { mtimeMs } = await stat(jsonlPath);
-    const record = await getOrComputeMetrics(jsonlPath, mtimeMs);
+    const { mtimeMs } = await stat(file);
+    const record = await getOrComputeMetrics(file, mtimeMs, { source, sessionId: id });
     process.stdout.write(`${renderSessionTimeline(record)}\n`);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);

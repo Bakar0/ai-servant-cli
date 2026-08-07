@@ -363,12 +363,22 @@ function targetOf(tool: string, input: Record<string, unknown>): string | null {
  * Parse one transcript into a deterministic metrics record. Single pass over records, then derived
  * fields (fingerprint, rule checks) computed at the end.
  */
+/**
+ * Yields transcript records with their physical line number. The default reads Claude JSONL; a
+ * backend's `SessionSource.readRecords` supplies the same shape from a non-Claude store (e.g. Codex
+ * rollouts mapped to Claude-shaped records), so this parser stays single-path.
+ */
+type ReadRecords = (file: string) => AsyncIterable<{ record: unknown; line: number }>;
+
 export async function extractSessionMetrics(
   jsonlPath: string,
-  opts: { maxCandidates?: number } = {},
+  opts: { maxCandidates?: number; sessionId?: string; readRecords?: ReadRecords } = {},
 ): Promise<SessionMetrics> {
   const maxCandidates = opts.maxCandidates ?? DEFAULT_MAX_CANDIDATES;
-  const sessionId = jsonlPath.replace(/^.*\//, "").replace(/\.jsonl$/, "");
+  const readRecords = opts.readRecords ?? readJsonlLinesWithLineNumbers;
+  // The file basename is the session id for Claude; other backends (Codex) pass it explicitly
+  // because their rollout filenames carry a timestamp prefix.
+  const sessionId = opts.sessionId ?? jsonlPath.replace(/^.*\//, "").replace(/\.jsonl$/, "");
 
   let launchCwd = "";
   let version: string | null = null;
@@ -423,7 +433,7 @@ export async function extractSessionMetrics(
   const allRecords: AnyRecord[] = [];
   let lastTurnWasAssistantAction = false;
 
-  for await (const { record, line: lineNo } of readJsonlLinesWithLineNumbers(jsonlPath)) {
+  for await (const { record, line: lineNo } of readRecords(jsonlPath)) {
     const rec = record as AnyRecord;
     allRecords.push(rec);
     const recUuid = typeof rec.uuid === "string" ? rec.uuid : null;

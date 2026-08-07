@@ -77,6 +77,29 @@ describe("headless `claude -p` arg arrays", () => {
   });
 });
 
+describe("per-backend headless model", () => {
+  test("Codex omits --model by default (inherits its ~/.codex/config.toml model)", () => {
+    Reflect.deleteProperty(process.env, ENV);
+    expect(headlessModelArgs("codex")).toEqual([]);
+    // Claude keeps its sonnet default.
+    expect(headlessModelArgs("claude-code")).toEqual(["--model", "sonnet"]);
+  });
+
+  test("Codex extraction argv is `codex exec … --ephemeral …` with the prompt last, no --model", () => {
+    Reflect.deleteProperty(process.env, ENV);
+    const argv = extractionArgv("the prompt", "codex");
+    expect(argv.slice(0, 2)).toEqual(["codex", "exec"]);
+    expect(argv).toContain("--ephemeral");
+    expect(argv).not.toContain("--model");
+    expect(argv[argv.length - 1]).toBe("the prompt");
+  });
+
+  test("env override still applies to Codex when set explicitly", () => {
+    process.env[ENV] = "gpt-5.1-codex";
+    expect(headlessModelArgs("codex")).toEqual(["--model", "gpt-5.1-codex"]);
+  });
+});
+
 describe("interactive launch is unaffected by the headless model knob", () => {
   test("launchCommand never emits --model, even with the env var set", () => {
     process.env[ENV] = "sonnet";

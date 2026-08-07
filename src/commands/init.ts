@@ -8,7 +8,8 @@ import {
   loadConfig,
   saveConfig,
 } from "../core/config.ts";
-import { aiServantRoot, applyRootOverride, configPath } from "../core/paths.ts";
+import { ensureHubClone, ensurePluginInstalled } from "../core/hub-setup.ts";
+import { aiServantRoot, applyRootOverride, configPath, isDefaultRoot } from "../core/paths.ts";
 import { confirm } from "../ui/prompts.ts";
 import { STATUSLINE_EXAMPLE, installStatusline } from "./statusline.ts";
 
@@ -66,8 +67,14 @@ export async function runInit(opts: InitOpts = {}): Promise<void> {
   // --- Deterministic assets (CLI-owned; self-heal on every spawn/resume too). ---
   await ensureServantAssets();
   out.write(
-    "servant: synced workspace assets (CLAUDE.md, /servant:goal, /servant:delegate, /servant:recall, /servant:extract-memories, /servant:fine-tune, knowledge SessionEnd hook)\n",
+    "servant: synced workspace assets (CLAUDE.md, /servant:goal, /servant:recall, /servant:extract-memories, /servant:fine-tune, knowledge SessionEnd hook)\n",
   );
+
+  // --- Hub + skills (network; only against the real root, best-effort). ---
+  if (isDefaultRoot()) {
+    await ensureHubClone(cfg.hubRepo, (s) => out.write(`${s}\n`));
+    await ensurePluginInstalled((s) => out.write(`${s}\n`));
+  }
 
   // --- Status line (offered, with a preview). ---
   if (interactive) {

@@ -25,16 +25,6 @@ const { ensureServantAssets } = await import("../src/core/claude-setup.ts");
 const { aiServantRoot, claudeDir, claudeCommandsDir } = await import("../src/core/paths.ts");
 
 describe("ensureServantAssets", () => {
-  test("creates .claude/commands/servant/delegate.md under the servant root", async () => {
-    await ensureServantAssets();
-    const target = join(claudeCommandsDir(), "servant", "delegate.md");
-    const s = await stat(target);
-    expect(s.isFile()).toBe(true);
-    const body = await readFile(target, "utf8");
-    expect(body).toContain("Agent Brief");
-    expect(body).toContain("argument-hint");
-  });
-
   test("creates .claude/commands/servant/goal.md under the servant root", async () => {
     await ensureServantAssets();
     const target = join(claudeCommandsDir(), "servant", "goal.md");
@@ -52,13 +42,13 @@ describe("ensureServantAssets", () => {
     expect(s.isFile()).toBe(true);
     const body = await readFile(target, "utf8");
     expect(body).toContain("Servant Workspace");
-    expect(body).toContain("briefs/");
-    expect(body).toContain("Agent Brief");
+    expect(body).toContain("mattpocock");
+    expect(body).toContain("servant tasks");
   });
 
   test("is idempotent and resyncs when content drifts", async () => {
     await ensureServantAssets();
-    const target = join(claudeCommandsDir(), "servant", "delegate.md");
+    const target = join(claudeCommandsDir(), "servant", "goal.md");
     const original = await readFile(target, "utf8");
 
     // user / drift modifies the file
@@ -70,20 +60,24 @@ describe("ensureServantAssets", () => {
   });
 
   test("removes pre-namespace flat command files on upgrade", async () => {
-    // Simulate an install made before commands were namespaced under servant/.
+    // Simulate an install made before commands were namespaced under servant/, plus the retired
+    // (namespaced) delegate command — both must be cleaned up on sync.
     const commands = claudeCommandsDir();
-    await mkdir(commands, { recursive: true });
+    await mkdir(join(commands, "servant"), { recursive: true });
     const legacyGoal = join(commands, "goal.md");
     const legacyDelegate = join(commands, "delegate.md");
+    const retiredDelegate = join(commands, "servant", "delegate.md");
     await writeFile(legacyGoal, "old /goal");
     await writeFile(legacyDelegate, "old /delegate");
+    await writeFile(retiredDelegate, "old /servant:delegate");
 
     await ensureServantAssets();
 
     expect(await Bun.file(legacyGoal).exists()).toBe(false);
     expect(await Bun.file(legacyDelegate).exists()).toBe(false);
     expect(await Bun.file(join(commands, "servant", "goal.md")).exists()).toBe(true);
-    expect(await Bun.file(join(commands, "servant", "delegate.md")).exists()).toBe(true);
+    // delegate is retired — its namespaced command must be removed, not resynced.
+    expect(await Bun.file(retiredDelegate).exists()).toBe(false);
   });
 
   test("ships the recall and extract-memories slash commands", async () => {
@@ -92,6 +86,14 @@ describe("ensureServantAssets", () => {
     const extract = join(claudeCommandsDir(), "servant", "extract-memories.md");
     expect(await readFile(recall, "utf8")).toContain("/servant:recall");
     expect(await readFile(extract, "utf8")).toContain("--reconcile");
+  });
+
+  test("ships the /servant:handoff continuation skill", async () => {
+    await ensureServantAssets();
+    const handoff = await readFile(join(claudeCommandsDir(), "servant", "handoff.md"), "utf8");
+    expect(handoff).toContain("/servant:handoff");
+    expect(handoff).toContain("servant tasks --frontier");
+    expect(handoff).toContain("disable-model-invocation: true");
   });
 
   test("places .claude/ as a sibling of workspaces/ under the servant root", async () => {

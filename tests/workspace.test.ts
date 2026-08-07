@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { existsSync } from "node:fs";
 import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -22,7 +23,10 @@ const {
   ensureWorkspaceDir,
   isGoalUnfilled,
   mountedRepoSubdirs,
+  readWorkspaceAgent,
+  syncWorkspaceAgentsMd,
   syncWorkspaceClaudeMd,
+  writeWorkspaceAgent,
 } = await import("../src/core/workspace.ts");
 const { workspacePath, workspacesRoot, knowledgeProjectIndexPath } = await import(
   "../src/core/paths.ts"
@@ -224,6 +228,41 @@ describe("ensureWorkspaceDir", () => {
     expect(await readFile(knowledgeProjectIndexPath("web"), "utf8")).toContain("# web");
   });
 
+  test("scaffolds AGENTS.md as the Codex twin: inlines root conventions + GOAL + knowledge, no @-imports", async () => {
+    const name = `agents-md-${process.pid}-${Date.now()}`;
+    // A root conventions doc (what CLAUDE.md would @-import) must be inlined into AGENTS.md.
+    await writeFile(join(tmpRoot, "CLAUDE.md"), "# Root conventions\nBe a good servant.\n");
+    await ensureWorkspaceDir(name);
+    const repos = workspacePath(name);
+    await mkdir(join(repos, "repos", "api-gw__main"), { recursive: true });
+    await syncWorkspaceAgentsMd(name);
+
+    const agents = await readFile(join(repos, "AGENTS.md"), "utf8");
+    expect(agents).toContain("Managed by servant"); // header
+    expect(agents).not.toMatch(/^@/m); // inlined, never @-imported
+    expect(agents).toContain("# Root conventions"); // root doc inlined
+    expect(agents).toContain("Be a good servant.");
+    expect(agents).toContain("# Workspace goal (GOAL.md)"); // GOAL inlined
+    expect(agents).toContain("## Mission");
+    expect(agents).toContain("## api-gw (project knowledge)"); // same knowledge section as CLAUDE.md
+
+    // Both docs coexist so the workspace works under either backend.
+    expect(await stat(join(repos, "CLAUDE.md"))).toBeTruthy();
+  });
+
+  test("records and reads back the workspace's agent backend (null before any is set)", async () => {
+    const name = `agent-marker-${process.pid}-${Date.now()}`;
+    await ensureWorkspaceDir(name);
+    expect(await readWorkspaceAgent(name)).toBeNull();
+    await writeWorkspaceAgent(name, "codex");
+    expect(await readWorkspaceAgent(name)).toBe("codex");
+    // idempotent + overwritable
+    await writeWorkspaceAgent(name, "codex");
+    expect(await readWorkspaceAgent(name)).toBe("codex");
+    await writeWorkspaceAgent(name, "claude-code");
+    expect(await readWorkspaceAgent(name)).toBe("claude-code");
+  });
+
   test("scaffolds an intent-only GOAL.md placeholder with the unfilled marker", async () => {
     const name = `goal-${process.pid}-${Date.now()}`;
     const dir = await ensureWorkspaceDir(name);
@@ -245,34 +284,39 @@ describe("ensureWorkspaceDir", () => {
     expect(body).toBe("# Goal\n\n## Mission\nShip the thing.\n");
   });
 
-  test("scaffolds CONTEXT.md, briefs/INDEX.md, plans/INDEX.md, and context/INDEX.md", async () => {
+  test("scaffolds CONTEXT.md, docs/agents/* skills config, and a docs/adr/ dir", async () => {
     const name = `scaffold-${process.pid}-${Date.now()}`;
     const dir = await ensureWorkspaceDir(name);
 
     const contextMd = await readFile(join(dir, "CONTEXT.md"), "utf8");
     expect(contextMd).toContain("# Context");
 
-    const briefsIndex = await readFile(join(dir, "briefs", "INDEX.md"), "utf8");
-    expect(briefsIndex).toContain("# Briefs");
+    // Tasks/plans are GitHub Issues in the hub now — no briefs/ or plans/ dirs.
+    expect(existsSync(join(dir, "briefs"))).toBe(false);
+    expect(existsSync(join(dir, "plans"))).toBe(false);
 
-    const plansIndex = await readFile(join(dir, "plans", "INDEX.md"), "utf8");
-    expect(plansIndex).toContain("# Plans");
+    // mattpocock skills config, hub-pinned to this workspace's label.
+    const tracker = await readFile(join(dir, "docs", "agents", "issue-tracker.md"), "utf8");
+    expect(tracker).toContain(`ws:${name}`);
+    expect(tracker).toContain("--repo");
+    const domain = await readFile(join(dir, "docs", "agents", "domain.md"), "utf8");
+    expect(domain).toContain("docs/adr/");
+    await readFile(join(dir, "docs", "agents", "triage-labels.md"), "utf8");
 
-    const contextIndex = await readFile(join(dir, "context", "INDEX.md"), "utf8");
-    expect(contextIndex).toContain("# Context");
+    expect(existsSync(join(dir, "docs", "adr"))).toBe(true);
   });
 
   test("does not overwrite scaffold files that the user has edited", async () => {
     const name = `scaffold-preserve-${process.pid}-${Date.now()}`;
     const dir = await ensureWorkspaceDir(name);
 
-    const briefsIndex = join(dir, "briefs", "INDEX.md");
-    await writeFile(briefsIndex, "# Briefs\n\n- existing entry\n");
+    const domain = join(dir, "docs", "agents", "domain.md");
+    await writeFile(domain, "# Domain\n\n- existing entry\n");
 
     await ensureWorkspaceDir(name);
 
-    const body = await readFile(briefsIndex, "utf8");
-    expect(body).toBe("# Briefs\n\n- existing entry\n");
+    const body = await readFile(domain, "utf8");
+    expect(body).toBe("# Domain\n\n- existing entry\n");
   });
 });
 

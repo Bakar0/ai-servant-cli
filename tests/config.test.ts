@@ -58,6 +58,7 @@ describe("load/save round trip", () => {
       repoSearchRoots: ["~/code", "/abs/repos"],
       scanMaxDepth: 6,
       showTips: false,
+      hubRepo: "acme/hub",
     };
     await saveConfig(cfg);
     const loaded = await loadConfig();
@@ -89,6 +90,7 @@ describe("load/save round trip", () => {
       repoSearchRoots: ["~/code", "/abs/repos"],
       scanMaxDepth: 4,
       showTips: true,
+      hubRepo: "acme/hub",
     });
     const loaded = await loadConfig();
     const resolved = resolvedSearchRoots(loaded);

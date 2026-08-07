@@ -26,12 +26,33 @@ export function aiServantRoot(): string {
   return rootOverride ?? join(homedir(), ".ai_servant");
 }
 
+/**
+ * True when servant is running against the real `~/.ai_servant` root (no `--root` override).
+ * Network-touching setup (plugin install, hub clone) gates on this so throwaway/test roots
+ * never reach out.
+ */
+export function isDefaultRoot(): boolean {
+  return rootOverride === null;
+}
+
 export function workspacesRoot(): string {
   return join(aiServantRoot(), "workspaces");
 }
 
 export function workspacePath(name: string): string {
   return join(workspacesRoot(), name);
+}
+
+/** The workspace's declarative architecture source — the single file feeding the dashboard's
+ * architecture diagram and component map (human-maintained). */
+export function workspaceArchitecturePath(name: string): string {
+  return join(workspacePath(name), "context", "architecture.yaml");
+}
+
+/** The workspace's declarative delivery-roadmap source — the agent-maintained phase timeline
+ * feeding the dashboard's "where we are" panel. */
+export function workspaceRoadmapPath(name: string): string {
+  return join(workspacePath(name), "context", "roadmap.yaml");
 }
 
 export function configPath(): string {
@@ -46,6 +67,11 @@ export function discoveryCachePath(): string {
   return join(cacheDir(), "repo-discovery.json");
 }
 
+/** Offline snapshot of the hub's issues, so `servant tasks` still renders without network. */
+export function tasksCachePath(): string {
+  return join(cacheDir(), "tasks.json");
+}
+
 /** User-owned fine-tune overlays (one file per tunable aspect), sibling to workspaces/. */
 export function fineTuneDir(): string {
   return join(aiServantRoot(), "fine-tune");
@@ -55,9 +81,26 @@ export function fineTuneAspectPath(id: string): string {
   return join(fineTuneDir(), `${id}.md`);
 }
 
-/** Durable, git-tracked knowledge store, sibling to workspaces/. */
+/**
+ * The servant hub: a clone of the majordomo repo (issue tracker on GitHub +
+ * `knowledge/` notes on disk). The git repo lives here, at the hub root — knowledge/
+ * is just a tracked subdirectory of it.
+ */
+export function hubRoot(): string {
+  return join(aiServantRoot(), "majordomo");
+}
+
+/** Default hub repo slug (owner/name); overridable via config `hubRepo`. */
+export const DEFAULT_HUB_REPO = "Barak-Zen/majordomo";
+
+/** HTTPS git URL for a `owner/name` hub slug. */
+export function hubRemoteUrl(slug: string = DEFAULT_HUB_REPO): string {
+  return `https://github.com/${slug}.git`;
+}
+
+/** Durable, git-tracked knowledge store — a subdirectory of the hub clone. */
 export function knowledgeRoot(): string {
-  return join(aiServantRoot(), "knowledge");
+  return join(hubRoot(), "knowledge");
 }
 
 export function knowledgeIndexPath(): string {
@@ -114,6 +157,20 @@ export function insightsIndexPath(): string {
  */
 export function insightsDashboardPath(): string {
   return join(insightsRoot(), "dashboard.html");
+}
+
+/**
+ * Regenerated per-workspace HTML dashboards live here — a git-ignored sibling area inside the
+ * insights store, consistent with where `insights --deep` writes its dashboard. Overwritten on
+ * every `servant dashboard` run, so it is an artifact, not a data record.
+ */
+export function workspaceDashboardsDir(): string {
+  return join(insightsRoot(), "dashboards");
+}
+
+/** The rendered dashboard for one workspace (`<name>.html`). */
+export function workspaceDashboardPath(name: string): string {
+  return join(workspaceDashboardsDir(), `${name}.html`);
 }
 
 /** Queue of pending session-end extraction jobs (one JSON object per line). */
@@ -178,4 +235,21 @@ export function userClaudeSettingsPath(): string {
 
 export function statuslineScriptPath(): string {
   return join(aiServantRoot(), "claude", "statusline.sh");
+}
+
+/** The user's real Codex home (`~/.codex`), overridable via `CODEX_HOME` for tests/CI. */
+export function userCodexDir(): string {
+  const override = process.env.CODEX_HOME;
+  if (override && override.length > 0) return override;
+  return join(homedir(), ".codex");
+}
+
+/** Where Codex discovers custom slash-command prompt files (top-level `*.md`). */
+export function codexPromptsDir(): string {
+  return join(userCodexDir(), "prompts");
+}
+
+/** Root of Codex's session (rollout) logs: `<codex>/sessions/YYYY/MM/DD/rollout-*.jsonl`. */
+export function codexSessionsDir(): string {
+  return join(userCodexDir(), "sessions");
 }

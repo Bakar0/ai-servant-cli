@@ -1,5 +1,6 @@
 #!/usr/bin/env bun
 import { defineCommand, runMain } from "citty";
+import { dashboardCommand } from "./commands/dashboard.ts";
 import { extractMemoriesCommand } from "./commands/extract-memories.ts";
 import { fineTuneCommand } from "./commands/fine-tune.ts";
 import { initCommand } from "./commands/init.ts";
@@ -11,6 +12,7 @@ import { repoCommand } from "./commands/repo/index.ts";
 import { resumeCommand } from "./commands/resume.ts";
 import { spawnCommand } from "./commands/spawn.ts";
 import { statuslineCommand } from "./commands/statusline.ts";
+import { tasksCommand } from "./commands/tasks.ts";
 import { getVersion } from "./version.ts";
 
 const main = defineCommand({
@@ -24,8 +26,10 @@ const main = defineCommand({
     spawn: spawnCommand,
     repo: repoCommand,
     resume: resumeCommand,
+    dashboard: dashboardCommand,
     recall: recallCommand,
     memories: memoriesCommand,
+    tasks: tasksCommand,
     insights: insightsCommand,
     "insights-judge": insightsJudgeCommand,
     "extract-memories": extractMemoriesCommand,

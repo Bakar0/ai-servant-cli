@@ -10,7 +10,7 @@ agent here auto-loads. Think of the mission as a **guiding beacon** the servants
 they work — not a robust, detailed spec. It is **lightweight**: a sentence or two of mission plus
 a couple of KPIs. It says *what this workspace is about* and *how we'll know it's working*. It is
 **not** operating instructions (those live in `CLAUDE.md`) or architecture/design (those are ADRs
-in `context/`). Don't duplicate either; link out instead.
+in `docs/adr/`). Don't duplicate either; link out instead.
 
 The goal is a **living direction** — it can be re-run with `/servant:goal` and updated as things evolve.
 
@@ -85,7 +85,7 @@ Assemble a short `GOAL.md` from this template (trim any section that doesn't ear
 
 **Show the user the full draft and ask them to confirm.** Revise and re-present until they
 approve. Do not restate code, file paths, operating instructions, or architecture detail —
-link to an ADR in `context/` if design context matters.
+link to an ADR in `docs/adr/` if design context matters.
 
 ### 6. Write, then report
 

@@ -61,6 +61,7 @@ describe("runInit", () => {
       repoSearchRoots: ["~/work"],
       scanMaxDepth: 7,
       showTips: true,
+      hubRepo: "acme/hub",
     });
     await runInit({ root: scratch, yes: true, interactive: false, output: sink() });
     const cfg = await loadConfig();
@@ -75,6 +76,7 @@ describe("runInit", () => {
       repoSearchRoots: ["~/work"],
       scanMaxDepth: 7,
       showTips: true,
+      hubRepo: "acme/hub",
     });
     await runInit({ root: scratch, yes: true, force: true, interactive: false, output: sink() });
     const cfg = await loadConfig();

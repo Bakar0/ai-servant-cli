@@ -128,12 +128,18 @@ if [ -f "$config_file" ]; then
 fi
 if [ "$show_tips" = "true" ]; then
   tips=(
-    "/servant:goal — define what this workspace is for"
-    "/servant:delegate — hand a task to a worker agent in a new tab"
-    "/servant:fine-tune — tailor servant's instructions to how you work"
-    "servant spawn -w fix-login-bug -r — workspace for a task, pick repos to mount"
-    "servant memories — browse your knowledge base in a picker"
+    "/grill-me — align on the task before building"
+    "/to-spec — turn this conversation into a spec in the hub"
+    "/to-tickets — break a spec into tracer-bullet tickets (issues)"
+    "/implement + /tdd — build a ticket with a tight test loop"
+    "/servant:handoff — hand the work forward; it spawns the next session(s) for you"
+    "/teach — have the agent explain a concept or a slice of the code"
+    "/wait-what — stop and get unstuck when something doesn't add up"
+    "servant tasks — open tasks across all your workspaces"
+    "servant recall <query> — search accumulated knowledge"
+    "servant spawn -w fix-login-bug -r — new workspace for a task, pick repos"
     "servant resume — re-attach to an earlier session"
+    "/servant:goal — define what this workspace is for"
     "hide these tips: set \"showTips\": false in ~/.ai_servant/config.json"
   )
   count=${#tips[@]}
