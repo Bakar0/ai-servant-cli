@@ -4,11 +4,7 @@ import { ensureCodexAssets } from "../core/codex-setup.ts";
 import { ensureServantAssets } from "../core/claude-setup.ts";
 import { type CmuxLiveState, readCmuxLiveStates } from "../core/cmux-sessions.ts";
 import { applyRootOverride, workspacesRoot } from "../core/paths.ts";
-import {
-  type SessionMeta,
-  type SessionSource,
-  getSessionSource,
-} from "../core/session-source.ts";
+import { type SessionMeta, type SessionSource, getSessionSource } from "../core/session-source.ts";
 import {
   detectWorkspaceNameFromCwd,
   ensureWorkspaceDir,
@@ -211,7 +207,8 @@ async function renderPreviewToStdout(id: string, source: SessionSource): Promise
     }
     const meta = await source.readSessionMeta(file);
     // Live state is a cmux/Claude signal; Codex has no equivalent yet, so it degrades to "stored".
-    const live = source.backend === "claude-code" ? (await readCmuxLiveStates()).get(id) : undefined;
+    const live =
+      source.backend === "claude-code" ? (await readCmuxLiveStates()).get(id) : undefined;
     process.stdout.write(formatPreview(meta, live));
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);

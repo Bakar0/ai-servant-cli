@@ -199,7 +199,11 @@ export type JudgeRunner = (input: {
  * Argv for the headless judge `claude -p`. `headlessModelArgs()` injects `--model` (default
  * `sonnet`) — see ADR-005. Exported so tests can assert the headless model without spawning claude.
  */
-export function judgeArgv(prompt: string, sessionId: string, backendName = "claude-code"): string[] {
+export function judgeArgv(
+  prompt: string,
+  sessionId: string,
+  backendName = "claude-code",
+): string[] {
   return getBackend(backendName).headless.judgeArgv(prompt, {
     modelArgs: headlessModelArgs(backendName),
     addDir: cacheDir(),

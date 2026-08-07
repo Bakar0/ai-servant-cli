@@ -37,7 +37,12 @@ beforeAll(async () => {
       payload: {
         type: "message",
         role: "user",
-        content: [{ type: "input_text", text: "<environment_context>\n<cwd>x</cwd>\n</environment_context>" }],
+        content: [
+          {
+            type: "input_text",
+            text: "<environment_context>\n<cwd>x</cwd>\n</environment_context>",
+          },
+        ],
       },
     }) +
     line({
@@ -53,8 +58,18 @@ beforeAll(async () => {
       payload: {
         type: "token_count",
         info: {
-          total_token_usage: { input_tokens: 1200, cached_input_tokens: 400, output_tokens: 80, total_tokens: 1280 },
-          last_token_usage: { input_tokens: 1200, cached_input_tokens: 400, output_tokens: 80, total_tokens: 1280 },
+          total_token_usage: {
+            input_tokens: 1200,
+            cached_input_tokens: 400,
+            output_tokens: 80,
+            total_tokens: 1280,
+          },
+          last_token_usage: {
+            input_tokens: 1200,
+            cached_input_tokens: 400,
+            output_tokens: 80,
+            total_tokens: 1280,
+          },
           model_context_window: 258400,
         },
       },
@@ -81,7 +96,10 @@ beforeAll(async () => {
       payload: {
         type: "function_call_output",
         call_id: "call_ABC123",
-        output: JSON.stringify({ output: "file_a.txt\nfile_b.txt\n", metadata: { exit_code: 0, duration_seconds: 0.1 } }),
+        output: JSON.stringify({
+          output: "file_a.txt\nfile_b.txt\n",
+          metadata: { exit_code: 0, duration_seconds: 0.1 },
+        }),
       },
     }) +
     line({
@@ -104,7 +122,9 @@ test("findSessionFile resolves the rollout by its trailing uuid", async () => {
   expect(codexSessionSource.validateSessionId.bind(null, SESSION_ID)).not.toThrow();
   const found = await codexSessionSource.findSessionFile(SESSION_ID);
   expect(found).toBe(rolloutPath);
-  expect(await codexSessionSource.findSessionFile("019b5602-0000-7000-8000-000000000000")).toBeNull();
+  expect(
+    await codexSessionSource.findSessionFile("019b5602-0000-7000-8000-000000000000"),
+  ).toBeNull();
 });
 
 test("validateSessionId rejects non-uuids", () => {

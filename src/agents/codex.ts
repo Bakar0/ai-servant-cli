@@ -11,10 +11,7 @@ import type {
 // session store entirely (Codex has no `--session-id` pre-assignment), which is how servant excludes
 // itself from insights on the Codex side. `--dangerously-bypass-approvals-and-sandbox` matches the
 // Claude path's `--dangerously-skip-permissions`: unattended, only touches servant's own store.
-const HEADLESS_EXEC_FLAGS = [
-  "--ephemeral",
-  "--dangerously-bypass-approvals-and-sandbox",
-] as const;
+const HEADLESS_EXEC_FLAGS = ["--ephemeral", "--dangerously-bypass-approvals-and-sandbox"] as const;
 
 export const codexAgent: AgentBackend = {
   name: "codex",

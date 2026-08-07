@@ -109,8 +109,7 @@ export const spawnCommand = defineCommand({
     // Resolve the backend: an explicit --agent wins; otherwise reuse whatever this workspace was
     // last spawned with (so a Codex workspace stays Codex, including via `/servant:delegate`), then
     // fall back to the default. Record the choice so future spawns and delegations inherit it.
-    const agentName =
-      args.agent?.trim() || (await readWorkspaceAgent(workspace)) || DEFAULT_AGENT;
+    const agentName = args.agent?.trim() || (await readWorkspaceAgent(workspace)) || DEFAULT_AGENT;
     const agent = getAgent(agentName);
     await writeWorkspaceAgent(workspace, agent.name);
     // Codex discovers its slash-command prompts from ~/.codex/prompts; install servant's there.

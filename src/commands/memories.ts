@@ -65,8 +65,9 @@ async function buildBrowseRows(
 async function recentCaptures(limit: number): Promise<string[]> {
   const root = hubRoot();
   if (!existsSync(`${root}/.git`)) return [];
-  const proc =
-    await $`git -C ${root} log --pretty=format:%cr%x09%s -n ${limit} -- knowledge`.nothrow().quiet();
+  const proc = await $`git -C ${root} log --pretty=format:%cr%x09%s -n ${limit} -- knowledge`
+    .nothrow()
+    .quiet();
   if (proc.exitCode !== 0) return [];
   return proc.stdout
     .toString()

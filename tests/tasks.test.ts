@@ -22,8 +22,20 @@ afterAll(async () => {
 });
 
 const SAMPLE = JSON.stringify([
-  { number: 1, title: "fix login", state: "OPEN", url: "https://x/1", labels: [{ name: "ws:auth" }, { name: "ticket" }] },
-  { number: 2, title: "spec payments", state: "OPEN", url: "https://x/2", labels: [{ name: "ws:pay" }, { name: "spec" }] },
+  {
+    number: 1,
+    title: "fix login",
+    state: "OPEN",
+    url: "https://x/1",
+    labels: [{ name: "ws:auth" }, { name: "ticket" }],
+  },
+  {
+    number: 2,
+    title: "spec payments",
+    state: "OPEN",
+    url: "https://x/2",
+    labels: [{ name: "ws:pay" }, { name: "spec" }],
+  },
   { number: 3, title: "orphan", state: "OPEN", url: "https://x/3", labels: [] },
 ]);
 
@@ -61,9 +73,30 @@ describe("parseBlockedBy", () => {
 describe("computeFrontier", () => {
   const FRONTIER = JSON.stringify([
     { number: 13, title: "core", state: "OPEN", url: "u/13", labels: [{ name: "ws:x" }], body: "" },
-    { number: 14, title: "mw", state: "OPEN", url: "u/14", labels: [{ name: "ws:x" }], body: "independent" },
-    { number: 15, title: "tenant", state: "OPEN", url: "u/15", labels: [{ name: "ws:x" }], body: "Blocked by: #13" },
-    { number: 16, title: "later", state: "OPEN", url: "u/16", labels: [{ name: "ws:x" }], body: "Blocked by: #99" },
+    {
+      number: 14,
+      title: "mw",
+      state: "OPEN",
+      url: "u/14",
+      labels: [{ name: "ws:x" }],
+      body: "independent",
+    },
+    {
+      number: 15,
+      title: "tenant",
+      state: "OPEN",
+      url: "u/15",
+      labels: [{ name: "ws:x" }],
+      body: "Blocked by: #13",
+    },
+    {
+      number: 16,
+      title: "later",
+      state: "OPEN",
+      url: "u/16",
+      labels: [{ name: "ws:x" }],
+      body: "Blocked by: #99",
+    },
   ]);
 
   test("ready = no open blockers; blocked lists only still-open blockers", () => {

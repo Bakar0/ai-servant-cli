@@ -58,7 +58,9 @@ export const tasksCommand = defineCommand({
   },
   async run({ args }) {
     applyRootOverride(args.root);
-    const state: IssueState = isIssueState(String(args.state)) ? (args.state as IssueState) : "open";
+    const state: IssueState = isIssueState(String(args.state))
+      ? (args.state as IssueState)
+      : "open";
     const { hubRepo } = await loadConfig();
 
     const { issues, fromCache, cachedAt } = await fetchHubTasks(hubRepo, state);
@@ -118,7 +120,9 @@ export const tasksCommand = defineCommand({
     const staleness = fromCache
       ? `  (offline — cached snapshot${cachedAt ? ` from ${new Date(cachedAt).toISOString()}` : ""})`
       : "";
-    console.log(`servant: ${filtered.length} ${state} task(s) in ${hubRepo} · ${scope}${staleness}\n`);
+    console.log(
+      `servant: ${filtered.length} ${state} task(s) in ${hubRepo} · ${scope}${staleness}\n`,
+    );
 
     if (filtered.length === 0) {
       console.log(

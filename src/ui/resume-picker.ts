@@ -28,7 +28,9 @@ export async function pickSession(opts: PickSessionOpts = {}): Promise<string | 
     const scope = opts.workspaceName
       ? `workspace "${opts.workspaceName}"`
       : "any servant workspace";
-    throw new Error(`No ${source.backend} sessions found for ${scope} (looked in ${source.storeLabel}).`);
+    throw new Error(
+      `No ${source.backend} sessions found for ${scope} (looked in ${source.storeLabel}).`,
+    );
   }
 
   const lines = sessions.map((s) => `${s.sessionId}\t${formatListLine(s)}`);

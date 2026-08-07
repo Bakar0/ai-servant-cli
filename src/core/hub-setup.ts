@@ -31,13 +31,18 @@ export async function ensureHubClone(hubRepo: string, log: Log = () => {}): Prom
   const root = hubRoot();
   if (existsSync(`${root}/.git`)) return;
   if (!(await absentOrEmpty(root))) {
-    log(`servant: hub dir ${root} exists but isn't a clone — leaving it (knowledge stays local-only)`);
+    log(
+      `servant: hub dir ${root} exists but isn't a clone — leaving it (knowledge stays local-only)`,
+    );
     return;
   }
   const url = hubRemoteUrl(hubRepo);
   const res = await $`git clone ${url} ${root}`.nothrow().quiet();
   if (res.exitCode === 0) log(`servant: cloned hub ${hubRepo} → ${root}`);
-  else log(`servant: could not clone hub ${hubRepo} (offline or no access) — knowledge stays local-only`);
+  else
+    log(
+      `servant: could not clone hub ${hubRepo} (offline or no access) — knowledge stays local-only`,
+    );
 }
 
 /**
@@ -57,5 +62,10 @@ export async function ensurePluginInstalled(log: Log = () => {}): Promise<void> 
   await $`claude plugin marketplace add ${MARKETPLACE}`.nothrow().quiet();
   const inst = await $`claude plugin install ${PLUGIN}`.nothrow().quiet();
   if (inst.exitCode === 0) log(`servant: installed mattpocock-skills plugin (${PLUGIN})`);
-  else log("servant: could not install mattpocock-skills plugin — run `claude plugin install " + PLUGIN + "` manually");
+  else
+    log(
+      "servant: could not install mattpocock-skills plugin — run `claude plugin install " +
+        PLUGIN +
+        "` manually",
+    );
 }
