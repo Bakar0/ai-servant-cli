@@ -1,24 +1,8 @@
 import { defineCommand } from "citty";
-import { DEFAULT_AGENT, getAgent } from "../agents/index.ts";
-import { ensureServantAssets } from "../core/claude-setup.ts";
-import { ensureCodexAssets } from "../core/codex-setup.ts";
-import { requireInit } from "../core/config.ts";
+import { DEFAULT_AGENT } from "../agents/index.ts";
 import { applyRootOverride } from "../core/paths.ts";
-import {
-  ensureWorkspaceDir,
-  isGoalUnfilled,
-  readWorkspaceAgent,
-  resolveWorkspaceName,
-  writeWorkspaceAgent,
-} from "../core/workspace.ts";
-import { detectTerminal, getDriver } from "../terminals/index.ts";
+import { launchWorkspaceSession } from "../core/spawn.ts";
 import { addReposInteractive } from "./repo/add.ts";
-
-// First message for an agent spawned into a workspace whose goal isn't defined yet
-// (and no task was given): have it define GOAL.md before anything else. Phrased as
-// natural language (not a bare `/servant:goal`) so it reliably triggers the command.
-const GOAL_BOOTSTRAP_PROMPT =
-  "This servant workspace has no goal defined yet. Run the /servant:goal command to interview me and define the workspace's GOAL.md before doing anything else.";
 
 export const spawnCommand = defineCommand({
   meta: {
@@ -86,46 +70,26 @@ export const spawnCommand = defineCommand({
   },
   async run({ args }) {
     applyRootOverride(args.root);
-    await requireInit();
-    await ensureServantAssets();
-    const workspace = await resolveWorkspaceName(args.workspace);
-    const cwd = await ensureWorkspaceDir(workspace);
-    // Whether the workspace still needs its goal defined. Checked after scaffolding so a
-    // brand-new workspace reads its placeholder; true regardless of `-r` or prior spawns.
-    const goalUnfilled = await isGoalUnfilled(workspace);
-
-    // Add repos in the current TTY *before* opening the tab, so the worktrees exist
-    // under the workspace by the time the agent starts there. The picker is interactive,
-    // so it must run here rather than inside the freshly-spawned tab.
-    if (args.repo) {
-      await addReposInteractive({
-        workspace,
-        branch: args.branch,
-        base: args.base,
-        track: Boolean(args.track),
-      });
-    }
-
-    // Resolve the backend: an explicit --agent wins; otherwise reuse whatever this workspace was
-    // last spawned with (so a Codex workspace stays Codex, including via `/servant:delegate`), then
-    // fall back to the default. Record the choice so future spawns and delegations inherit it.
-    const agentName = args.agent?.trim() || (await readWorkspaceAgent(workspace)) || DEFAULT_AGENT;
-    const agent = getAgent(agentName);
-    await writeWorkspaceAgent(workspace, agent.name);
-    // Codex discovers its slash-command prompts from ~/.codex/prompts; install servant's there.
-    if (agent.name === "codex") await ensureCodexAssets();
-    // If the caller gave a real task, run it. A blank prompt counts as no task — e.g.
-    // `-repo` parses as the short-flag cluster `-r -e -p -o`, setting `-p` to "".
-    const task = args.prompt?.trim() ? args.prompt : undefined;
-    // Otherwise, if the workspace goal isn't defined yet, kick the agent off by defining it.
-    const prompt = task ?? (goalUnfilled ? GOAL_BOOTSTRAP_PROMPT : undefined);
-    const command = agent.launchCommand(cwd, { prompt });
-    const driver = args.terminal ? getDriver(args.terminal) : await detectTerminal();
-
-    await driver.openTab({ cwd, command, title: workspace });
+    const session = await launchWorkspaceSession({
+      workspace: args.workspace,
+      agent: args.agent,
+      prompt: args.prompt,
+      terminal: args.terminal,
+      // The picker is interactive, so it must run in this TTY, not the freshly-spawned tab.
+      beforeLaunch: args.repo
+        ? async ({ workspace }) => {
+            await addReposInteractive({
+              workspace,
+              branch: args.branch,
+              base: args.base,
+              track: Boolean(args.track),
+            });
+          }
+        : undefined,
+    });
 
     console.log(
-      `servant: opened ${driver.name} tab for workspace "${workspace}" at ${cwd} running "${command}"`,
+      `servant: opened ${session.terminal} tab for workspace "${session.workspace}" at ${session.cwd} running "${session.command}"`,
     );
   },
 });
