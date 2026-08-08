@@ -1,3 +1,6 @@
+import { open, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { requireAudioTool } from "./talk-preflight.ts";
 import type { AudioPort } from "./talk.ts";
 
@@ -32,9 +35,14 @@ export interface SoxAudioOptions {
 export function createSoxAudio(opts: SoxAudioOptions = {}): AudioPort {
   const sox = requireAudioTool((command) => Bun.which(command));
   let recorder: Bun.Subprocess<"ignore", "pipe", "pipe"> | null = null;
-  let speaker: Bun.Subprocess<"pipe", "ignore", "pipe"> | null = null;
+  let speaker: Bun.Subprocess<"ignore", "ignore", "pipe"> | null = null;
   let pump: Promise<void> | null = null;
   let stopping = false;
+
+  const fifoPath = join(tmpdir(), `servant-talk-${process.pid}.pcm`);
+  let fifo: Awaited<ReturnType<typeof open>> | null = null;
+  let speakerReady: Promise<void> | null = null;
+  let writes: Promise<unknown> = Promise.resolve();
 
   /**
    * Watch a `sox` we did not kill ourselves. Silence here is what makes this layer's failures
@@ -47,6 +55,29 @@ export function createSoxAudio(opts: SoxAudioOptions = {}): AudioPort {
       const detail = stderr.trim() || `exit code ${code}`;
       opts.onFailure?.(`the ${role} (sox) stopped: ${detail}`);
     })();
+  }
+
+  /**
+   * Play through a FIFO rather than sox's stdin. Feeding sox from a pipe looks like it should work
+   * and does — until the pipe drains, at which point sox decides the stream ended and exits 0. A
+   * reply always arrives faster than it plays and the gaps between replies are seconds long, so
+   * that killed the speaker the first time the agent spoke. A FIFO opened O_RDWR never reports EOF
+   * (we hold a reader ourselves) and never blocks on open, so silence is just an empty pipe.
+   */
+  async function startSpeaker(): Promise<void> {
+    await rm(fifoPath, { force: true });
+    const made = Bun.spawn(["mkfifo", fifoPath], { stderr: "pipe" });
+    if ((await made.exited) !== 0) {
+      throw new Error((await new Response(made.stderr).text()).trim() || "mkfifo failed");
+    }
+    fifo = await open(fifoPath, "r+");
+    speaker = Bun.spawn([sox, "-q", ...RAW_PCM_ARGS, fifoPath, "-d"], {
+      stdin: "ignore",
+      stdout: "ignore",
+      stderr: "pipe",
+    });
+    opts.onDebug?.("speaker: playback started");
+    watch("speaker", speaker as unknown as Bun.Subprocess<never, never, "pipe">);
   }
 
   /** Re-chunk sox's arbitrary-sized reads into the frame size the API wants. */
@@ -87,18 +118,16 @@ export function createSoxAudio(opts: SoxAudioOptions = {}): AudioPort {
     },
 
     play(pcm) {
-      if (!speaker) {
-        // `-` reads raw PCM from stdin, `-d` plays to the default output device.
-        speaker = Bun.spawn([sox, "-q", ...RAW_PCM_ARGS, "-", "-d"], {
-          stdin: "pipe",
-          stdout: "ignore",
-          stderr: "pipe",
+      speakerReady ??= startSpeaker();
+      const bytes = Buffer.from(pcm, "base64");
+      // Serialized and never awaited here: a reply longer than the pipe buffer applies real
+      // backpressure, and blocking on it would stall the socket that is still receiving it.
+      writes = writes
+        .then(() => speakerReady)
+        .then(() => fifo?.write(bytes))
+        .catch((err: unknown) => {
+          if (!stopping) opts.onFailure?.(`playback failed: ${String(err)}`);
         });
-        opts.onDebug?.("speaker: playback started");
-        watch("speaker", speaker as unknown as Bun.Subprocess<never, never, "pipe">);
-      }
-      void speaker.stdin.write(Buffer.from(pcm, "base64"));
-      void speaker.stdin.flush();
     },
 
     async stop() {
@@ -109,6 +138,11 @@ export function createSoxAudio(opts: SoxAudioOptions = {}): AudioPort {
       speaker = null;
       await pump;
       pump = null;
+      await writes.catch(() => {});
+      await fifo?.close().catch(() => {});
+      fifo = null;
+      speakerReady = null;
+      await rm(fifoPath, { force: true });
     },
   };
 }
