@@ -2,13 +2,13 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createWorkspaceReader } from "../src/core/talk-reader.ts";
+import { createWorkspaceReader } from "../src/core/summons-reader.ts";
 
 let scratch: string;
 let scope: string;
 
 beforeAll(async () => {
-  scratch = await realpath(await mkdtemp(join(tmpdir(), "servant-talk-reader-")));
+  scratch = await realpath(await mkdtemp(join(tmpdir(), "servant-summons-reader-")));
   scope = join(scratch, "scope");
   await mkdir(join(scope, "docs"), { recursive: true });
   await mkdir(join(scope, "node_modules", "junk"), { recursive: true });
@@ -22,7 +22,7 @@ afterAll(async () => {
   await rm(scratch, { recursive: true, force: true });
 });
 
-describe("the talk agent's local reads", () => {
+describe("the Summons agent's local reads", () => {
   test("reads a file inside the scope", async () => {
     expect(await createWorkspaceReader(scope).readFile("GOAL.md")).toContain(
       "Ship the talking servant.",

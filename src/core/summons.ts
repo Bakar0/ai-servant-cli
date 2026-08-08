@@ -1,24 +1,26 @@
-// A Talk session: a live spoken conversation with a servant workspace. The controller here is the
+// A Summons: a live spoken conversation with a servant workspace. The controller here is the
 // single seam the feature is tested at — the Realtime socket, the sox audio pipes and the
 // filesystem all sit outside it as injected ports (see workspace ADR 0009).
 
 /** Default Realtime model. Native speech-to-speech, so there is no STT/TTS pipeline in the path. */
-export const DEFAULT_TALK_MODEL = "gpt-realtime";
-export const DEFAULT_TALK_VOICE = "marin";
+export const DEFAULT_SUMMONS_MODEL = "gpt-realtime";
+export const DEFAULT_SUMMONS_VOICE = "marin";
 
-/** A function tool offered to the Talk agent (JSON Schema parameters, as the Realtime API wants). */
-export interface TalkTool {
+/**
+ * A function tool offered to the Summons agent (JSON Schema parameters, as the Realtime API wants).
+ */
+export interface SummonsTool {
   name: string;
   description: string;
   parameters: Record<string, unknown>;
 }
 
 /**
- * The Talk agent's entire tool surface. Every one of these is a silent, non-Guarded local read:
+ * The Summons agent's entire tool surface. Every one of these is a silent, non-Guarded local read:
  * there is deliberately no edit, write or run-command tool here, and there never will be — heavy
  * and state-changing work is delegated to a Claude session instead (workspace ADR 0009).
  */
-export const TALK_TOOLS: readonly TalkTool[] = [
+export const SUMMONS_TOOLS: readonly SummonsTool[] = [
   {
     name: "read_file",
     description:
@@ -64,7 +66,7 @@ export interface RealtimeSessionSpec {
   model: string;
   voice: string;
   instructions: string;
-  tools: readonly TalkTool[];
+  tools: readonly SummonsTool[];
 }
 
 /** The subset of Realtime server events the controller acts on. */
@@ -129,17 +131,17 @@ function playbackDurationMs(base64Pcm: string): number {
   return bytes / PCM16_BYTES_PER_MS;
 }
 
-/** Default silence window before a Talk session hangs itself up, so a forgotten mic stops billing. */
-export const DEFAULT_TALK_IDLE_TIMEOUT_MS = 3 * 60 * 1000;
+/** Default silence window before a Summons hangs itself up, so a forgotten mic stops billing. */
+export const DEFAULT_SUMMONS_IDLE_TIMEOUT_MS = 3 * 60 * 1000;
 
-/** Local, read-only access to whatever the Talk session is scoped to. */
+/** Local, read-only access to whatever the Summons is scoped to. */
 export interface WorkspaceReader {
   readFile(path: string): Promise<string>;
   glob(pattern: string): Promise<string[]>;
   grep(pattern: string, options: { glob?: string | undefined }): Promise<string[]>;
 }
 
-export interface TalkSessionOptions {
+export interface SummonsSessionOptions {
   transport: RealtimeTransport;
   reader: WorkspaceReader;
   audio?: AudioPort | undefined;
@@ -155,7 +157,7 @@ export interface TalkSessionOptions {
   onError?: ((message: string) => void) | undefined;
 }
 
-export interface TalkSession {
+export interface SummonsSession {
   start(): Promise<void>;
   stop(): Promise<void>;
 }
@@ -202,9 +204,9 @@ async function runTool(
   }
 }
 
-export function createTalkSession(opts: TalkSessionOptions): TalkSession {
+export function createSummonsSession(opts: SummonsSessionOptions): SummonsSession {
   const timers = opts.timers ?? realTimers;
-  const idleTimeoutMs = opts.idleTimeoutMs ?? DEFAULT_TALK_IDLE_TIMEOUT_MS;
+  const idleTimeoutMs = opts.idleTimeoutMs ?? DEFAULT_SUMMONS_IDLE_TIMEOUT_MS;
   let idleHandle: unknown = null;
   let stopped = false;
   /** When the audio queued so far will have finished playing out of the speakers. */
@@ -262,10 +264,10 @@ export function createTalkSession(opts: TalkSessionOptions): TalkSession {
     async start() {
       await opts.transport.connect(
         {
-          model: opts.model || DEFAULT_TALK_MODEL,
-          voice: opts.voice || DEFAULT_TALK_VOICE,
+          model: opts.model || DEFAULT_SUMMONS_MODEL,
+          voice: opts.voice || DEFAULT_SUMMONS_VOICE,
           instructions: opts.instructions,
-          tools: TALK_TOOLS,
+          tools: SUMMONS_TOOLS,
         },
         handleInbound,
       );

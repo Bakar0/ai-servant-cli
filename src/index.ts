@@ -12,7 +12,7 @@ import { repoCommand } from "./commands/repo/index.ts";
 import { resumeCommand } from "./commands/resume.ts";
 import { spawnCommand } from "./commands/spawn.ts";
 import { statuslineCommand } from "./commands/statusline.ts";
-import { talkCommand } from "./commands/talk.ts";
+import { summonCommand } from "./commands/summon.ts";
 import { tasksCommand } from "./commands/tasks.ts";
 import { getVersion } from "./version.ts";
 
@@ -25,7 +25,7 @@ const main = defineCommand({
   subCommands: {
     init: initCommand,
     spawn: spawnCommand,
-    talk: talkCommand,
+    summon: summonCommand,
     repo: repoCommand,
     resume: resumeCommand,
     dashboard: dashboardCommand,

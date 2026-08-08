@@ -1,9 +1,9 @@
 import { isAbsolute, join, relative, resolve } from "node:path";
-import { TALK_IGNORED_DIRS, walkScopeFiles } from "./talk-files.ts";
-import type { WorkspaceReader } from "./talk.ts";
+import { SUMMONS_IGNORED_DIRS, walkScopeFiles } from "./summons-files.ts";
+import type { WorkspaceReader } from "./summons.ts";
 
-// The Talk agent's local reads, confined to the session's scope root. Everything here is read-only
-// by construction — there is no counterpart that writes (workspace ADR 0009).
+// The Summons agent's local reads, confined to the session's scope root. Everything here is
+// read-only by construction — there is no counterpart that writes (workspace ADR 0009).
 
 // Caps: the agent speaks its answers, so a huge file or a thousand hits helps nobody, and each
 // result is round-tripped through the Realtime socket.
@@ -35,7 +35,7 @@ export function createWorkspaceReader(root: string): WorkspaceReader {
     async glob(pattern) {
       const matches: string[] = [];
       for await (const path of new Bun.Glob(pattern).scan({ cwd: root, onlyFiles: true })) {
-        if (path.split("/").some((segment) => TALK_IGNORED_DIRS.has(segment))) continue;
+        if (path.split("/").some((segment) => SUMMONS_IGNORED_DIRS.has(segment))) continue;
         matches.push(path);
         if (matches.length >= MAX_GLOB_MATCHES) break;
       }

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { toInbound } from "../src/core/talk-realtime.ts";
+import { toInbound } from "../src/core/summons-realtime.ts";
 
 describe("Realtime server events the controller acts on", () => {
   test("model speech becomes playable audio", () => {

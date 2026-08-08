@@ -1,4 +1,4 @@
-import type { RealtimeInbound, RealtimeSessionSpec, RealtimeTransport } from "./talk.ts";
+import type { RealtimeInbound, RealtimeSessionSpec, RealtimeTransport } from "./summons.ts";
 
 // The OpenAI Realtime transport: one WebSocket carrying native speech-to-speech in both directions,
 // so there is no STT/TTS pipeline in the path (workspace ADR 0009). This is the seam's outside —
@@ -84,7 +84,7 @@ export function createOpenAiRealtimeTransport(
           resolve();
         });
         ws.addEventListener("error", () =>
-          reject(new Error("servant talk: could not connect to the OpenAI Realtime API.")),
+          reject(new Error("servant summon: could not connect to the OpenAI Realtime API.")),
         );
         // A drop after connect must reach the controller, or the mic stays open on a dead socket.
         ws.addEventListener("close", (event) => {

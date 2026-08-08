@@ -1,5 +1,5 @@
-// Startup context for a Talk session: everything the agent is told about the workspace before the
-// first word is spoken. Read fresh on every launch, so a Talk session never reports a stale goal,
+// Startup context for a Summons: everything the agent is told about the workspace before the
+// first word is spoken. Read fresh on every launch, so a Summons never reports a stale goal,
 // ticket list or repo tree.
 
 import { existsSync } from "node:fs";
@@ -7,7 +7,7 @@ import { readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { loadConfig } from "./config.ts";
 import { workspacePath } from "./paths.ts";
-import { walkScopeFiles } from "./talk-files.ts";
+import { walkScopeFiles } from "./summons-files.ts";
 import { type GhRunner, fetchHubTasks } from "./tasks.ts";
 import { parseWorktreeDirName, reposRoot } from "./worktree-naming.ts";
 
@@ -22,7 +22,7 @@ export interface SnapshotTicket {
   url: string;
 }
 
-/** The workspace state a Talk session opens with. */
+/** The workspace state a Summons opens with. */
 export interface WorkspaceSnapshot {
   workspace: string;
   /** Human phrase for what the session can see — the whole workspace, or one mounted repo. */
@@ -74,7 +74,7 @@ function renderTree(tree: readonly string[]): string {
  * Compose the Realtime session's opening instructions. A Briefing, when supplied, is prepended —
  * it is *added* context, so the freshly-read workspace state follows it in full either way.
  */
-export function composeTalkInstructions(snapshot: WorkspaceSnapshot, briefing?: string): string {
+export function composeSummonsInstructions(snapshot: WorkspaceSnapshot, briefing?: string): string {
   const parts = [
     PERSONA,
     `You are scoped to ${snapshot.scopeLabel} of the servant workspace "${snapshot.workspace}".`,
@@ -97,8 +97,8 @@ export function composeTalkInstructions(snapshot: WorkspaceSnapshot, briefing?: 
   return `${parts.join("\n\n")}\n`;
 }
 
-/** What a Talk session can see: the whole workspace by default, or one mounted repo. */
-export interface TalkScope {
+/** What a Summons can see: the whole workspace by default, or one mounted repo. */
+export interface SummonsScope {
   workspace: string;
   /** Root the agent's reads, globs and greps are confined to. */
   root: string;
@@ -110,10 +110,10 @@ export interface TalkScope {
  * Resolve `--repo <name>` against the workspace's mounted worktrees. Naming a repo that isn't
  * mounted is an error that lists what is, since the mount names are worktree dirs, not repo names.
  */
-export async function resolveTalkScope(
+export async function resolveSummonsScope(
   workspace: string,
   repo: string | undefined,
-): Promise<TalkScope> {
+): Promise<SummonsScope> {
   const workspaceRoot = workspacePath(workspace);
   if (!repo) {
     return { workspace, root: workspaceRoot, label: "the whole workspace" };
@@ -145,11 +145,11 @@ async function readFileOr(path: string, fallback: string): Promise<string> {
 
 /**
  * Read the workspace's current state from disk and the hub. Called on every launch — nothing here
- * is cached, so a Talk session cannot open on a stale goal, ticket list or tree. The goal and
+ * is cached, so a Summons cannot open on a stale goal, ticket list or tree. The goal and
  * glossary always come from the workspace itself, even when the session is scoped to one repo.
  */
 export async function readWorkspaceSnapshot(
-  scope: TalkScope,
+  scope: SummonsScope,
   opts: { ghRunner?: GhRunner | undefined } = {},
 ): Promise<WorkspaceSnapshot> {
   const workspaceRoot = workspacePath(scope.workspace);

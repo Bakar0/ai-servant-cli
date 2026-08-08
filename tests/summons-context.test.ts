@@ -5,42 +5,42 @@ import { join } from "node:path";
 import { setRootOverride } from "../src/core/paths.ts";
 import {
   type WorkspaceSnapshot,
-  composeTalkInstructions,
+  composeSummonsInstructions,
   readWorkspaceSnapshot,
-  resolveTalkScope,
-} from "../src/core/talk-context.ts";
+  resolveSummonsScope,
+} from "../src/core/summons-context.ts";
 
 const SNAPSHOT: WorkspaceSnapshot = {
   workspace: "demo",
   scopeLabel: "the whole workspace",
   goal: "## Mission\nShip the servant CLI.",
-  glossary: "## Talk session\nA live spoken conversation.",
+  glossary: "## Summons\nA live spoken conversation.",
   tickets: [
-    { number: 15, title: "servant talk end-to-end", url: "https://hub/15" },
+    { number: 15, title: "servant summon end-to-end", url: "https://hub/15" },
     { number: 17, title: "delegate to Claude", url: "https://hub/17" },
   ],
   tree: ["GOAL.md", "docs/adr/0009-talk.md"],
   ticketsFromCache: false,
 };
 
-describe("composeTalkInstructions", () => {
+describe("composeSummonsInstructions", () => {
   test("puts the freshly-read workspace state in front of the agent", () => {
-    const instructions = composeTalkInstructions(SNAPSHOT);
+    const instructions = composeSummonsInstructions(SNAPSHOT);
 
     expect(instructions).toContain("Ship the servant CLI.");
     expect(instructions).toContain("A live spoken conversation.");
     expect(instructions).toContain("#15");
-    expect(instructions).toContain("servant talk end-to-end");
+    expect(instructions).toContain("servant summon end-to-end");
     expect(instructions).toContain("docs/adr/0009-talk.md");
     expect(instructions).toContain("demo");
   });
 
   test("says nothing about a Briefing when none was supplied", () => {
-    expect(composeTalkInstructions(SNAPSHOT)).not.toContain("Briefing");
+    expect(composeSummonsInstructions(SNAPSHOT)).not.toContain("Briefing");
   });
 
   test("a Briefing is added in front of the workspace state, not instead of it", () => {
-    const instructions = composeTalkInstructions(
+    const instructions = composeSummonsInstructions(
       SNAPSHOT,
       "We were mid-way through the audio port.",
     );
@@ -57,20 +57,20 @@ describe("composeTalkInstructions", () => {
   });
 
   test("says so when the ticket list could not be refreshed, rather than passing it off as current", () => {
-    const stale = composeTalkInstructions({ ...SNAPSHOT, ticketsFromCache: true });
+    const stale = composeSummonsInstructions({ ...SNAPSHOT, ticketsFromCache: true });
 
     expect(stale).toMatch(/could not|stale|out of date/i);
-    expect(composeTalkInstructions(SNAPSHOT)).not.toMatch(/could not|stale|out of date/i);
+    expect(composeSummonsInstructions(SNAPSHOT)).not.toMatch(/could not|stale|out of date/i);
   });
 
   test("tells the agent it delegates heavy work rather than doing it", () => {
-    const instructions = composeTalkInstructions(SNAPSHOT);
+    const instructions = composeSummonsInstructions(SNAPSHOT);
 
     expect(instructions).toContain("delegate");
   });
 
   test("degrades to a usable session when the workspace is empty", () => {
-    const instructions = composeTalkInstructions({
+    const instructions = composeSummonsInstructions({
       workspace: "fresh",
       scopeLabel: "the whole workspace",
       goal: "",
@@ -85,12 +85,12 @@ describe("composeTalkInstructions", () => {
   });
 });
 
-describe("talk scope and snapshot", () => {
+describe("summons scope and snapshot", () => {
   let scratch: string;
-  const WS = "talkws";
+  const WS = "summonws";
 
   beforeAll(async () => {
-    scratch = await realpath(await mkdtemp(join(tmpdir(), "servant-talk-test-")));
+    scratch = await realpath(await mkdtemp(join(tmpdir(), "servant-summons-test-")));
     setRootOverride(scratch);
     const { saveConfig } = await import("../src/core/config.ts");
     await saveConfig({
@@ -102,20 +102,17 @@ describe("talk scope and snapshot", () => {
     });
     const ws = join(scratch, "workspaces", WS);
     await mkdir(join(ws, "docs", "adr"), { recursive: true });
-    await mkdir(join(ws, "repos", "alpha__talkws-1234", ".git"), { recursive: true });
-    await mkdir(join(ws, "repos", "alpha__talkws-1234", "node_modules", "junk"), {
+    await mkdir(join(ws, "repos", "alpha__summonws-1234", ".git"), { recursive: true });
+    await mkdir(join(ws, "repos", "alpha__summonws-1234", "node_modules", "junk"), {
       recursive: true,
     });
     await writeFile(join(ws, "GOAL.md"), "# Goal\n\nShip the talking servant.\n");
-    await writeFile(
-      join(ws, "CONTEXT.md"),
-      "# Context\n\n## Talk session\nA spoken conversation.\n",
-    );
+    await writeFile(join(ws, "CONTEXT.md"), "# Context\n\n## Summons\nA spoken conversation.\n");
     await writeFile(join(ws, "docs", "adr", "0009-talk.md"), "# ADR 9\n");
-    await writeFile(join(ws, "repos", "alpha__talkws-1234", "README.md"), "alpha\n");
-    await writeFile(join(ws, "repos", "alpha__talkws-1234", ".git", "HEAD"), "ref: main\n");
+    await writeFile(join(ws, "repos", "alpha__summonws-1234", "README.md"), "alpha\n");
+    await writeFile(join(ws, "repos", "alpha__summonws-1234", ".git", "HEAD"), "ref: main\n");
     await writeFile(
-      join(ws, "repos", "alpha__talkws-1234", "node_modules", "junk", "index.js"),
+      join(ws, "repos", "alpha__summonws-1234", "node_modules", "junk", "index.js"),
       "1\n",
     );
   });
@@ -128,7 +125,7 @@ describe("talk scope and snapshot", () => {
   const HUB_ISSUES = JSON.stringify([
     {
       number: 15,
-      title: "servant talk",
+      title: "servant summon",
       state: "OPEN",
       url: "https://hub/15",
       labels: [{ name: `ws:${WS}` }],
@@ -145,25 +142,25 @@ describe("talk scope and snapshot", () => {
   ]);
 
   test("defaults to the whole workspace", async () => {
-    const scope = await resolveTalkScope(WS, undefined);
+    const scope = await resolveSummonsScope(WS, undefined);
 
     expect(scope.root).toBe(join(scratch, "workspaces", WS));
     expect(scope.label).toContain("whole workspace");
   });
 
   test("--repo narrows the scope to that mounted repo", async () => {
-    const scope = await resolveTalkScope(WS, "alpha");
+    const scope = await resolveSummonsScope(WS, "alpha");
 
-    expect(scope.root).toBe(join(scratch, "workspaces", WS, "repos", "alpha__talkws-1234"));
+    expect(scope.root).toBe(join(scratch, "workspaces", WS, "repos", "alpha__summonws-1234"));
     expect(scope.label).toContain("alpha");
   });
 
   test("--repo naming a repo that isn't mounted lists what is", async () => {
-    await expect(resolveTalkScope(WS, "beta")).rejects.toThrow(/alpha/);
+    await expect(resolveSummonsScope(WS, "beta")).rejects.toThrow(/alpha/);
   });
 
   test("the snapshot carries the goal, glossary, this workspace's tickets and the tree", async () => {
-    const scope = await resolveTalkScope(WS, undefined);
+    const scope = await resolveSummonsScope(WS, undefined);
     const snapshot = await readWorkspaceSnapshot(scope, { ghRunner: async () => HUB_ISSUES });
 
     expect(snapshot.goal).toContain("Ship the talking servant.");
@@ -174,7 +171,7 @@ describe("talk scope and snapshot", () => {
   });
 
   test("an unreachable hub is reported, not silently served from cache as if current", async () => {
-    const scope = await resolveTalkScope(WS, undefined);
+    const scope = await resolveSummonsScope(WS, undefined);
     // Prime the cache from a good fetch, then fail — fetchHubTasks falls back to the snapshot.
     await readWorkspaceSnapshot(scope, { ghRunner: async () => HUB_ISSUES });
     const offline = await readWorkspaceSnapshot(scope, {
@@ -188,7 +185,7 @@ describe("talk scope and snapshot", () => {
   });
 
   test("the tree skips version-control and dependency noise", async () => {
-    const scope = await resolveTalkScope(WS, "alpha");
+    const scope = await resolveSummonsScope(WS, "alpha");
     const snapshot = await readWorkspaceSnapshot(scope, { ghRunner: async () => HUB_ISSUES });
 
     expect(snapshot.tree).toContain("README.md");
@@ -197,7 +194,7 @@ describe("talk scope and snapshot", () => {
   });
 
   test("the goal is re-read on every launch, never cached from a previous one", async () => {
-    const scope = await resolveTalkScope(WS, undefined);
+    const scope = await resolveSummonsScope(WS, undefined);
     const before = await readWorkspaceSnapshot(scope, { ghRunner: async () => HUB_ISSUES });
     expect(before.goal).toContain("Ship the talking servant.");
 

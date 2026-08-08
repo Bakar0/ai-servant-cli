@@ -6,9 +6,9 @@ import {
   type RealtimeTransport,
   type TimerPort,
   type WorkspaceReader,
-  createTalkSession,
-} from "../src/core/talk.ts";
-import { requireAudioTool, requireOpenAiApiKey } from "../src/core/talk-preflight.ts";
+  createSummonsSession,
+} from "../src/core/summons.ts";
+import { requireAudioTool, requireOpenAiApiKey } from "../src/core/summons-preflight.ts";
 
 /** A fake Realtime transport: records what the controller sent, replays scripted inbound events. */
 function fakeTransport() {
@@ -61,10 +61,10 @@ function fakeReader(overrides: Partial<WorkspaceReader> = {}) {
 const outputFor = (results: { callId: string; output: string }[], callId: string) =>
   JSON.parse(results.find((r) => r.callId === callId)?.output ?? "null");
 
-describe("talk session startup", () => {
+describe("summons startup", () => {
   test("connects with the assembled instructions and the configured voice and model", async () => {
     const { transport, state } = fakeTransport();
-    const session = createTalkSession({
+    const session = createSummonsSession({
       transport,
       reader: fakeReader().reader,
       instructions: "You are the voice of workspace demo.",
@@ -81,7 +81,11 @@ describe("talk session startup", () => {
 
   test("falls back to the marin voice on gpt-realtime", async () => {
     const { transport, state } = fakeTransport();
-    await createTalkSession({ transport, reader: fakeReader().reader, instructions: "hi" }).start();
+    await createSummonsSession({
+      transport,
+      reader: fakeReader().reader,
+      instructions: "hi",
+    }).start();
 
     expect(state.spec?.model).toBe("gpt-realtime");
     expect(state.spec?.voice).toBe("marin");
@@ -89,18 +93,22 @@ describe("talk session startup", () => {
 
   test("offers only read-only tools — no edit, write or run-command tool", async () => {
     const { transport, state } = fakeTransport();
-    await createTalkSession({ transport, reader: fakeReader().reader, instructions: "hi" }).start();
+    await createSummonsSession({
+      transport,
+      reader: fakeReader().reader,
+      instructions: "hi",
+    }).start();
 
     const names = (state.spec?.tools ?? []).map((t) => t.name).toSorted();
     expect(names).toEqual(["glob", "grep", "read_file"]);
   });
 });
 
-describe("talk session tool calls", () => {
+describe("summons tool calls", () => {
   async function started(readerOverrides: Partial<WorkspaceReader> = {}) {
     const { transport, state, emit } = fakeTransport();
     const { reader, asked } = fakeReader(readerOverrides);
-    const session = createTalkSession({ transport, reader, instructions: "hi" });
+    const session = createSummonsSession({ transport, reader, instructions: "hi" });
     await session.start();
     return { state, emit, asked, session };
   }
@@ -191,7 +199,7 @@ describe("talk session tool calls", () => {
   });
 });
 
-describe("talk session audio", () => {
+describe("summons audio", () => {
   function fakeAudio() {
     const state = { played: [] as string[], capturing: false, stopped: false };
     let push: (chunk: string) => void = () => {};
@@ -214,7 +222,7 @@ describe("talk session audio", () => {
   test("captured mic audio is streamed to the model without any key being pressed", async () => {
     const { transport, state: sent } = fakeTransport();
     const { audio, state: mic, speak } = fakeAudio();
-    await createTalkSession({
+    await createSummonsSession({
       transport,
       reader: fakeReader().reader,
       audio,
@@ -230,7 +238,7 @@ describe("talk session audio", () => {
   test("the model's audio is played back", async () => {
     const { transport, emit } = fakeTransport();
     const { audio, state: mic } = fakeAudio();
-    await createTalkSession({
+    await createSummonsSession({
       transport,
       reader: fakeReader().reader,
       audio,
@@ -245,7 +253,7 @@ describe("talk session audio", () => {
   test("stopping the session closes the socket and releases the microphone", async () => {
     const { transport, state: sent } = fakeTransport();
     const { audio, state: mic } = fakeAudio();
-    const session = createTalkSession({
+    const session = createSummonsSession({
       transport,
       reader: fakeReader().reader,
       audio,
@@ -260,7 +268,7 @@ describe("talk session audio", () => {
   });
 });
 
-describe("talk session idle hang-up", () => {
+describe("summons idle hang-up", () => {
   /** Let the controller's async teardown settle after the timer fires. */
   const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
 
@@ -286,7 +294,7 @@ describe("talk session idle hang-up", () => {
     const { transport, state: sent, emit } = fakeTransport();
     const { timers, state: armed, fire } = fakeTimers();
     const ended: string[] = [];
-    const session = createTalkSession({
+    const session = createSummonsSession({
       transport,
       reader: fakeReader().reader,
       instructions: "hi",
@@ -332,7 +340,7 @@ describe("talk session idle hang-up", () => {
       play() {},
       async stop() {},
     };
-    const session = createTalkSession({
+    const session = createSummonsSession({
       transport,
       reader: fakeReader().reader,
       audio,
@@ -360,18 +368,18 @@ describe("talk session idle hang-up", () => {
   });
 });
 
-describe("talk preflight", () => {
+describe("summons preflight", () => {
   test("a missing audio tool is reported with an install hint", () => {
     expect(() => requireAudioTool(() => null)).toThrow(/brew install sox/);
     expect(requireAudioTool(() => "/opt/homebrew/bin/sox")).toBe("/opt/homebrew/bin/sox");
   });
 });
 
-describe("talk session failures the user can hear about", () => {
+describe("summons failures the user can hear about", () => {
   test("an API error is surfaced rather than leaving a silent open mic", async () => {
     const { transport, emit } = fakeTransport();
     const errors: string[] = [];
-    await createTalkSession({
+    await createSummonsSession({
       transport,
       reader: fakeReader().reader,
       instructions: "hi",
@@ -387,7 +395,7 @@ describe("talk session failures the user can hear about", () => {
     const { transport, state: sent, emit } = fakeTransport();
     const audioStopped: string[] = [];
     const ended: string[] = [];
-    const session = createTalkSession({
+    const session = createSummonsSession({
       transport,
       reader: fakeReader().reader,
       audio: {
@@ -469,7 +477,7 @@ describe("a session that dies while it is still starting", () => {
       },
     };
 
-    await createTalkSession({
+    await createSummonsSession({
       transport,
       reader: reader(),
       audio: recordingAudio(events),
@@ -494,7 +502,7 @@ describe("a session that dies while it is still starting", () => {
       },
     };
 
-    await createTalkSession({
+    await createSummonsSession({
       transport,
       reader: reader(),
       audio: recordingAudio(events, () => die()),
@@ -533,7 +541,7 @@ describe("the agent does not hear itself", () => {
       play() {},
       async stop() {},
     };
-    const session = createTalkSession({
+    const session = createSummonsSession({
       transport,
       reader: fakeReader().reader,
       audio,

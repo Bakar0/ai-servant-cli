@@ -1,10 +1,10 @@
 import { open, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { requireAudioTool } from "./talk-preflight.ts";
-import type { AudioPort } from "./talk.ts";
+import { requireAudioTool } from "./summons-preflight.ts";
+import type { AudioPort } from "./summons.ts";
 
-// Microphone and speaker for a Talk session, built on two long-lived `sox` subprocesses. Chosen
+// Microphone and speaker for a Summons, built on two long-lived `sox` subprocesses. Chosen
 // over a native audio addon because servant ships as a compiled Bun single-file binary, which
 // native addons break (workspace ADR 0009). macOS-first; this is the seam's outside, verified by
 // hand rather than in the test suite.
@@ -39,7 +39,7 @@ export function createSoxAudio(opts: SoxAudioOptions = {}): AudioPort {
   let pump: Promise<void> | null = null;
   let stopping = false;
 
-  const fifoPath = join(tmpdir(), `servant-talk-${process.pid}.pcm`);
+  const fifoPath = join(tmpdir(), `servant-summons-${process.pid}.pcm`);
   let fifo: Awaited<ReturnType<typeof open>> | null = null;
   let speakerReady: Promise<void> | null = null;
   let writes: Promise<unknown> = Promise.resolve();
