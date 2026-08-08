@@ -79,6 +79,13 @@ export const talkCommand = defineCommand({
       default: String(DEFAULT_IDLE_TIMEOUT_SECONDS),
       description: `Seconds of silence before the session hangs up, so a forgotten mic stops billing (default: ${DEFAULT_IDLE_TIMEOUT_SECONDS}; 0 disables).`,
     },
+    debug: {
+      type: "boolean",
+      required: false,
+      default: false,
+      description:
+        "Trace the Realtime event stream and the audio subprocesses on stderr. Use when the session goes quiet and you need to see whether it is the socket or the mic.",
+    },
     root: {
       type: "string",
       required: false,
@@ -96,9 +103,12 @@ export const talkCommand = defineCommand({
       throw new Error(`Workspace "${workspace}" not found at ${workspacePath(workspace)}.`);
     }
 
+    const debug = args.debug ? (message: string) => console.error(`talk: ${message}`) : undefined;
+
     // Preflight before anything expensive: both failures tell the user what to install or export.
     const apiKey = requireOpenAiApiKey(process.env, await readServantEnv());
-    const audio = createSoxAudio();
+    let onAudioFailure: (message: string) => void = () => {};
+    const audio = createSoxAudio({ onDebug: debug, onFailure: (m) => onAudioFailure(m) });
 
     const scope = await resolveTalkScope(workspace, args.repo);
     const briefing = args.brief ? await readBriefing(args.brief) : undefined;
@@ -110,7 +120,7 @@ export const talkCommand = defineCommand({
       ended = resolve;
     });
     const session = createTalkSession({
-      transport: createOpenAiRealtimeTransport(apiKey),
+      transport: createOpenAiRealtimeTransport(apiKey, { onDebug: debug }),
       reader: createWorkspaceReader(scope.root),
       audio,
       instructions: composeTalkInstructions(snapshot, briefing),
@@ -120,6 +130,13 @@ export const talkCommand = defineCommand({
       onStopped: () => ended(),
       onError: (message) => console.error(`servant talk: ${message}`),
     });
+
+    // A dead mic or speaker is not recoverable mid-session, and staying open would look to the
+    // user exactly like the agent having nothing to say.
+    onAudioFailure = (message) => {
+      console.error(`servant talk: ${message}`);
+      void session.stop();
+    };
 
     await session.start();
     console.log(

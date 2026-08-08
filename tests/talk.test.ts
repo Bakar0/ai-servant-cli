@@ -269,6 +269,7 @@ describe("talk session idle hang-up", () => {
     const state = { armedFor: [] as number[] };
     let pending: (() => void) | null = null;
     const timers: TimerPort = {
+      now: () => 0,
       setTimeout(fn, ms) {
         state.armedFor.push(ms);
         pending = fn;
@@ -503,5 +504,80 @@ describe("a session that dies while it is still starting", () => {
     // The mic opened, so it must be closed again — otherwise sox outlives the session.
     expect(events.at(0)).toBe("mic-on");
     expect(events).toContain("mic-off");
+  });
+});
+
+describe("the agent does not hear itself", () => {
+  /** A hand-driven clock, so playback timing is asserted without waiting in real time. */
+  function fakeClock() {
+    let t = 1_000;
+    const timers: TimerPort = {
+      now: () => t,
+      setTimeout: () => 0,
+      clearTimeout: () => {},
+    };
+    return { timers, advance: (ms: number) => (t += ms) };
+  }
+
+  /** One second of 24 kHz mono PCM16 = 48000 bytes, base64-encoded. */
+  const ONE_SECOND_OF_SPEECH = Buffer.alloc(48_000).toString("base64");
+
+  async function speakingSession() {
+    const { transport, state: sent, emit } = fakeTransport();
+    const { timers, advance } = fakeClock();
+    let pushMic: (chunk: string) => void = () => {};
+    const audio: AudioPort = {
+      async startCapture(onChunk) {
+        pushMic = onChunk;
+      },
+      play() {},
+      async stop() {},
+    };
+    const session = createTalkSession({
+      transport,
+      reader: fakeReader().reader,
+      audio,
+      instructions: "hi",
+      idleTimeoutMs: 0,
+      timers,
+    });
+    await session.start();
+    return { sent, emit, advance, mic: (chunk: string) => pushMic(chunk) };
+  }
+
+  test("mic input is held back while the model's reply is still playing", async () => {
+    const { sent, emit, advance, mic } = await speakingSession();
+
+    mic("aGVhcmQ=");
+    expect(sent.audioSent).toEqual(["aGVhcmQ="]);
+
+    await emit({ type: "audio", pcm: ONE_SECOND_OF_SPEECH });
+    advance(300); // 300ms into a one-second reply
+    mic("ZWNobw==");
+
+    expect(sent.audioSent).toEqual(["aGVhcmQ="]);
+  });
+
+  test("mic input resumes once the reply has finished playing", async () => {
+    const { sent, emit, advance, mic } = await speakingSession();
+
+    await emit({ type: "audio", pcm: ONE_SECOND_OF_SPEECH });
+    advance(2_000); // well past the reply plus its tail
+    mic("bXktdHVybg==");
+
+    expect(sent.audioSent).toEqual(["bXktdHVybg=="]);
+  });
+
+  test("back-to-back audio deltas extend the quiet window rather than resetting it", async () => {
+    const { sent, emit, advance, mic } = await speakingSession();
+
+    await emit({ type: "audio", pcm: ONE_SECOND_OF_SPEECH });
+    advance(500);
+    await emit({ type: "audio", pcm: ONE_SECOND_OF_SPEECH });
+    advance(1_000); // 1.5s in, but 2s of speech was queued
+
+    mic("c3RpbGwtcGxheWluZw==");
+
+    expect(sent.audioSent).toEqual([]);
   });
 });

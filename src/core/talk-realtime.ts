@@ -57,7 +57,14 @@ function sessionUpdate(spec: RealtimeSessionSpec): string {
   });
 }
 
-export function createOpenAiRealtimeTransport(apiKey: string): RealtimeTransport {
+export interface RealtimeTransportOptions {
+  onDebug?: ((message: string) => void) | undefined;
+}
+
+export function createOpenAiRealtimeTransport(
+  apiKey: string,
+  opts: RealtimeTransportOptions = {},
+): RealtimeTransport {
   let socket: WebSocket | null = null;
 
   function send(payload: unknown): void {
@@ -80,7 +87,10 @@ export function createOpenAiRealtimeTransport(apiKey: string): RealtimeTransport
           reject(new Error("servant talk: could not connect to the OpenAI Realtime API.")),
         );
         // A drop after connect must reach the controller, or the mic stays open on a dead socket.
-        ws.addEventListener("close", () => void onInbound({ type: "closed" }));
+        ws.addEventListener("close", (event) => {
+          opts.onDebug?.(`socket closed (code ${event.code}) ${event.reason}`.trim());
+          void onInbound({ type: "closed" });
+        });
         ws.addEventListener("message", (message) => {
           let parsed: unknown;
           try {
@@ -88,6 +98,7 @@ export function createOpenAiRealtimeTransport(apiKey: string): RealtimeTransport
           } catch {
             return;
           }
+          opts.onDebug?.(`recv ${str(asRecord(parsed).type) || "(untyped)"}`);
           const inbound = toInbound(parsed);
           if (inbound) void onInbound(inbound);
         });

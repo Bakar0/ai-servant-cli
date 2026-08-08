@@ -99,16 +99,35 @@ export interface AudioPort {
   stop(): Promise<void>;
 }
 
-/** The timer the idle hang-up runs on; injectable so tests fire the window instead of waiting. */
+/** The clock the session runs on; injectable so tests drive time instead of waiting on it. */
 export interface TimerPort {
+  now(): number;
   setTimeout(fn: () => void, ms: number): unknown;
   clearTimeout(handle: unknown): void;
 }
 
 const realTimers: TimerPort = {
+  now: () => Date.now(),
   setTimeout: (fn, ms) => setTimeout(fn, ms),
   clearTimeout: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
 };
+
+/**
+ * A WebSocket Realtime session has no echo cancellation, so an open mic hears the reply coming out
+ * of the speakers. The model's own voice then trips its server-side voice detection, it interrupts
+ * itself after a word or two, and the conversation dies chewing on its own echo. The session is
+ * therefore half-duplex: the mic is held back until the queued reply has finished playing.
+ * Headphones make this moot, but it cannot be a requirement.
+ */
+const PLAYBACK_TAIL_MS = 400;
+const PCM16_BYTES_PER_MS = (24_000 * 2) / 1000;
+
+/** How long a base64 PCM16 chunk takes to play, in milliseconds. */
+function playbackDurationMs(base64Pcm: string): number {
+  const padding = base64Pcm.endsWith("==") ? 2 : base64Pcm.endsWith("=") ? 1 : 0;
+  const bytes = Math.max(0, (base64Pcm.length / 4) * 3 - padding);
+  return bytes / PCM16_BYTES_PER_MS;
+}
 
 /** Default silence window before a Talk session hangs itself up, so a forgotten mic stops billing. */
 export const DEFAULT_TALK_IDLE_TIMEOUT_MS = 3 * 60 * 1000;
@@ -188,6 +207,8 @@ export function createTalkSession(opts: TalkSessionOptions): TalkSession {
   const idleTimeoutMs = opts.idleTimeoutMs ?? DEFAULT_TALK_IDLE_TIMEOUT_MS;
   let idleHandle: unknown = null;
   let stopped = false;
+  /** When the audio queued so far will have finished playing out of the speakers. */
+  let speakingUntil = 0;
 
   // Tool failures are conversation, not crashes: the agent hears what went wrong and can say so.
   async function handleToolCall(call: Extract<RealtimeInbound, { type: "tool_call" }>) {
@@ -223,6 +244,7 @@ export function createTalkSession(opts: TalkSessionOptions): TalkSession {
         await handleToolCall(event);
         return;
       case "audio":
+        speakingUntil = Math.max(speakingUntil, timers.now()) + playbackDurationMs(event.pcm);
         opts.audio?.play(event.pcm);
         return;
       case "error":
@@ -254,7 +276,10 @@ export function createTalkSession(opts: TalkSessionOptions): TalkSession {
       // Deliberately no markActive() in the capture callback: an open mic streams PCM frames
       // through silence too, so counting them as activity would mean the idle hang-up never fires.
       // Only what the server reports — speech, a reply, a tool call — proves the conversation lives.
-      await opts.audio?.startCapture((pcm) => opts.transport.sendAudio(pcm));
+      await opts.audio?.startCapture((pcm) => {
+        if (timers.now() < speakingUntil + PLAYBACK_TAIL_MS) return;
+        opts.transport.sendAudio(pcm);
+      });
       if (stopped) {
         await opts.audio?.stop();
         return;

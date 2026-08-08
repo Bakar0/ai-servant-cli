@@ -23,25 +23,36 @@ const RAW_PCM_ARGS = [
 /** ~200 ms of audio — the chunk size the Realtime API is happiest receiving. */
 const CHUNK_BYTES = (SAMPLE_RATE / 5) * 2;
 
-export function createSoxAudio(): AudioPort {
-  const sox = requireAudioTool((command) => Bun.which(command));
-  let recorder: Bun.Subprocess<"ignore", "pipe", "ignore"> | null = null;
-  let speaker: Bun.Subprocess<"pipe", "ignore", "ignore"> | null = null;
-  let pump: Promise<void> | null = null;
+export interface SoxAudioOptions {
+  /** Called when a `sox` process dies on its own — the session is deaf or mute from then on. */
+  onFailure?: ((message: string) => void) | undefined;
+  onDebug?: ((message: string) => void) | undefined;
+}
 
-  function speakerStdin() {
-    // `-` reads raw PCM from stdin, `-d` plays to the default output device.
-    speaker ??= Bun.spawn([sox, "-q", ...RAW_PCM_ARGS, "-", "-d"], {
-      stdin: "pipe",
-      stdout: "ignore",
-      stderr: "ignore",
-    });
-    return speaker.stdin;
+export function createSoxAudio(opts: SoxAudioOptions = {}): AudioPort {
+  const sox = requireAudioTool((command) => Bun.which(command));
+  let recorder: Bun.Subprocess<"ignore", "pipe", "pipe"> | null = null;
+  let speaker: Bun.Subprocess<"pipe", "ignore", "pipe"> | null = null;
+  let pump: Promise<void> | null = null;
+  let stopping = false;
+
+  /**
+   * Watch a `sox` we did not kill ourselves. Silence here is what makes this layer's failures
+   * invisible: the mic dying mid-conversation looks exactly like the user having gone quiet.
+   */
+  function watch(role: string, proc: Bun.Subprocess<never, never, "pipe">): void {
+    void (async () => {
+      const [code, stderr] = await Promise.all([proc.exited, new Response(proc.stderr).text()]);
+      if (stopping) return;
+      const detail = stderr.trim() || `exit code ${code}`;
+      opts.onFailure?.(`the ${role} (sox) stopped: ${detail}`);
+    })();
   }
 
   /** Re-chunk sox's arbitrary-sized reads into the frame size the API wants. */
   async function drainMic(stdout: ReadableStream<Uint8Array>, onChunk: (pcm: string) => void) {
     let pending = new Uint8Array(0);
+    let frames = 0;
     for await (const chunk of stdout) {
       const merged = new Uint8Array(pending.length + chunk.length);
       merged.set(pending);
@@ -50,9 +61,12 @@ export function createSoxAudio(): AudioPort {
       while (merged.length - offset >= CHUNK_BYTES) {
         onChunk(Buffer.from(merged.subarray(offset, offset + CHUNK_BYTES)).toString("base64"));
         offset += CHUNK_BYTES;
+        // One line per ~10s of mic, enough to tell "the mic died" from "nobody spoke".
+        if (++frames % 50 === 0) opts.onDebug?.(`mic: ${frames} frames sent`);
       }
       pending = merged.slice(offset);
     }
+    opts.onDebug?.(`mic: input stream ended after ${frames} frames`);
   }
 
   return {
@@ -62,21 +76,33 @@ export function createSoxAudio(): AudioPort {
       recorder = Bun.spawn([sox, "-q", "-d", ...RAW_PCM_ARGS, "-"], {
         stdin: "ignore",
         stdout: "pipe",
-        stderr: "ignore",
+        stderr: "pipe",
       });
-      pump = drainMic(recorder.stdout, onChunk).catch(() => {
-        // The recorder was killed by stop(); a half-read frame is nothing to report.
+      opts.onDebug?.("mic: recorder started");
+      watch("microphone", recorder as unknown as Bun.Subprocess<never, never, "pipe">);
+      pump = drainMic(recorder.stdout, onChunk).catch((err: unknown) => {
+        if (!stopping) opts.onFailure?.(`the microphone stream failed: ${String(err)}`);
       });
       return Promise.resolve();
     },
 
     play(pcm) {
-      const stdin = speakerStdin();
-      void stdin.write(Buffer.from(pcm, "base64"));
-      void stdin.flush();
+      if (!speaker) {
+        // `-` reads raw PCM from stdin, `-d` plays to the default output device.
+        speaker = Bun.spawn([sox, "-q", ...RAW_PCM_ARGS, "-", "-d"], {
+          stdin: "pipe",
+          stdout: "ignore",
+          stderr: "pipe",
+        });
+        opts.onDebug?.("speaker: playback started");
+        watch("speaker", speaker as unknown as Bun.Subprocess<never, never, "pipe">);
+      }
+      void speaker.stdin.write(Buffer.from(pcm, "base64"));
+      void speaker.stdin.flush();
     },
 
     async stop() {
+      stopping = true;
       recorder?.kill();
       speaker?.kill();
       recorder = null;
