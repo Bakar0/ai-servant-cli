@@ -59,6 +59,14 @@ export function configPath(): string {
   return join(aiServantRoot(), "config.json");
 }
 
+/**
+ * Servant's own secrets (e.g. `OPENAI_API_KEY`), sibling to config.json. Read explicitly — Bun's
+ * auto-`.env` only covers the current working directory, which for servant is a workspace dir.
+ */
+export function servantEnvPath(): string {
+  return join(aiServantRoot(), ".env");
+}
+
 export function cacheDir(): string {
   return join(aiServantRoot(), ".cache");
 }

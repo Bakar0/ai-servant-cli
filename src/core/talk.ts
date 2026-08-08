@@ -247,10 +247,18 @@ export function createTalkSession(opts: TalkSessionOptions): TalkSession {
         },
         handleInbound,
       );
-      // Deliberately no markActive() here: an open mic streams PCM frames through silence too, so
-      // counting them as activity would mean the idle hang-up never fires. Only what the server
-      // reports — speech detected, a reply, a tool call — proves the conversation is alive.
+      // The socket can die inside either await above — a rejected key, for instance, is reported
+      // and closed after the handshake succeeds. Re-check both times, or a mic opened after stop()
+      // is a sox subprocess nobody owns and the session never exits.
+      if (stopped) return;
+      // Deliberately no markActive() in the capture callback: an open mic streams PCM frames
+      // through silence too, so counting them as activity would mean the idle hang-up never fires.
+      // Only what the server reports — speech, a reply, a tool call — proves the conversation lives.
       await opts.audio?.startCapture((pcm) => opts.transport.sendAudio(pcm));
+      if (stopped) {
+        await opts.audio?.stop();
+        return;
+      }
       markActive();
     },
     stop,

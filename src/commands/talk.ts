@@ -8,6 +8,7 @@ import {
   readWorkspaceSnapshot,
   resolveTalkScope,
 } from "../core/talk-context.ts";
+import { readServantEnv } from "../core/servant-env.ts";
 import { requireOpenAiApiKey } from "../core/talk-preflight.ts";
 import { createOpenAiRealtimeTransport } from "../core/talk-realtime.ts";
 import { createWorkspaceReader } from "../core/talk-reader.ts";
@@ -96,7 +97,7 @@ export const talkCommand = defineCommand({
     }
 
     // Preflight before anything expensive: both failures tell the user what to install or export.
-    const apiKey = requireOpenAiApiKey(process.env);
+    const apiKey = requireOpenAiApiKey(process.env, await readServantEnv());
     const audio = createSoxAudio();
 
     const scope = await resolveTalkScope(workspace, args.repo);

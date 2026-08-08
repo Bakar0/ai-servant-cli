@@ -1,3 +1,6 @@
+import { servantEnvPath } from "./paths.ts";
+import { resolveSecret } from "./servant-env.ts";
+
 // Preflight for `servant talk`: the two things that must exist before a Talk session can open, each
 // failing with a message that says what to do next rather than surfacing a socket or spawn error.
 
@@ -8,17 +11,23 @@ export const TALK_AUDIO_TOOL = "sox";
 export type CommandLookup = (command: string) => string | null;
 
 /**
- * The API key the Realtime socket authenticates with. A ChatGPT subscription does not grant API
- * access, so the message says where the key comes from as well as what it is called.
+ * The API key the Realtime socket authenticates with, from the environment or the servant root's
+ * `.env`. A ChatGPT subscription does not grant API access, so the message says where the key comes
+ * from as well as what it is called — and names both places it can live.
  */
-export function requireOpenAiApiKey(env: Record<string, string | undefined>): string {
-  const key = env.OPENAI_API_KEY?.trim();
+export function requireOpenAiApiKey(
+  env: Record<string, string | undefined>,
+  fileEnv: Record<string, string>,
+): string {
+  const key = resolveSecret("OPENAI_API_KEY", env, fileEnv);
   if (!key) {
     throw new Error(
       "servant talk: OPENAI_API_KEY is not set.\n" +
         "  `servant talk` speaks to the OpenAI Realtime API, which needs a platform API key\n" +
         "  (a ChatGPT subscription does not grant API access).\n" +
-        "  Create one at https://platform.openai.com/api-keys, then: export OPENAI_API_KEY=sk-...",
+        "  Create one at https://platform.openai.com/api-keys, then either:\n" +
+        "      export OPENAI_API_KEY=sk-...\n" +
+        `    or add it to ${servantEnvPath()} as: OPENAI_API_KEY=sk-...`,
     );
   }
   return key;

@@ -360,12 +360,6 @@ describe("talk session idle hang-up", () => {
 });
 
 describe("talk preflight", () => {
-  test("a missing OPENAI_API_KEY is reported by name", () => {
-    expect(() => requireOpenAiApiKey({})).toThrow(/OPENAI_API_KEY/);
-    expect(() => requireOpenAiApiKey({ OPENAI_API_KEY: "   " })).toThrow(/OPENAI_API_KEY/);
-    expect(requireOpenAiApiKey({ OPENAI_API_KEY: " sk-abc " })).toBe("sk-abc");
-  });
-
   test("a missing audio tool is reported with an install hint", () => {
     expect(() => requireAudioTool(() => null)).toThrow(/brew install sox/);
     expect(requireAudioTool(() => "/opt/homebrew/bin/sox")).toBe("/opt/homebrew/bin/sox");
@@ -412,5 +406,102 @@ describe("talk session failures the user can hear about", () => {
     expect(sent.closed).toBe(true);
     expect(audioStopped).toEqual(["stopped"]);
     expect(ended).toEqual(["stopped"]);
+  });
+});
+
+describe("resolving the API key", () => {
+  test("the shell environment is used when it has the key", () => {
+    expect(requireOpenAiApiKey({ OPENAI_API_KEY: " sk-shell " }, {})).toBe("sk-shell");
+  });
+
+  test("the servant root's .env fills the gap when the shell has nothing", () => {
+    expect(requireOpenAiApiKey({}, { OPENAI_API_KEY: "sk-file" })).toBe("sk-file");
+    expect(requireOpenAiApiKey({ OPENAI_API_KEY: "  " }, { OPENAI_API_KEY: "sk-file" })).toBe(
+      "sk-file",
+    );
+  });
+
+  test("an inline override still wins over the file", () => {
+    expect(
+      requireOpenAiApiKey({ OPENAI_API_KEY: "sk-inline" }, { OPENAI_API_KEY: "sk-file" }),
+    ).toBe("sk-inline");
+  });
+
+  test("absent from both names the variable and the file, without leaking a value", () => {
+    let message = "";
+    try {
+      requireOpenAiApiKey({}, {});
+    } catch (err) {
+      message = err instanceof Error ? err.message : String(err);
+    }
+    expect(message).toContain("OPENAI_API_KEY");
+    expect(message).toContain(".env");
+  });
+});
+
+describe("a session that dies while it is still starting", () => {
+  const reader = () => fakeReader().reader;
+
+  function recordingAudio(events: string[], onStart?: () => Promise<void>): AudioPort {
+    return {
+      async startCapture() {
+        events.push("mic-on");
+        await onStart?.();
+      },
+      play() {},
+      async stop() {
+        events.push("mic-off");
+      },
+    };
+  }
+
+  test("a socket that dies before the mic opens never opens it", async () => {
+    const events: string[] = [];
+    const transport: RealtimeTransport = {
+      async connect(_spec, onInbound) {
+        await onInbound({ type: "closed" });
+      },
+      sendAudio() {},
+      sendToolResult() {},
+      async close() {
+        events.push("socket-closed");
+      },
+    };
+
+    await createTalkSession({
+      transport,
+      reader: reader(),
+      audio: recordingAudio(events),
+      instructions: "hi",
+    }).start();
+
+    expect(events).not.toContain("mic-on");
+    expect(events).toContain("socket-closed");
+  });
+
+  test("a socket that dies while the mic is opening still releases it", async () => {
+    const events: string[] = [];
+    let die: () => Promise<void> = async () => {};
+    const transport: RealtimeTransport = {
+      async connect(_spec, onInbound) {
+        die = () => onInbound({ type: "closed" });
+      },
+      sendAudio() {},
+      sendToolResult() {},
+      async close() {
+        events.push("socket-closed");
+      },
+    };
+
+    await createTalkSession({
+      transport,
+      reader: reader(),
+      audio: recordingAudio(events, () => die()),
+      instructions: "hi",
+    }).start();
+
+    // The mic opened, so it must be closed again — otherwise sox outlives the session.
+    expect(events.at(0)).toBe("mic-on");
+    expect(events).toContain("mic-off");
   });
 });
