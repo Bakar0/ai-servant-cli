@@ -1,9 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import {
   type AudioPort,
+  type DelegationReport,
+  type DelegationRequest,
   type RealtimeInbound,
   type RealtimeSessionSpec,
   type RealtimeTransport,
+  type SummonsActions,
   type TimerPort,
   type WorkspaceReader,
   createSummonsSession,
@@ -17,6 +20,7 @@ function fakeTransport() {
     spec: null as RealtimeSessionSpec | null,
     audioSent: [] as string[],
     toolResults: [] as { callId: string; output: string }[],
+    notes: [] as string[],
     closed: false,
   };
   const transport: RealtimeTransport = {
@@ -29,6 +33,9 @@ function fakeTransport() {
     },
     sendToolResult(callId, output) {
       state.toolResults.push({ callId, output });
+    },
+    sendAgentNote(text) {
+      state.notes.push(text);
     },
     async close() {
       state.closed = true;
@@ -196,6 +203,416 @@ describe("summons tool calls", () => {
 
     expect(asked.paths).toEqual([]);
     expect(outputFor(state.toolResults, "call_6").error).toContain("read_file");
+  });
+});
+
+/**
+ * Fake workspace actions: records every delegation instead of opening a tab, and reports whatever
+ * the test says each session is doing. Nothing here spawns, claims or reads a transcript.
+ */
+function fakeActions(overrides: Partial<SummonsActions> = {}) {
+  const launched: DelegationRequest[] = [];
+  const reports = new Map<string, DelegationReport>();
+  const actions: SummonsActions = {
+    async delegate(request) {
+      launched.push(request);
+      return {
+        label: request.label,
+        sessionName: request.ticket ? `demo-t${request.ticket}` : `demo-${launched.length}`,
+        ticket: request.ticket,
+        repo: request.repo,
+      };
+    },
+    async observe(handle) {
+      return (
+        reports.get(handle.label) ?? {
+          status: "running" as const,
+          latest: "working on it",
+          turns: 3,
+        }
+      );
+    },
+    ...overrides,
+  };
+  return { actions, launched, reports };
+}
+
+describe("delegating by voice is Guarded", () => {
+  async function summoned(actionOverrides: Partial<SummonsActions> = {}) {
+    const { transport, state, emit } = fakeTransport();
+    const { actions, launched, reports } = fakeActions(actionOverrides);
+    await createSummonsSession({
+      transport,
+      reader: fakeReader().reader,
+      actions,
+      instructions: "hi",
+    }).start();
+    return { state, emit, launched, reports };
+  }
+
+  const propose = (
+    emit: (e: RealtimeInbound) => Promise<void>,
+    args: Record<string, unknown>,
+    callId = "call_d",
+  ) => emit({ type: "tool_call", callId, name: "delegate", args: JSON.stringify(args) });
+
+  test("the delegation tools are offered once there is somewhere to delegate to", async () => {
+    const { state } = await summoned();
+
+    expect((state.spec?.tools ?? []).map((t) => t.name).toSorted()).toEqual([
+      "check_delegation",
+      "delegate",
+      "glob",
+      "grep",
+      "read_file",
+    ]);
+  });
+
+  test("asking for heavy work launches nothing and comes back asking to confirm", async () => {
+    const { state, emit, launched } = await summoned();
+
+    await propose(emit, { task: "refactor the auth module", label: "auth refactor" });
+
+    expect(launched).toEqual([]);
+    const answer = outputFor(state.toolResults, "call_d");
+    expect(answer.launched).toBe(false);
+    expect(answer.status).toBe("awaiting_confirmation");
+    expect(answer.instruction).toContain("yes or no");
+  });
+
+  test("a spoken yes launches it, with the task the agent wrote down", async () => {
+    const { emit, launched } = await summoned();
+    await propose(emit, { task: "refactor the auth module", label: "auth refactor", ticket: 42 });
+
+    await emit({ type: "user_transcript", text: "Yes, go ahead.", itemId: "item_2" });
+
+    expect(launched).toHaveLength(1);
+    expect(launched[0]?.task).toBe("refactor the auth module");
+    expect(launched[0]?.ticket).toBe(42);
+  });
+
+  test("a spoken no launches nothing", async () => {
+    const { state, emit, launched } = await summoned();
+    await propose(emit, { task: "delete the old migrations", label: "migrations" });
+
+    await emit({ type: "user_transcript", text: "No.", itemId: "item_2" });
+
+    expect(launched).toEqual([]);
+    expect(state.notes.join(" ")).toContain("declined");
+  });
+
+  test("an unclear answer declines it, and the agent is told to ask again", async () => {
+    const { state, emit, launched } = await summoned();
+    await propose(emit, { task: "drop the staging database", label: "staging" });
+
+    await emit({ type: "user_transcript", text: "sorry, what was that?", itemId: "item_2" });
+
+    expect(launched).toEqual([]);
+    expect(state.notes.join(" ")).toContain("Ask again");
+  });
+
+  test("a sentence that merely contains a yes is not a confirmation", async () => {
+    const { emit, launched } = await summoned();
+    await propose(emit, { task: "rewrite the build", label: "build" });
+
+    await emit({
+      type: "user_transcript",
+      text: "I said yes to the other thing",
+      itemId: "item_2",
+    });
+
+    expect(launched).toEqual([]);
+  });
+
+  test("the model cannot push a held delegation through by calling delegate again", async () => {
+    const { state, emit, launched } = await summoned();
+    await propose(emit, { task: "refactor auth", label: "auth" }, "call_a");
+
+    await propose(emit, { task: "refactor auth", label: "auth", ticket: 1 }, "call_b");
+
+    expect(launched).toEqual([]);
+    expect(outputFor(state.toolResults, "call_b").error).toContain("waiting on a yes or no");
+  });
+
+  test("the request's own words, transcribed late, are not read as the answer to it", async () => {
+    const { emit, launched } = await summoned();
+    // The utterance that provoked the proposal, still being transcribed when the call arrived.
+    await emit({ type: "user_speaking", itemId: "item_1" });
+    await propose(emit, { task: "go and research the API", label: "api research" });
+
+    await emit({ type: "user_transcript", text: "go and research the API", itemId: "item_1" });
+
+    expect(launched).toEqual([]);
+
+    // The gate is still held, so the real answer still works.
+    await emit({ type: "user_transcript", text: "yes", itemId: "item_2" });
+    expect(launched).toHaveLength(1);
+  });
+
+  test("a launch that fails leaves nothing running and says so", async () => {
+    const { state, emit } = await summoned({
+      async delegate() {
+        throw new Error("no terminal available");
+      },
+    });
+    await propose(emit, { task: "run the test suite", label: "tests" });
+
+    await emit({ type: "user_transcript", text: "yes", itemId: "item_2" });
+
+    expect(state.notes.join(" ")).toContain("no terminal available");
+    expect(state.notes.join(" ")).toContain("Nothing is running");
+  });
+
+  test("a delegation with no task is refused rather than held", async () => {
+    const { state, emit } = await summoned();
+
+    await propose(emit, { label: "vague" });
+
+    expect(outputFor(state.toolResults, "call_d").error).toContain("task");
+  });
+});
+
+describe("watching delegated work", () => {
+  async function summoned(actionOverrides: Partial<SummonsActions> = {}) {
+    const { transport, state, emit } = fakeTransport();
+    const { actions, launched, reports } = fakeActions(actionOverrides);
+    await createSummonsSession({
+      transport,
+      reader: fakeReader().reader,
+      actions,
+      instructions: "hi",
+    }).start();
+
+    let call = 0;
+    async function delegated(args: Record<string, unknown>) {
+      call += 1;
+      await emit({
+        type: "tool_call",
+        callId: `d_${call}`,
+        name: "delegate",
+        args: JSON.stringify(args),
+      });
+      await emit({ type: "user_transcript", text: "yes", itemId: `confirm_${call}` });
+    }
+    async function check(args: Record<string, unknown> = {}) {
+      call += 1;
+      const callId = `c_${call}`;
+      await emit({
+        type: "tool_call",
+        callId,
+        name: "check_delegation",
+        args: JSON.stringify(args),
+      });
+      return outputFor(state.toolResults, callId);
+    }
+    return { state, emit, launched, reports, delegated, check };
+  }
+
+  test("asking before anything has been delegated says so", async () => {
+    const { check } = await summoned();
+
+    expect((await check()).error).toContain("Nothing has been delegated");
+  });
+
+  test("asking how it is going reports progress from the running session", async () => {
+    const { delegated, check, reports } = await summoned();
+    await delegated({ task: "port the parser", label: "parser port" });
+    reports.set("parser port", { status: "running", latest: "rewriting the tokenizer", turns: 4 });
+
+    const result = await check();
+
+    expect(result.status).toBe("running");
+    expect(result.latest).toBe("rewriting the tokenizer");
+    // Observing is silent: no confirmation was asked for and none was given.
+    expect(result.needs_disambiguation).toBeUndefined();
+  });
+
+  test("asking what it concluded reports the outcome once it has finished", async () => {
+    const { delegated, check, reports } = await summoned();
+    await delegated({ task: "port the parser", label: "parser port" });
+    reports.set("parser port", {
+      status: "finished",
+      latest: "the parser is ported; two tests still fail",
+      turns: 20,
+    });
+
+    const result = await check({ label: "the parser port" });
+
+    expect(result.status).toBe("finished");
+    expect(result.latest).toContain("two tests still fail");
+  });
+
+  test("with several running, an unqualified check asks which one rather than picking", async () => {
+    const { delegated, check } = await summoned();
+    await delegated({ task: "port the parser", label: "parser port" });
+    await delegated({ task: "research the API", label: "api research" });
+
+    const result = await check();
+
+    expect(result.needs_disambiguation).toBe(true);
+    expect(result.delegations).toEqual(["parser port", "api research"]);
+    expect(result.status).toBeUndefined();
+  });
+
+  test("naming one of several resolves to it", async () => {
+    const { delegated, check, reports } = await summoned();
+    await delegated({ task: "port the parser", label: "parser port" });
+    await delegated({ task: "research the API", label: "api research" });
+    reports.set("api research", { status: "running", latest: "reading the docs", turns: 2 });
+
+    expect((await check({ label: "api research" })).latest).toBe("reading the docs");
+  });
+
+  test("a label nothing matches lists what there is instead of guessing", async () => {
+    const { delegated, check } = await summoned();
+    await delegated({ task: "port the parser", label: "parser port" });
+
+    const result = await check({ label: "the database migration" });
+
+    expect(result.error).toContain("database migration");
+    expect(result.delegations).toEqual(["parser port"]);
+  });
+});
+
+describe("dispatching delegated work", () => {
+  async function summoned() {
+    const { transport, state, emit } = fakeTransport();
+    const { actions, launched, reports } = fakeActions();
+    await createSummonsSession({
+      transport,
+      reader: fakeReader().reader,
+      actions,
+      instructions: "hi",
+    }).start();
+
+    let call = 0;
+    async function delegated(args: Record<string, unknown>) {
+      call += 1;
+      await emit({
+        type: "tool_call",
+        callId: `d_${call}`,
+        name: "delegate",
+        args: JSON.stringify(args),
+      });
+      await emit({ type: "user_transcript", text: "yes", itemId: `confirm_${call}` });
+    }
+    async function check(args: Record<string, unknown> = {}) {
+      call += 1;
+      const callId = `c_${call}`;
+      await emit({
+        type: "tool_call",
+        callId,
+        name: "check_delegation",
+        args: JSON.stringify(args),
+      });
+      return outputFor(state.toolResults, callId);
+    }
+    return { state, launched, reports, delegated, check };
+  }
+
+  test("work on different repos runs in parallel", async () => {
+    const { delegated, launched } = await summoned();
+
+    await delegated({ task: "fix the api", label: "api fix", repo: "backend" });
+    await delegated({ task: "fix the ui", label: "ui fix", repo: "frontend" });
+
+    expect(launched.map((r) => r.label)).toEqual(["api fix", "ui fix"]);
+  });
+
+  test("work on the same repo waits — two sessions would share one worktree", async () => {
+    const { delegated, launched, state } = await summoned();
+
+    await delegated({ task: "fix the api", label: "api fix", repo: "backend" });
+    await delegated({ task: "add the endpoint", label: "new endpoint", repo: "backend" });
+
+    expect(launched.map((r) => r.label)).toEqual(["api fix"]);
+    expect(state.notes.join(" ")).toContain('queued behind "api fix"');
+  });
+
+  test("the queued task starts once the first is seen to have finished", async () => {
+    const { delegated, check, launched, reports } = await summoned();
+    await delegated({ task: "fix the api", label: "api fix", repo: "backend" });
+    await delegated({ task: "add the endpoint", label: "new endpoint", repo: "backend" });
+
+    reports.set("api fix", { status: "finished", latest: "done", turns: 9 });
+    const result = await check({ label: "api fix" });
+
+    expect(result.also_started).toBe("new endpoint");
+    expect(launched.map((r) => r.label)).toEqual(["api fix", "new endpoint"]);
+  });
+
+  test("a queued task reports as queued, not as running", async () => {
+    const { delegated, check } = await summoned();
+    await delegated({ task: "fix the api", label: "api fix", repo: "backend" });
+    await delegated({ task: "add the endpoint", label: "new endpoint", repo: "backend" });
+
+    const result = await check({ label: "new endpoint" });
+
+    expect(result.status).toBe("queued");
+    expect(result.queued_behind).toBe("api fix");
+  });
+
+  test("asking about the queued task is itself enough to start it once the repo is free", async () => {
+    const { delegated, check, launched, reports } = await summoned();
+    await delegated({ task: "fix the api", label: "api fix", repo: "backend" });
+    await delegated({ task: "add the endpoint", label: "new endpoint", repo: "backend" });
+    reports.set("api fix", { status: "finished", latest: "done", turns: 9 });
+
+    // Nobody asked about "api fix" — without this, the queued task would wait on someone
+    // happening to enquire about the delegation ahead of it.
+    const result = await check({ label: "new endpoint" });
+
+    expect(launched.map((r) => r.label)).toEqual(["api fix", "new endpoint"]);
+    expect(result.status).not.toBe("queued");
+  });
+
+  test("a repo whose occupant's liveness is unknown stays occupied", async () => {
+    const { delegated, check, launched, reports } = await summoned();
+    await delegated({ task: "fix the api", label: "api fix", repo: "backend" });
+    await delegated({ task: "add the endpoint", label: "new endpoint", repo: "backend" });
+
+    // "unknown" is not "finished": freeing the worktree on it would be the double-dispatch bug.
+    reports.set("api fix", { status: "unknown", latest: null, turns: 0 });
+    const result = await check({ label: "new endpoint" });
+
+    expect(launched.map((r) => r.label)).toEqual(["api fix"]);
+    expect(result.status).toBe("queued");
+  });
+
+  test("a repeated label is made unique, so a later check still resolves to one session", async () => {
+    const { delegated, check, launched } = await summoned();
+
+    await delegated({ task: "research the API", label: "api research" });
+    await delegated({ task: "research the API again", label: "api research" });
+
+    expect(launched.map((r) => r.label)).toEqual(["api research", "api research 2"]);
+    expect((await check({ label: "api research 2" })).label).toBe("api research 2");
+  });
+});
+
+describe("what a delegated session is told", () => {
+  test("it carries the conversation the request came out of", async () => {
+    const { transport, emit } = fakeTransport();
+    const { actions, launched } = fakeActions();
+    await createSummonsSession({
+      transport,
+      reader: fakeReader().reader,
+      actions,
+      instructions: "hi",
+    }).start();
+
+    await emit({ type: "user_transcript", text: "the parser keeps choking on unicode" });
+    await emit({ type: "assistant_transcript", text: "want me to put Claude on it?" });
+    await emit({
+      type: "tool_call",
+      callId: "d1",
+      name: "delegate",
+      args: JSON.stringify({ task: "fix unicode handling in the parser", label: "parser" }),
+    });
+    await emit({ type: "user_transcript", text: "yes", itemId: "confirm" });
+
+    expect(launched[0]?.conversation).toContain("user: the parser keeps choking on unicode");
+    expect(launched[0]?.conversation).toContain("servant: want me to put Claude on it?");
   });
 });
 
@@ -472,6 +889,7 @@ describe("a session that dies while it is still starting", () => {
       },
       sendAudio() {},
       sendToolResult() {},
+      sendAgentNote() {},
       async close() {
         events.push("socket-closed");
       },
@@ -497,6 +915,7 @@ describe("a session that dies while it is still starting", () => {
       },
       sendAudio() {},
       sendToolResult() {},
+      sendAgentNote() {},
       async close() {
         events.push("socket-closed");
       },

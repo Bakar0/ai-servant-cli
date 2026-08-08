@@ -10,9 +10,20 @@ describe("Realtime server events the controller acts on", () => {
   });
 
   test("voice-activity detection becomes a user-speaking signal", () => {
-    expect(toInbound({ type: "input_audio_buffer.speech_started" })).toEqual({
+    expect(toInbound({ type: "input_audio_buffer.speech_started", item_id: "item_1" })).toEqual({
       type: "user_speaking",
+      itemId: "item_1",
     });
+  });
+
+  test("the user's own words come through, tagged with the utterance they belong to", () => {
+    expect(
+      toInbound({
+        type: "conversation.item.input_audio_transcription.completed",
+        item_id: "item_2",
+        transcript: "yes, go ahead",
+      }),
+    ).toEqual({ type: "user_transcript", text: "yes, go ahead", itemId: "item_2" });
   });
 
   test("a finished function call becomes a tool call", () => {

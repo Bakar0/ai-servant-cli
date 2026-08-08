@@ -23,6 +23,11 @@ export interface LaunchWorkspaceSessionOptions {
   agent?: string | undefined;
   prompt?: string | undefined;
   /**
+   * Display name for the launched session, and the address anything that needs to reach it later
+   * computes rather than searches for (workspace ADR 0010). Backends without a naming flag ignore it.
+   */
+  sessionName?: string | undefined;
+  /**
    * Runs once the workspace is scaffolded and before the tab opens. `servant spawn -r` uses it to
    * run its interactive repo picker in the current TTY, so the worktrees exist by the time the
    * agent starts there. It lives here as a hook rather than as an option because the picker is a
@@ -36,6 +41,8 @@ export interface LaunchedWorkspaceSession {
   cwd: string;
   terminal: string;
   command: string;
+  /** Null when none was asked for, or when the backend has no way to name a session. */
+  sessionName: string | null;
 }
 
 export async function launchWorkspaceSession(
@@ -62,10 +69,13 @@ export async function launchWorkspaceSession(
   // parses as the short-flag cluster `-r -e -p -o`, which sets `-p` to "".
   const task = opts.prompt?.trim() ? opts.prompt : undefined;
   const prompt = task ?? (goalUnfilled ? GOAL_BOOTSTRAP_PROMPT : undefined);
-  const command = agent.launchCommand(cwd, { prompt });
+  const sessionName = opts.sessionName?.trim() || undefined;
+  const command = agent.launchCommand(cwd, { prompt, sessionName });
   const driver = opts.terminal ? getDriver(opts.terminal) : await detectTerminal();
 
+  // The title stays the workspace even for a named session: cmux groups tabs by it, so naming the
+  // tab after the session would scatter every Worker into a cmux workspace of its own.
   await driver.openTab({ cwd, command, title: workspace });
 
-  return { workspace, cwd, terminal: driver.name, command };
+  return { workspace, cwd, terminal: driver.name, command, sessionName: sessionName ?? null };
 }

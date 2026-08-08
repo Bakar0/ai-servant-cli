@@ -9,6 +9,7 @@ import {
   readWorkspaceSnapshot,
   resolveSummonsScope,
 } from "../core/summons-context.ts";
+import { createSummonsActions } from "../core/summons-delegate.ts";
 import { requireOpenAiApiKey } from "../core/summons-preflight.ts";
 import { createOpenAiRealtimeTransport } from "../core/summons-realtime.ts";
 import { createWorkspaceReader } from "../core/summons-reader.ts";
@@ -61,6 +62,12 @@ export const summonCommand = defineCommand({
       description:
         "Path to a briefing from a prior session, prepended to the workspace state the session opens with.",
     },
+    terminal: {
+      type: "string",
+      required: false,
+      description:
+        "Terminal delegated Claude sessions open in: cmux | iterm (default: auto-detect).",
+    },
     voice: {
       type: "string",
       required: false,
@@ -94,7 +101,7 @@ export const summonCommand = defineCommand({
   },
   async run({ args }) {
     applyRootOverride(args.root);
-    await requireInit();
+    const { hubRepo } = await requireInit();
 
     const idleMs = parseIdleTimeoutMs(args["idle-timeout"]);
 
@@ -122,6 +129,9 @@ export const summonCommand = defineCommand({
     const session = createSummonsSession({
       transport: createOpenAiRealtimeTransport(apiKey, { onDebug: debug }),
       reader: createWorkspaceReader(scope.root),
+      // Delegated sessions open on the workspace, not the Summons' scope: `--repo` narrows what
+      // the agent may read out loud, never what Claude is allowed to work on.
+      actions: createSummonsActions({ workspace, hubRepo, terminal: args.terminal }),
       audio,
       instructions: composeSummonsInstructions(snapshot, briefing),
       model: args.model,

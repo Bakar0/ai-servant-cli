@@ -28,6 +28,12 @@ describe("claudeCodeAgent.launchCommand", () => {
     expect(claudeCodeAgent.launchCommand("/some/cwd", { prompt: "   " })).toBe("claude");
   });
 
+  test("a session name becomes --name, ahead of the prompt", () => {
+    expect(
+      claudeCodeAgent.launchCommand("/x", { sessionName: "ai-servant-t17", prompt: "go" }),
+    ).toBe("claude --name 'ai-servant-t17' 'go'");
+  });
+
   test("appends prompt as a single-quoted argument", () => {
     expect(claudeCodeAgent.launchCommand("/x", { prompt: "do a thing" })).toBe(
       "claude 'do a thing'",

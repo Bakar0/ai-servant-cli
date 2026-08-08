@@ -21,7 +21,13 @@ export function toInbound(event: unknown): RealtimeInbound | null {
     case "response.output_audio.delta":
       return { type: "audio", pcm: str(e.delta) };
     case "input_audio_buffer.speech_started":
-      return { type: "user_speaking" };
+      return { type: "user_speaking", itemId: str(e.item_id) || undefined };
+    case "conversation.item.input_audio_transcription.completed":
+      return {
+        type: "user_transcript",
+        text: str(e.transcript),
+        itemId: str(e.item_id) || undefined,
+      };
     case "response.function_call_arguments.done":
       return {
         type: "tool_call",
@@ -48,7 +54,14 @@ function sessionUpdate(spec: RealtimeSessionSpec): string {
       audio: {
         // Server-side voice-activity detection is what makes the session hands-free: the model
         // decides when a turn ends, so no key is ever held or pressed to talk.
-        input: { turn_detection: { type: "server_vad" } },
+        //
+        // Native speech-to-speech needs no transcription to *understand* the user — this is asked
+        // for so the controller can read the spoken yes or no that releases a Guarded delegation.
+        // Without it the confirm-gate would have nothing to judge but the model's own say-so.
+        input: {
+          turn_detection: { type: "server_vad" },
+          transcription: { model: "gpt-4o-mini-transcribe" },
+        },
         output: { voice: spec.voice },
       },
       tools: spec.tools.map((tool) => ({ type: "function", ...tool })),
@@ -115,6 +128,20 @@ export function createOpenAiRealtimeTransport(
         item: { type: "function_call_output", call_id: callId, output },
       });
       send({ type: "response.create" });
+    },
+
+    // No `response.create` here, unlike a tool result: a note is only ever sent just after the user
+    // spoke, and voice-activity detection has already started a reply to that. Asking for a second
+    // one would collide with it; the note lands in the conversation and steers the reply instead.
+    sendAgentNote(text) {
+      send({
+        type: "conversation.item.create",
+        item: {
+          type: "message",
+          role: "system",
+          content: [{ type: "input_text", text }],
+        },
+      });
     },
 
     async close() {

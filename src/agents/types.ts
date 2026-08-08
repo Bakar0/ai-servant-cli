@@ -10,6 +10,12 @@ export interface LaunchOptions {
    * without a permission prompt per drill. Interactive launches only — never the headless runners.
    */
   addDirs?: readonly string[];
+  /**
+   * Display name for the launched session, which is also its *address*: every session in one
+   * workspace shares a cwd, so a backend's own derived naming produces near-identical names that
+   * nothing can resolve a ticket to. Backends with no naming flag ignore it (workspace ADR 0010).
+   */
+  sessionName?: string;
 }
 
 /** Describes the agent's project-conventions document (Claude reads `CLAUDE.md`; Codex `AGENTS.md`). */

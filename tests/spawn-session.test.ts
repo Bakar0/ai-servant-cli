@@ -69,8 +69,28 @@ describe("launchWorkspaceSession", () => {
       cwd,
       terminal: "faketerm",
       command: tabs[0]?.command ?? "",
+      sessionName: null,
     });
     expect(result.command).toContain("claude");
+  });
+
+  test("a named session is launched under that name, and reports it back", async () => {
+    const { tabs, unregister } = captureTabs();
+    let result: Awaited<ReturnType<typeof launchWorkspaceSession>>;
+    try {
+      result = await launchWorkspaceSession({
+        workspace: "namedws",
+        terminal: "faketerm",
+        sessionName: "namedws-t17",
+      });
+    } finally {
+      unregister();
+    }
+
+    expect(result.sessionName).toBe("namedws-t17");
+    expect(tabs[0]?.command).toContain("--name 'namedws-t17'");
+    // cmux groups tabs by title, so a named Worker still belongs to its workspace's group.
+    expect(tabs[0]?.title).toBe("namedws");
   });
 
   test("an explicit agent is recorded, and a later launch inherits it", async () => {
