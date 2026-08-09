@@ -16,6 +16,12 @@ export interface LaunchOptions {
    * nothing can resolve a ticket to. Backends with no naming flag ignore it (workspace ADR 0010).
    */
   sessionName?: string;
+  /**
+   * Permission mode the session runs under. Read-only delegation uses this to spawn a session that
+   * *cannot* write, which is what makes launching it without a spoken confirmation safe.
+   * Backends with no equivalent flag ignore it.
+   */
+  permissionMode?: string;
 }
 
 /** Describes the agent's project-conventions document (Claude reads `CLAUDE.md`; Codex `AGENTS.md`). */

@@ -17,6 +17,14 @@ import type {
 /** Spoken aloud, so a wall of text helps nobody — the user can open the tab for the rest. */
 const MAX_SPOKEN_LATEST_CHARS = 1_200;
 
+/**
+ * The permission mode a read-only delegation runs in. This is what buys `research` its exemption
+ * from the confirm-gate: the exemption rests on the session being unable to write, not on the
+ * model having honestly labelled the request. Mislabel a refactor as research and it still cannot
+ * touch a file — it explores and reports instead.
+ */
+const READ_ONLY_PERMISSION_MODE = "plan";
+
 function slug(text: string): string {
   return text
     .toLowerCase()
@@ -63,8 +71,10 @@ export function composeDelegationPrompt(ctx: DelegationPromptContext): string {
   const { request, sessionName, hubRepo } = ctx;
   const parts = [
     marker(sessionName),
-    `You were handed this task out loud, during a spoken Summons of the "${ctx.workspace}" workspace. The user is away from the keyboard, so work it end to end and leave your conclusion as your final message — that message is what gets read back to them.`,
-    `## Task\n\n${request.task}`,
+    `You were handed this ${request.readOnly ? "question" : "task"} out loud, during a spoken Summons of the "${ctx.workspace}" workspace. The user is away from the keyboard, so work it end to end and leave your conclusion as your final message — that message is what gets read back to them, out loud, so make it answer the question on its own.`,
+    request.readOnly
+      ? `## Question\n\n${request.task}\n\nThis is a read-only investigation and the session is in plan mode: find the answer and report it. Do not propose to start editing.`
+      : `## Task\n\n${request.task}`,
   ];
   if (request.repo) {
     parts.push(
@@ -133,6 +143,7 @@ export function createSummonsActions(deps: SummonsActionsDeps): SummonsActions {
           }),
           sessionName,
           terminal: deps.terminal,
+          permissionMode: request.readOnly ? READ_ONLY_PERMISSION_MODE : undefined,
         });
       } catch (err) {
         // A Claim with no session behind it would read as in-flight work forever.

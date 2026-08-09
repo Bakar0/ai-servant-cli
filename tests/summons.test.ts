@@ -265,6 +265,7 @@ describe("delegating by voice is Guarded", () => {
       "glob",
       "grep",
       "read_file",
+      "research",
     ]);
   });
 
@@ -361,6 +362,49 @@ describe("delegating by voice is Guarded", () => {
 
     expect(state.notes.join(" ")).toContain("no terminal available");
     expect(state.notes.join(" ")).toContain("Nothing is running");
+  });
+
+  test("a research request launches straight away — the gate is on change, not on effort", async () => {
+    const { state, emit, launched } = await summoned();
+
+    await emit({
+      type: "tool_call",
+      callId: "call_r",
+      name: "research",
+      args: JSON.stringify({ task: "how does the parser work", label: "parser question" }),
+    });
+
+    // No confirmation was asked for and none was given.
+    expect(launched).toHaveLength(1);
+    expect(launched[0]?.readOnly).toBe(true);
+    expect(outputFor(state.toolResults, "call_r").launched).toBe(true);
+  });
+
+  test("a research request that arrives while a delegation is held does not disturb the gate", async () => {
+    const { emit, launched } = await summoned();
+    await propose(emit, { task: "refactor the auth module", label: "auth refactor" });
+
+    await emit({
+      type: "tool_call",
+      callId: "call_r",
+      name: "research",
+      args: JSON.stringify({ task: "what calls the tokenizer", label: "tokenizer question" }),
+    });
+
+    // The research ran; the refactor is still waiting on a spoken yes.
+    expect(launched.map((r) => r.label)).toEqual(["tokenizer question"]);
+
+    await emit({ type: "user_transcript", text: "yes", itemId: "item_2" });
+    expect(launched.map((r) => r.label)).toEqual(["tokenizer question", "auth refactor"]);
+  });
+
+  test("work sent through delegate is never marked read-only, whatever it is called", async () => {
+    const { emit, launched } = await summoned();
+    await propose(emit, { task: "just have a look at the parser", label: "parser" });
+
+    await emit({ type: "user_transcript", text: "yes", itemId: "item_2" });
+
+    expect(launched[0]?.readOnly).toBe(false);
   });
 
   test("a delegation with no task is refused rather than held", async () => {

@@ -40,15 +40,15 @@ function fakeWorld(launchFails = false) {
 
 describe("naming a delegated session", () => {
   test("ticketed work is addressable from the ticket alone", () => {
-    expect(delegationSessionName("ai_servant", { task: "t", label: "l", ticket: 17 })).toBe(
-      "ai-servant-t17",
-    );
+    expect(
+      delegationSessionName("ai_servant", { task: "t", label: "l", readOnly: false, ticket: 17 }),
+    ).toBe("ai-servant-t17");
   });
 
   test("ad-hoc work, having no ticket to derive from, is addressed by its label", () => {
-    expect(delegationSessionName("ai_servant", { task: "t", label: "API research" })).toBe(
-      "ai-servant-api-research",
-    );
+    expect(
+      delegationSessionName("ai_servant", { task: "t", label: "API research", readOnly: false }),
+    ).toBe("ai-servant-api-research");
   });
 });
 
@@ -61,6 +61,7 @@ describe("what the delegated session wakes up to", () => {
       request: {
         task: "port the parser to the new tokenizer",
         label: "parser port",
+        readOnly: false,
         ticket: 17,
         repo: "backend",
         conversation: "user: the parser chokes on unicode",
@@ -89,7 +90,7 @@ describe("what the delegated session wakes up to", () => {
       workspace: "ai_servant",
       hubRepo: "acme/hub",
       sessionName: "ai-servant-research",
-      request: { task: "research X", label: "research" },
+      request: { task: "research X", label: "research", readOnly: false },
     });
     expect(adhoc).not.toContain("servant claim");
   });
@@ -99,7 +100,12 @@ describe("delegating is one step, not two", () => {
   test("the Claim is written before the session is launched", async () => {
     const { actions, order } = fakeWorld();
 
-    await actions.delegate({ task: "port the parser", label: "parser port", ticket: 17 });
+    await actions.delegate({
+      task: "port the parser",
+      label: "parser port",
+      readOnly: false,
+      ticket: 17,
+    });
 
     // Claiming after launching would leave a window in which a running session is unclaimed —
     // exactly when a second one gets dispatched onto the same ticket and worktree.
@@ -110,7 +116,12 @@ describe("delegating is one step, not two", () => {
     const { actions, order } = fakeWorld(true);
 
     await expect(
-      actions.delegate({ task: "port the parser", label: "parser port", ticket: 17 }),
+      actions.delegate({
+        task: "port the parser",
+        label: "parser port",
+        readOnly: false,
+        ticket: 17,
+      }),
     ).rejects.toThrow("no terminal available");
 
     expect(order).toEqual([
@@ -123,7 +134,11 @@ describe("delegating is one step, not two", () => {
   test("ad-hoc work claims nothing", async () => {
     const { actions, order } = fakeWorld();
 
-    const handle = await actions.delegate({ task: "research X", label: "research" });
+    const handle = await actions.delegate({
+      task: "research X",
+      label: "research",
+      readOnly: false,
+    });
 
     expect(order).toEqual(["launch ai-servant-research"]);
     expect(handle.sessionName).toBe("ai-servant-research");
@@ -132,10 +147,45 @@ describe("delegating is one step, not two", () => {
   test("the session is launched under its name, with the composed prompt", async () => {
     const { actions, launches } = fakeWorld();
 
-    await actions.delegate({ task: "port the parser", label: "parser port", ticket: 17 });
+    await actions.delegate({
+      task: "port the parser",
+      label: "parser port",
+      readOnly: false,
+      ticket: 17,
+    });
 
     expect(launches[0]?.sessionName).toBe("ai-servant-t17");
     expect(launches[0]?.prompt).toContain("port the parser");
+  });
+});
+
+describe("read-only delegation cannot write, which is why it needs no confirmation", () => {
+  test("a research session is spawned in a permission mode that cannot edit", async () => {
+    const { actions, launches } = fakeWorld();
+
+    await actions.delegate({ task: "how does the parser work", label: "parser q", readOnly: true });
+
+    expect(launches[0]?.permissionMode).toBe("plan");
+  });
+
+  test("work that changes things runs with the session's normal permissions", async () => {
+    const { actions, launches } = fakeWorld();
+
+    await actions.delegate({ task: "port the parser", label: "parser port", readOnly: false });
+
+    expect(launches[0]?.permissionMode).toBeUndefined();
+  });
+
+  test("a research prompt says it is read-only, so the session reports instead of proposing edits", () => {
+    const prompt = composeDelegationPrompt({
+      workspace: "ai_servant",
+      hubRepo: "acme/hub",
+      sessionName: "ai-servant-parser-q",
+      request: { task: "how does the parser work", label: "parser q", readOnly: true },
+    });
+
+    expect(prompt).toContain("read-only investigation");
+    expect(prompt).toContain("Do not propose to start editing");
   });
 });
 

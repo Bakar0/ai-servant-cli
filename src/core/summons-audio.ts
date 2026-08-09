@@ -26,6 +26,18 @@ const RAW_PCM_ARGS = [
 /** ~200 ms of audio — the chunk size the Realtime API is happiest receiving. */
 const CHUNK_BYTES = (SAMPLE_RATE / 5) * 2;
 
+/**
+ * How much of the FIFO sox swallows before it plays any of it. The default is 8192 bytes — at this
+ * sample rate, 170 ms of speech held back waiting for a buffer that only fills when the *next*
+ * reply arrives, seconds later. That is heard as the end of every sentence being clipped off.
+ *
+ * It also breaks the half-duplex mic gate, which reopens the mic on how long the reply *should*
+ * have taken to play: audio still coming out of the speakers after that estimate gets heard,
+ * trips the model's voice detection, and makes it interrupt itself mid-sentence. Reading the FIFO
+ * in small bites keeps real playback within a frame or two of the estimate, so both stop.
+ */
+const SPEAKER_INPUT_BUFFER_BYTES = 1024;
+
 export interface SoxAudioOptions {
   /** Called when a `sox` process dies on its own — the session is deaf or mute from then on. */
   onFailure?: ((message: string) => void) | undefined;
@@ -71,11 +83,18 @@ export function createSoxAudio(opts: SoxAudioOptions = {}): AudioPort {
       throw new Error((await new Response(made.stderr).text()).trim() || "mkfifo failed");
     }
     fifo = await open(fifoPath, "r+");
-    speaker = Bun.spawn([sox, "-q", ...RAW_PCM_ARGS, fifoPath, "-d"], {
-      stdin: "ignore",
-      stdout: "ignore",
-      stderr: "pipe",
-    });
+    speaker = Bun.spawn(
+      [
+        sox,
+        "-q",
+        "--input-buffer",
+        String(SPEAKER_INPUT_BUFFER_BYTES),
+        ...RAW_PCM_ARGS,
+        fifoPath,
+        "-d",
+      ],
+      { stdin: "ignore", stdout: "ignore", stderr: "pipe" },
+    );
     opts.onDebug?.("speaker: playback started");
     watch("speaker", speaker as unknown as Bun.Subprocess<never, never, "pipe">);
   }

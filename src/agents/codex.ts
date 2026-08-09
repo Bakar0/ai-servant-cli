@@ -19,8 +19,9 @@ export const codexAgent: AgentBackend = {
     const addDirs = (opts?.addDirs ?? []).filter((d) => d.trim().length > 0);
     const prompt = opts?.prompt?.trim();
     const parts = ["codex"];
-    // `opts.sessionName` is deliberately dropped: Codex has no naming flag, so a Codex workspace
-    // has no addressable sessions and nothing that depends on addressing them works there.
+    // `opts.sessionName` and `opts.permissionMode` are deliberately dropped: Codex has neither
+    // flag, so a Codex workspace has no addressable sessions, and read-only delegation cannot be
+    // enforced there — the two things that depend on them do not work on this backend.
     // Unlike Claude's variadic `--add-dir`, Codex's `--add-dir <DIR>` takes a single directory
     // and is repeatable — so each dir gets its own flag and no `--` terminator is needed before
     // the positional prompt.

@@ -64,15 +64,44 @@ export const SUMMONS_TOOLS: readonly SummonsTool[] = [
 ];
 
 /**
- * The Guarded half of the tool surface: handing work to a Claude session, and reading back how it
- * is going. `delegate` is only ever *proposed* by the model — the controller holds it until the
- * user says yes out loud, so a model that emits this call cannot cause execution on its own.
+ * Handing work to a Claude session, and reading back how it is going.
+ *
+ * Only `delegate` is Guarded. It is never more than *proposed* by the model — the controller holds
+ * it until the user says yes out loud, so a model that emits that call cannot cause execution on
+ * its own. `research` is not gated, and does not need to be: it spawns a session in a permission
+ * mode that cannot write, so the worst a misheard sentence can do is read some files and spend
+ * tokens in a tab you close. What the gate protects is *change*, not effort.
  */
 export const DELEGATION_TOOLS: readonly SummonsTool[] = [
   {
+    name: "research",
+    description:
+      "Hand a read-only question — 'how does X work', 'why is Y slow', 'what calls Z' — to a fresh Claude session that can search the whole codebase. Use this instead of grinding through files yourself: it is token-hungry work and Claude has the harness for it. Launches immediately, no confirmation, because the session it starts cannot change anything. If the task would edit, run or write ANYTHING, it is not research — use delegate.",
+    parameters: {
+      type: "object",
+      properties: {
+        task: {
+          type: "string",
+          description:
+            "The question, written out for someone who cannot hear this conversation. Say what would count as an answer.",
+        },
+        label: {
+          type: "string",
+          description:
+            'Two or three words naming it, so the user can ask about it later ("the parser question").',
+        },
+        repo: {
+          type: "string",
+          description: "Mounted repo under repos/ the question is about, when it is about one.",
+        },
+      },
+      required: ["task", "label"],
+    },
+  },
+  {
     name: "delegate",
     description:
-      "Hand a heavy or state-changing task — research, editing, multi-step work, running anything — to a fresh Claude session that does it with its full harness. Research counts as heavy: delegate it rather than reading your way to an answer. Calling this launches NOTHING: it asks the user to confirm out loud first, and their spoken answer decides.",
+      "Hand work that CHANGES something — editing, refactoring, running commands, anything that writes — to a fresh Claude session with its full harness. Calling this launches NOTHING: it asks the user to confirm out loud first, and their spoken answer decides. For read-only questions use research instead, which needs no confirmation.",
     parameters: {
       type: "object",
       properties: {
@@ -120,6 +149,11 @@ export const DELEGATION_TOOLS: readonly SummonsTool[] = [
 export interface DelegationRequest {
   task: string;
   label: string;
+  /**
+   * True for a question rather than a job. Carries a guarantee, not a hint: the session it spawns
+   * runs in a permission mode that cannot write, which is the whole reason it needs no confirmation.
+   */
+  readOnly: boolean;
   ticket?: number | undefined;
   repo?: string | undefined;
   /**
@@ -438,8 +472,70 @@ function createDelegations(opts: SummonsSessionOptions) {
     return labelOf(next);
   }
 
+  function readRequest(rawArgs: string, tool: string, readOnly: boolean): DelegationRequest {
+    const args = parseArgs(rawArgs, tool);
+    return {
+      task: requireString(args, "task", tool),
+      label: uniqueLabel(requireString(args, "label", tool)),
+      readOnly,
+      ticket: optionalPositiveInteger(args, "ticket"),
+      repo: optionalString(args, "repo"),
+      conversation: conversation.length > 0 ? conversation.join("\n") : undefined,
+    };
+  }
+
+  type DispatchOutcome =
+    | { launched: true; label: string; session: string }
+    | { launched: false; label: string; queuedBehind: string };
+
+  /** Track and launch. Throws only if the launch itself failed, leaving nothing tracked. */
+  async function dispatch(request: DelegationRequest): Promise<DispatchOutcome> {
+    const entry: TrackedDelegation = {
+      request,
+      handle: null,
+      finished: false,
+      queuedBehind: null,
+    };
+    tracked.push(entry);
+    try {
+      const outcome = await launchOrQueue(entry);
+      return outcome.started
+        ? { launched: true, label: request.label, session: entry.handle?.sessionName ?? "" }
+        : { launched: false, label: request.label, queuedBehind: outcome.behind };
+    } catch (err) {
+      tracked.pop();
+      throw err;
+    }
+  }
+
   return {
     remember,
+
+    /**
+     * Launch a read-only question straight away. Not an exception to the gate — the gate is on
+     * *change*, and this cannot change anything (see `DELEGATION_TOOLS`). Making the user confirm
+     * every question was the cost that made them stop asking questions.
+     */
+    async research(callId: string, rawArgs: string): Promise<void> {
+      const answer = (payload: Record<string, unknown>) =>
+        opts.transport.sendToolResult(callId, JSON.stringify(payload));
+      if (!actions) {
+        answer({
+          error: "This Summons cannot delegate — it was started without workspace actions.",
+        });
+        return;
+      }
+      try {
+        const outcome = await dispatch(readRequest(rawArgs, "research", true));
+        answer(
+          outcome.launched
+            ? { launched: true, label: outcome.label, session: outcome.session }
+            : { launched: false, label: outcome.label, queued_behind: outcome.queuedBehind },
+        );
+      } catch (err) {
+        answer({ error: err instanceof Error ? err.message : String(err) });
+      }
+    },
 
     /**
      * Hold a proposed delegation. Nothing is launched here, and nothing can be — this does no I/O
@@ -464,14 +560,7 @@ function createDelegations(opts: SummonsSessionOptions) {
       }
       let request: DelegationRequest;
       try {
-        const args = parseArgs(rawArgs, "delegate");
-        request = {
-          task: requireString(args, "task", "delegate"),
-          label: uniqueLabel(requireString(args, "label", "delegate")),
-          ticket: optionalPositiveInteger(args, "ticket"),
-          repo: optionalString(args, "repo"),
-          conversation: conversation.length > 0 ? conversation.join("\n") : undefined,
-        };
+        request = readRequest(rawArgs, "delegate", false);
       } catch (err) {
         answer({ error: err instanceof Error ? err.message : String(err) });
         return;
@@ -512,24 +601,17 @@ function createDelegations(opts: SummonsSessionOptions) {
         return true;
       }
 
-      const entry: TrackedDelegation = {
-        request: held.request,
-        handle: null,
-        finished: false,
-        queuedBehind: null,
-      };
-      tracked.push(entry);
+      const label = held.request.label;
       try {
-        const outcome = await launchOrQueue(entry);
+        const outcome = await dispatch(held.request);
         opts.transport.sendAgentNote(
-          outcome.started
-            ? `Launched "${labelOf(entry)}" in a Claude session (${entry.handle?.sessionName}). Tell the user it is running and that they can ask how it is going.`
-            : `"${labelOf(entry)}" is queued behind "${outcome.behind}" — they touch the same repo, so they cannot run at once. Tell the user it will start when that one finishes.`,
+          outcome.launched
+            ? `Launched "${label}" in a Claude session (${outcome.session}). Tell the user it is running and that they can ask how it is going.`
+            : `"${label}" is queued behind "${outcome.queuedBehind}" — they touch the same repo, so they cannot run at once. Tell the user it will start when that one finishes.`,
         );
       } catch (err) {
-        tracked.pop();
         opts.transport.sendAgentNote(
-          `Launching "${labelOf(entry)}" failed: ${err instanceof Error ? err.message : String(err)}. Nothing is running. Tell the user plainly.`,
+          `Launching "${label}" failed: ${err instanceof Error ? err.message : String(err)}. Nothing is running. Tell the user plainly.`,
         );
       }
       return true;
@@ -606,10 +688,14 @@ export function createSummonsSession(opts: SummonsSessionOptions): SummonsSessio
 
   // Tool failures are conversation, not crashes: the agent hears what went wrong and can say so.
   async function handleToolCall(call: Extract<RealtimeInbound, { type: "tool_call" }>) {
-    // `delegate` is the one call that gets no answer here: it is Guarded, so it is held and
-    // answered from inside the gate, and it never reaches an action on the strength of this event.
+    // `delegate` and `research` answer their own call — the first from inside the gate once the
+    // user has spoken, the second as soon as it has launched. Neither returns a result here.
     if (call.name === "delegate") {
       delegations.propose(call.callId, call.args, lastUserItemId);
+      return;
+    }
+    if (call.name === "research") {
+      await delegations.research(call.callId, call.args);
       return;
     }
     let result: Record<string, unknown>;

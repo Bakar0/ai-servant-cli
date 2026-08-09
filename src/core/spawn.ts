@@ -27,6 +27,8 @@ export interface LaunchWorkspaceSessionOptions {
    * computes rather than searches for (workspace ADR 0010). Backends without a naming flag ignore it.
    */
   sessionName?: string | undefined;
+  /** Permission mode for the launched session (e.g. `plan`, which cannot write). */
+  permissionMode?: string | undefined;
   /**
    * Runs once the workspace is scaffolded and before the tab opens. `servant spawn -r` uses it to
    * run its interactive repo picker in the current TTY, so the worktrees exist by the time the
@@ -70,7 +72,11 @@ export async function launchWorkspaceSession(
   const task = opts.prompt?.trim() ? opts.prompt : undefined;
   const prompt = task ?? (goalUnfilled ? GOAL_BOOTSTRAP_PROMPT : undefined);
   const sessionName = opts.sessionName?.trim() || undefined;
-  const command = agent.launchCommand(cwd, { prompt, sessionName });
+  const command = agent.launchCommand(cwd, {
+    prompt,
+    sessionName,
+    permissionMode: opts.permissionMode,
+  });
   const driver = opts.terminal ? getDriver(opts.terminal) : await detectTerminal();
 
   // The title stays the workspace even for a named session: cmux groups tabs by it, so naming the
