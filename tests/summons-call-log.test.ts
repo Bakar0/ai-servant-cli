@@ -311,6 +311,62 @@ describe("a Summons records every Delegation, and which session carries it", () 
   });
 });
 
+describe("a Summons records what its Hands session did", () => {
+  const hands = (ask: (request: string) => Promise<string>) => ({ ask, end: async () => {} });
+  const askHands = (emit: (e: RealtimeInbound) => Promise<void>, request: string) =>
+    emit(call("ask_hands", { request }, "call_h"));
+
+  test("what it was asked, what it came back with, and how long it took", async () => {
+    const { session, emit, of } = summoned({
+      timers: tickingTimers(500),
+      hands: hands(async () => "3 tests failed, all in the parser"),
+    });
+    await session.start();
+
+    await askHands(emit, "run the unit tests");
+
+    expect(of("hands")).toEqual([
+      {
+        type: "hands",
+        request: "run the unit tests",
+        response: "3 tests failed, all in the parser",
+        outcome: "ok",
+        durationMs: 500,
+      },
+    ]);
+  });
+
+  test("a request that failed, which is the case nothing else would show", async () => {
+    const { session, emit, of } = summoned({
+      hands: hands(async () => {
+        throw new Error("claude exited 1");
+      }),
+    });
+    await session.start();
+
+    await askHands(emit, "run the unit tests");
+
+    expect(of("hands")[0]).toMatchObject({
+      request: "run the unit tests",
+      outcome: "error",
+      response: "claude exited 1",
+    });
+  });
+
+  test("as a Hands entry alone — it is not a Delegation, and carries no ticket to claim", async () => {
+    const { actions, launched } = fakeActions();
+    const { session, emit, of } = summoned({ actions, hands: hands(async () => "done") });
+    await session.start();
+
+    await askHands(emit, "run the unit tests");
+
+    expect(launched).toEqual([]);
+    expect(of("delegation")).toEqual([]);
+    expect(of("tool")).toEqual([]);
+    expect(of("hands")).toHaveLength(1);
+  });
+});
+
 describe("a Summons records how it ended", () => {
   test("hanging up", async () => {
     const { session, of } = summoned();

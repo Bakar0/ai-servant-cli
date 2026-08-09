@@ -146,6 +146,49 @@ export const DELEGATION_TOOLS: readonly SummonsTool[] = [
   },
 ];
 
+/**
+ * The Summons agent's own hands: one Claude session it keeps for small, ad-hoc work — running the
+ * tests, reading `git blame`, checking whether a change compiles. Ticket-scale work is a Delegation
+ * and gets its own tab; this is the stuff that is too heavy for a local read and not worth a tab.
+ *
+ * `ask` is one request and one response, so the answer comes back in the same breath the question
+ * went out in. The session behind it is spawned lazily by the adapter — a Summons where nothing
+ * ever needs hands never starts one — and keeps its thread across calls, so the second small job
+ * arrives already knowing about the first (workspace ADR 0010).
+ */
+export interface HandsPort {
+  /** Ask, and get the answer back. Rejects when the call itself failed. */
+  ask(request: string): Promise<string>;
+  /** Ends the session with the Summons that owns it. A no-op if nothing was ever asked. */
+  end(): Promise<void>;
+}
+
+/**
+ * Reaching the Hands session. Not Guarded, and deliberately: what the confirm-gate protects is a
+ * *fresh session going off to work unwatched*, and this is a question answered inside the
+ * conversation, before the next sentence. The Call log is what keeps it honest — every round-trip
+ * is recorded with what was asked and what came back, which is the only place a headless session's
+ * work is visible at all (workspace ADR 0010, decision 7).
+ */
+export const HANDS_TOOLS: readonly SummonsTool[] = [
+  {
+    name: "ask_hands",
+    description:
+      "Ask your hands — a Claude session kept for this conversation — to do one small job and tell you the answer: run the tests, check whether that compiles, look at what git blame says. It answers immediately, in one round trip, so use it for anything you need the result of before you can say the next sentence. It remembers the earlier things you asked it, so you can refer back to them. For work that carries a ticket, or that you would want to watch in its own tab, use delegate instead.",
+    parameters: {
+      type: "object",
+      properties: {
+        request: {
+          type: "string",
+          description:
+            "What to do, written out for someone who cannot hear this conversation. Say what would count as an answer, since what comes back is what you read out.",
+        },
+      },
+      required: ["request"],
+    },
+  },
+];
+
 /** What the user asked for, once the agent has written it down as an instruction. */
 export interface DelegationRequest {
   task: string;
@@ -291,6 +334,8 @@ export interface SummonsSessionOptions {
   reader: WorkspaceReader;
   /** Omitted, the session can still talk and read — it just has nothing to delegate work to. */
   actions?: SummonsActions | undefined;
+  /** Omitted, the agent has no hands: it can talk, read and delegate, and nothing else. */
+  hands?: HandsPort | undefined;
   audio?: AudioPort | undefined;
   instructions: string;
   model?: string | undefined;
@@ -765,6 +810,51 @@ export function createSummonsSession(opts: SummonsSessionOptions): SummonsSessio
   /** The utterance the server is currently hearing — the gate's evidence of what came from where. */
   let lastUserItemId: string | null = null;
 
+  /**
+   * One round trip to the Hands session. The record is written whatever happened — a request that
+   * failed is exactly the case the user cannot see any other way, so the failure goes where the
+   * answer would have gone.
+   */
+  async function handleHandsCall(
+    call: Extract<RealtimeInbound, { type: "tool_call" }>,
+    startedAt: number,
+  ): Promise<void> {
+    let request = "";
+    const fail = (detail: string) => {
+      opts.transport.sendToolResult(call.callId, JSON.stringify({ error: detail }));
+      log.record({
+        type: "hands",
+        request,
+        response: detail,
+        outcome: "error",
+        durationMs: timers.now() - startedAt,
+      });
+    };
+    try {
+      request = requireString(parseArgs(call.args, call.name), "request", call.name);
+    } catch (err) {
+      fail(err instanceof Error ? err.message : String(err));
+      return;
+    }
+    if (!opts.hands) {
+      fail("This Summons has no hands — it was started without a Hands session.");
+      return;
+    }
+    try {
+      const answer = await opts.hands.ask(request);
+      opts.transport.sendToolResult(call.callId, JSON.stringify({ answer }));
+      log.record({
+        type: "hands",
+        request,
+        response: answer,
+        outcome: "ok",
+        durationMs: timers.now() - startedAt,
+      });
+    } catch (err) {
+      fail(err instanceof Error ? err.message : String(err));
+    }
+  }
+
   // Tool failures are conversation, not crashes: the agent hears what went wrong and can say so.
   async function handleToolCall(call: Extract<RealtimeInbound, { type: "tool_call" }>) {
     const startedAt = timers.now();
@@ -779,6 +869,14 @@ export function createSummonsSession(opts: SummonsSessionOptions): SummonsSessio
         durationMs: timers.now() - startedAt,
         ...(detail ? { detail } : {}),
       });
+
+    // The Hands session is recorded as a `hands` entry rather than a `tool` one: what was asked and
+    // what came back *is* the record of the call, and the round trip is the only trace a session
+    // with no tab leaves anywhere (workspace ADR 0010).
+    if (call.name === "ask_hands") {
+      await handleHandsCall(call, startedAt);
+      return;
+    }
 
     // `delegate` and `research` answer their own call — the first from inside the gate once the
     // user has spoken, the second as soon as it has launched. Neither returns a result here.
@@ -807,6 +905,19 @@ export function createSummonsSession(opts: SummonsSessionOptions): SummonsSessio
   async function stop(reason: CallLogEndReason = "hung up"): Promise<void> {
     if (stopped) return;
     stopped = true;
+    // The Hands session belongs to the conversation, not the machine — one that outlived its
+    // Summons would belong to nobody. Ended before the record is closed off, so a session that
+    // will not die lands in the log rather than after the end of it; and swallowed, because a
+    // Summons that cannot hang up is worse than a stray headless session.
+    try {
+      await opts.hands?.end();
+    } catch (err) {
+      log.record({
+        type: "note",
+        level: "error",
+        text: `The Hands session did not end cleanly: ${err instanceof Error ? err.message : String(err)}`,
+      });
+    }
     log.record({ type: "ended", reason });
     timers.clearTimeout(idleHandle);
     idleHandle = null;
@@ -863,9 +974,13 @@ export function createSummonsSession(opts: SummonsSessionOptions): SummonsSessio
           model: opts.model || DEFAULT_SUMMONS_MODEL,
           voice: opts.voice || DEFAULT_SUMMONS_VOICE,
           instructions: opts.instructions,
-          // Offered only when there is something to delegate to, so the agent is never holding a
-          // tool that cannot work.
-          tools: opts.actions ? [...SUMMONS_TOOLS, ...DELEGATION_TOOLS] : SUMMONS_TOOLS,
+          // Each group is offered only when there is something behind it, so the agent is never
+          // holding a tool that cannot work.
+          tools: [
+            ...SUMMONS_TOOLS,
+            ...(opts.actions ? DELEGATION_TOOLS : []),
+            ...(opts.hands ? HANDS_TOOLS : []),
+          ],
         },
         handleInbound,
       );

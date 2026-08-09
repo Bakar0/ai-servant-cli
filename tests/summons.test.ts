@@ -3,6 +3,7 @@ import {
   type AudioPort,
   type DelegationReport,
   type DelegationRequest,
+  type HandsPort,
   type RealtimeInbound,
   type RealtimeSessionSpec,
   type RealtimeTransport,
@@ -657,6 +658,127 @@ describe("what a delegated session is told", () => {
 
     expect(launched[0]?.conversation).toContain("user: the parser keeps choking on unicode");
     expect(launched[0]?.conversation).toContain("servant: want me to put Claude on it?");
+  });
+});
+
+describe("the Summons agent's own hands", () => {
+  /** A fake Hands session: records what it was asked, never spawns anything. */
+  function fakeHands(overrides: Partial<HandsPort> = {}) {
+    const asked: string[] = [];
+    const state = { ended: 0 };
+    const hands: HandsPort = {
+      async ask(request) {
+        asked.push(request);
+        return `did it: ${request}`;
+      },
+      async end() {
+        state.ended += 1;
+      },
+      ...overrides,
+    };
+    return { hands, asked, state };
+  }
+
+  async function summoned(handsOverrides: Partial<HandsPort> = {}) {
+    const { transport, state, emit } = fakeTransport();
+    const { actions, launched } = fakeActions();
+    const { hands, asked, state: handsState } = fakeHands(handsOverrides);
+    const session = createSummonsSession({
+      transport,
+      reader: fakeReader().reader,
+      actions,
+      hands,
+      instructions: "hi",
+    });
+    await session.start();
+    return { state, emit, session, asked, handsState, launched };
+  }
+
+  const ask = (emit: (e: RealtimeInbound) => Promise<void>, request: string, callId = "h1") =>
+    emit({ type: "tool_call", callId, name: "ask_hands", args: JSON.stringify({ request }) });
+
+  test("the hands tool is offered only when there is a Hands session to reach", async () => {
+    const { state } = await summoned();
+    expect((state.spec?.tools ?? []).map((t) => t.name)).toContain("ask_hands");
+
+    const { transport, state: bare } = fakeTransport();
+    await createSummonsSession({
+      transport,
+      reader: fakeReader().reader,
+      instructions: "hi",
+    }).start();
+    expect((bare.spec?.tools ?? []).map((t) => t.name)).not.toContain("ask_hands");
+  });
+
+  test("asking gets the answer straight back, in the same breath", async () => {
+    const { state, emit, asked } = await summoned();
+
+    await ask(emit, "run the unit tests and tell me what fails");
+
+    expect(asked).toEqual(["run the unit tests and tell me what fails"]);
+    expect(outputFor(state.toolResults, "h1")).toEqual({
+      answer: "did it: run the unit tests and tell me what fails",
+    });
+  });
+
+  test("a second request goes to the same hands, so it can be referred back to", async () => {
+    const { emit, asked } = await summoned();
+
+    await ask(emit, "what does git blame say about summons.ts");
+    await ask(emit, "and the line above the one you just read", "h2");
+
+    expect(asked).toEqual([
+      "what does git blame say about summons.ts",
+      "and the line above the one you just read",
+    ]);
+  });
+
+  test("a conversation that never needs hands never touches them", async () => {
+    const { emit, asked, handsState } = await summoned();
+
+    await emit({ type: "user_transcript", text: "what's the goal of this workspace" });
+    await emit({
+      type: "tool_call",
+      callId: "r1",
+      name: "read_file",
+      args: JSON.stringify({ path: "GOAL.md" }),
+    });
+
+    expect(asked).toEqual([]);
+    expect(handsState.ended).toBe(0);
+  });
+
+  test("hanging up ends the Hands session — it belongs to the conversation, not the machine", async () => {
+    const { session, emit, handsState } = await summoned();
+
+    await ask(emit, "run the tests");
+    await session.stop();
+
+    expect(handsState.ended).toBe(1);
+  });
+
+  test("a Hands session that will not end does not keep the Summons open", async () => {
+    const { session, state } = await summoned({
+      async end() {
+        throw new Error("already gone");
+      },
+    });
+
+    await session.stop();
+
+    expect(state.closed).toBe(true);
+  });
+
+  test("a failed request is answered as an error rather than left unanswered", async () => {
+    const { state, emit } = await summoned({
+      async ask() {
+        throw new Error("claude exited 1");
+      },
+    });
+
+    await ask(emit, "run the tests");
+
+    expect(outputFor(state.toolResults, "h1")).toEqual({ error: "claude exited 1" });
   });
 });
 
