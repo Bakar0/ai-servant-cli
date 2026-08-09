@@ -137,6 +137,7 @@ describe("rendering a call log", () => {
     expect(blocks.length).toBeGreaterThan(0);
     // Parsed, never run: there is no DOM here, and the point is to catch a typo that would leave
     // the reader looking at an empty page with the whole record sitting unused in the data slot.
-    for (const block of blocks) expect(() => new Function(block)).not.toThrow();
+    const transpiler = new Bun.Transpiler({ loader: "js" });
+    for (const block of blocks) expect(() => transpiler.transformSync(block)).not.toThrow();
   });
 });
