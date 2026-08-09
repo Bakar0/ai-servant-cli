@@ -1,0 +1,356 @@
+// What a Summons puts in its Call log, asserted at the controller seam — a fake Realtime transport
+// in, a fake Call log port out. No socket, no disk, no terminal.
+
+import { describe, expect, test } from "bun:test";
+import type { CallLogEntry } from "../src/core/call-log/record.ts";
+import {
+  type DelegationRequest,
+  type RealtimeInbound,
+  type RealtimeTransport,
+  type SummonsActions,
+  type SummonsSessionOptions,
+  type TimerPort,
+  type WorkspaceReader,
+  createSummonsSession,
+} from "../src/core/summons.ts";
+
+function fakeTransport() {
+  let emit: (event: RealtimeInbound) => Promise<void> = async () => {};
+  const transport: RealtimeTransport = {
+    async connect(_spec, onInbound) {
+      emit = onInbound;
+    },
+    sendAudio() {},
+    sendToolResult() {},
+    sendAgentNote() {},
+    async close() {},
+  };
+  return { transport, emit: (event: RealtimeInbound) => emit(event) };
+}
+
+function fakeReader(overrides: Partial<WorkspaceReader> = {}): WorkspaceReader {
+  return {
+    async readFile(path) {
+      return `contents of ${path}`;
+    },
+    async glob() {
+      return ["docs/adr/0009-talk.md"];
+    },
+    async grep() {
+      return ["GOAL.md:3: ship the thing"];
+    },
+    ...overrides,
+  };
+}
+
+function fakeActions(overrides: Partial<SummonsActions> = {}) {
+  const launched: DelegationRequest[] = [];
+  const actions: SummonsActions = {
+    async delegate(request) {
+      launched.push(request);
+      return {
+        label: request.label,
+        sessionName: request.ticket ? `demo-t${request.ticket}` : `demo-${launched.length}`,
+        ticket: request.ticket,
+        repo: request.repo,
+      };
+    },
+    async observe() {
+      return { status: "running" as const, latest: "working on it", turns: 3 };
+    },
+    ...overrides,
+  };
+  return { actions, launched };
+}
+
+/** A clock that ticks a fixed amount per read, so recorded durations are exact. */
+function tickingTimers(stepMs: number): TimerPort {
+  let now = 0;
+  return {
+    now: () => {
+      const at = now;
+      now += stepMs;
+      return at;
+    },
+    setTimeout: () => 1,
+    clearTimeout: () => {},
+  };
+}
+
+function summoned(opts: Partial<SummonsSessionOptions> = {}) {
+  const { transport, emit } = fakeTransport();
+  const recorded: CallLogEntry[] = [];
+  const session = createSummonsSession({
+    transport,
+    reader: fakeReader(),
+    instructions: "hi",
+    idleTimeoutMs: 0,
+    callLog: { record: (entry) => recorded.push(entry) },
+    ...opts,
+  });
+  const of = <T extends CallLogEntry["type"]>(type: T) =>
+    recorded.filter((e) => e.type === type) as Extract<CallLogEntry, { type: T }>[];
+  return { session, emit, recorded, of };
+}
+
+const call = (name: string, args: Record<string, unknown>, callId = "call_1") =>
+  ({ type: "tool_call", callId, name, args: JSON.stringify(args) }) as RealtimeInbound;
+
+describe("a Summons records what was said", () => {
+  test("both sides, in the order they were spoken", async () => {
+    const { session, emit, of } = summoned();
+    await session.start();
+
+    await emit({ type: "user_transcript", text: "how's the ticket going" });
+    await emit({ type: "assistant_transcript", text: "mid-implement" });
+
+    expect(of("said")).toEqual([
+      { type: "said", who: "user", text: "how's the ticket going" },
+      { type: "said", who: "servant", text: "mid-implement" },
+    ]);
+  });
+
+  test("nothing at all when the Summons was given no Call log", async () => {
+    const { transport, emit } = fakeTransport();
+    const session = createSummonsSession({
+      transport,
+      reader: fakeReader(),
+      instructions: "hi",
+      idleTimeoutMs: 0,
+    });
+    await session.start();
+    await expect(emit({ type: "user_transcript", text: "hi" })).resolves.toBeUndefined();
+  });
+});
+
+describe("a Summons records every tool it calls", () => {
+  test("with the thing it touched, and how long it took", async () => {
+    const { session, emit, of } = summoned({ timers: tickingTimers(10) });
+    await session.start();
+
+    await emit(call("read_file", { path: "GOAL.md" }));
+
+    expect(of("tool")).toEqual([
+      { type: "tool", name: "read_file", target: "GOAL.md", outcome: "ok", durationMs: 10 },
+    ]);
+  });
+
+  test("including the pattern a search ran, not just that a search ran", async () => {
+    const { session, emit, of } = summoned();
+    await session.start();
+
+    await emit(call("glob", { pattern: "docs/**/*.md" }));
+    await emit(call("grep", { pattern: "createSummonsSession" }, "call_2"));
+
+    expect(of("tool").map((t) => t.target)).toEqual(["docs/**/*.md", "createSummonsSession"]);
+  });
+
+  test("and what went wrong when one fails", async () => {
+    const { session, emit, of } = summoned({
+      reader: fakeReader({
+        async readFile() {
+          throw new Error("no such file");
+        },
+      }),
+    });
+    await session.start();
+
+    await emit(call("read_file", { path: "nope.md" }));
+
+    expect(of("tool")[0]).toMatchObject({ outcome: "error", detail: "no such file" });
+  });
+
+  test("even when the arguments were unreadable", async () => {
+    const { session, emit, of } = summoned();
+    await session.start();
+
+    await emit({ type: "tool_call", callId: "call_x", name: "read_file", args: "{not json" });
+
+    expect(of("tool")[0]).toMatchObject({ target: "(unreadable arguments)", outcome: "error" });
+  });
+});
+
+describe("a Summons records the confirm-gate and what it released", () => {
+  const propose = (emit: (e: RealtimeInbound) => Promise<void>, args: Record<string, unknown>) =>
+    emit(call("delegate", args, "call_d"));
+
+  test("a proposal is recorded as held — nothing has run", async () => {
+    const { session, emit, of } = summoned({ actions: fakeActions().actions });
+    await session.start();
+
+    await propose(emit, { task: "refactor auth", label: "the auth refactor" });
+
+    expect(of("tool")[0]).toMatchObject({ name: "delegate", outcome: "held" });
+    expect(of("delegation")).toEqual([]);
+  });
+
+  test("the verdict is recorded with the words it was read from", async () => {
+    const { session, emit, of } = summoned({ actions: fakeActions().actions });
+    await session.start();
+
+    await propose(emit, { task: "refactor auth", label: "the auth refactor" });
+    await emit({ type: "user_transcript", text: "yeah go ahead" });
+
+    expect(of("gate")).toEqual([
+      { type: "gate", label: "the auth refactor", verdict: "confirmed", heard: "yeah go ahead" },
+    ]);
+  });
+
+  test("a declined delegation leaves a gate entry and no delegation", async () => {
+    const { session, emit, of } = summoned({ actions: fakeActions().actions });
+    await session.start();
+
+    await propose(emit, { task: "refactor auth", label: "the auth refactor" });
+    await emit({ type: "user_transcript", text: "no, don't" });
+
+    expect(of("gate")[0]).toMatchObject({ verdict: "declined" });
+    expect(of("delegation")).toEqual([]);
+  });
+
+  test("an unclear answer is recorded as unclear, so the record shows what was heard", async () => {
+    const { session, emit, of } = summoned({ actions: fakeActions().actions });
+    await session.start();
+
+    await propose(emit, { task: "refactor auth", label: "the auth refactor" });
+    await emit({ type: "user_transcript", text: "hmm hold on what was that" });
+
+    expect(of("gate")[0]).toMatchObject({ verdict: "unclear" });
+    expect(of("delegation")).toEqual([]);
+  });
+});
+
+describe("a Summons records every Delegation, and which session carries it", () => {
+  test("a confirmed delegation, with the session it was spawned into", async () => {
+    const { session, emit, of } = summoned({ actions: fakeActions().actions });
+    await session.start();
+
+    await emit(
+      call("delegate", { task: "refactor auth", label: "the auth refactor", ticket: 28 }, "call_d"),
+    );
+    await emit({ type: "user_transcript", text: "yes please" });
+
+    expect(of("delegation")).toEqual([
+      {
+        type: "delegation",
+        mode: "delegate",
+        label: "the auth refactor",
+        task: "refactor auth",
+        session: "demo-t28",
+        status: "launched",
+        ticket: 28,
+      },
+    ]);
+  });
+
+  test("a read-only Delegation, which launches with no gate at all", async () => {
+    const { session, emit, of } = summoned({ actions: fakeActions().actions });
+    await session.start();
+
+    await emit(
+      call("research", { task: "how does the parser work", label: "the parser question" }),
+    );
+
+    expect(of("gate")).toEqual([]);
+    expect(of("delegation")[0]).toMatchObject({
+      mode: "research",
+      status: "launched",
+      session: "demo-1",
+    });
+    expect(of("tool")[0]).toMatchObject({
+      name: "research",
+      target: "the parser question",
+      outcome: "ok",
+    });
+  });
+
+  test("one queued behind another on the same repo, which is not running yet", async () => {
+    const { session, emit, of } = summoned({ actions: fakeActions().actions });
+    await session.start();
+
+    await emit(call("research", { task: "a", label: "first", repo: "api" }, "call_1"));
+    await emit(call("research", { task: "b", label: "second", repo: "api" }, "call_2"));
+
+    expect(of("delegation")[1]).toMatchObject({
+      label: "second",
+      status: "queued",
+      session: null,
+      detail: "first",
+    });
+  });
+
+  test("a nameless session is recorded as no session, not as a blank address", async () => {
+    const { actions } = fakeActions({
+      async delegate(request) {
+        return { label: request.label, sessionName: "" };
+      },
+    });
+    const { session, emit, of } = summoned({ actions });
+    await session.start();
+
+    await emit(call("research", { task: "a", label: "the nameless one" }));
+
+    expect(of("delegation")[0]).toMatchObject({ status: "launched", session: null });
+  });
+
+  test("a launch that failed, so the record never implies work is running", async () => {
+    const { actions } = fakeActions({
+      async delegate() {
+        throw new Error("no terminal available");
+      },
+    });
+    const { session, emit, of } = summoned({ actions });
+    await session.start();
+
+    await emit(call("research", { task: "a", label: "the doomed one" }));
+
+    expect(of("delegation")[0]).toMatchObject({
+      status: "failed",
+      session: null,
+      detail: "no terminal available",
+    });
+  });
+});
+
+describe("a Summons records how it ended", () => {
+  test("hanging up", async () => {
+    const { session, of } = summoned();
+    await session.start();
+    await session.stop();
+
+    expect(of("ended")).toEqual([{ type: "ended", reason: "hung up" }]);
+  });
+
+  test("the socket going away", async () => {
+    const { session, emit, of } = summoned();
+    await session.start();
+    await emit({ type: "closed" });
+
+    expect(of("ended")).toEqual([{ type: "ended", reason: "closed" }]);
+  });
+
+  test("hanging itself up on silence", async () => {
+    let fire: (() => void) | null = null;
+    const timers: TimerPort = {
+      now: () => 0,
+      setTimeout: (fn) => {
+        fire = fn;
+        return 1;
+      },
+      clearTimeout: () => {},
+    };
+    const { session, of } = summoned({ timers, idleTimeoutMs: 180_000 });
+    await session.start();
+    (fire as unknown as () => void)();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(of("ended")).toEqual([{ type: "ended", reason: "idle" }]);
+  });
+
+  test("an API error the user would otherwise only have heard as silence", async () => {
+    const { session, emit, of } = summoned();
+    await session.start();
+    await emit({ type: "error", message: "rate limited" });
+
+    expect(of("note")).toEqual([{ type: "note", level: "error", text: "rate limited" }]);
+  });
+});

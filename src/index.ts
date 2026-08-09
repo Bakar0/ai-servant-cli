@@ -1,5 +1,6 @@
 #!/usr/bin/env bun
 import { defineCommand, runMain } from "citty";
+import { callLogCommand } from "./commands/call-log.ts";
 import { claimCommand } from "./commands/claim.ts";
 import { dashboardCommand } from "./commands/dashboard.ts";
 import { extractMemoriesCommand } from "./commands/extract-memories.ts";
@@ -27,6 +28,7 @@ const main = defineCommand({
     init: initCommand,
     spawn: spawnCommand,
     summon: summonCommand,
+    "call-log": callLogCommand,
     repo: repoCommand,
     resume: resumeCommand,
     dashboard: dashboardCommand,

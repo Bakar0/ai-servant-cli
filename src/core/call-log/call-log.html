@@ -1,0 +1,272 @@
+<!--
+  servant Call log — a self-contained, OFFLINE reading of one past Summons.
+
+  Hard rules (enforced by tests, mirroring `servant dashboard` and insights --deep):
+   - No network requests: no CDN-loaded scripts/stylesheets, no remote fonts/images, no fetch/XHR.
+   - All styling is inline below; the CLI renderer fills exactly ONE slot — the JSON sentinel inside
+     script#call-log-data. It writes no markup per run; this file owns all of it, and the timeline
+     below is built by inline JS reading that embedded payload.
+
+  The page is a transcript, not a dashboard: one column, strictly in the order things happened,
+  because "what happened, and in what order" is the only question a Call log is opened to answer.
+-->
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>servant call log</title>
+
+<style>
+  :root {
+    --bg: #0c0d14;
+    --panel: #14161e;
+    --raised: #191c25;
+    --line: #262a37;
+    --line-soft: #20232e;
+    --ink: #e8e9ef;
+    --ink-2: #cfd2e0;
+    --muted: #9a9cb0;
+    --dim: #6a6d80;
+    --faint: #595c70;
+    --accent: #6e32e0;
+    --accent-ink: #b69bff;
+    --cyan: #84e4db;
+    --green: #20d474;
+    --green-ink: #3ee08a;
+    --amber: #f2c94c;
+    --red: #ff6b6b;
+    --radius: 8px;
+    --mono: ui-monospace, "JetBrains Mono", SFMono-Regular, Menlo, Consolas, monospace;
+    --sans: Figtree, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--ink);
+    font: 14px/1.6 var(--sans);
+    -webkit-font-smoothing: antialiased;
+  }
+  .mono { font-family: var(--mono); }
+  ::-webkit-scrollbar { width: 10px; height: 10px; }
+  ::-webkit-scrollbar-thumb { background: #2c3040; border-radius: 6px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+
+  header.masthead {
+    position: sticky; top: 0; z-index: 5;
+    background: rgba(12, 13, 20, 0.88); backdrop-filter: blur(8px);
+    border-bottom: 1px solid var(--line-soft);
+    padding: 16px 32px;
+    display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap;
+  }
+  .brand { display: flex; align-items: center; gap: 14px; min-width: 0; }
+  .mark {
+    width: 30px; height: 30px; border-radius: 7px; flex-shrink: 0;
+    background: linear-gradient(135deg, var(--accent) 15%, var(--cyan) 100%);
+    display: inline-flex; align-items: center; justify-content: center;
+    color: #fff; font-weight: 700; font-size: 15px;
+  }
+  .brand .lines { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+  .brand .title { font-size: 14px; color: var(--ink-2); }
+  .brand .title span { color: var(--faint); }
+  .brand .lead { font-size: 12px; color: var(--dim); font-family: var(--mono); }
+
+  .facts { display: flex; gap: 10px; flex-wrap: wrap; }
+  .fact {
+    display: inline-flex; align-items: baseline; gap: 7px;
+    font-size: 12px; color: var(--ink-2);
+    background: var(--raised); border: 1px solid #2a2f3d; border-radius: 6px;
+    padding: 5px 11px;
+  }
+  .fact b { font-weight: 600; }
+  .fact span { color: var(--faint); }
+
+  .wrap { max-width: 940px; margin: 0 auto; padding: 24px 32px 72px; }
+
+  .banner {
+    border: 1px solid #3a3320; background: #1d1a12; color: var(--amber);
+    border-radius: var(--radius); padding: 10px 14px; font-size: 13px; margin-bottom: 20px;
+  }
+
+  /* ── timeline ─────────────────────────────────────────────────────────────── */
+  ol.timeline { list-style: none; margin: 0; padding: 0; }
+  li.row { display: grid; grid-template-columns: 78px 1fr; gap: 14px; padding: 3px 0; }
+  li.row .when {
+    font-family: var(--mono); font-size: 11px; color: var(--faint);
+    padding-top: 5px; text-align: right; white-space: nowrap;
+  }
+
+  .said { border-radius: var(--radius); padding: 8px 14px; border: 1px solid transparent; }
+  .said .who {
+    font-size: 11px; letter-spacing: .08em; text-transform: uppercase;
+    color: var(--dim); margin-bottom: 2px;
+  }
+  .said .text { white-space: pre-wrap; color: var(--ink); }
+  .said.user { background: var(--panel); border-color: var(--line-soft); }
+  .said.servant { background: rgba(110, 50, 224, 0.10); border-color: #2e2450; }
+  .said.servant .who { color: var(--accent-ink); }
+
+  .act {
+    display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap;
+    font-family: var(--mono); font-size: 12.5px;
+    padding: 5px 14px; border-left: 2px solid var(--line); color: var(--muted);
+  }
+  .act .glyph { color: var(--dim); }
+  .act .name { color: var(--cyan); }
+  .act .target { color: var(--ink-2); word-break: break-all; }
+  .act .out { color: var(--dim); margin-left: auto; white-space: nowrap; }
+  .act.bad { border-left-color: var(--red); }
+  .act.bad .out { color: var(--red); }
+  .act.good { border-left-color: var(--green); }
+  .act.good .out { color: var(--green-ink); }
+  .act.held { border-left-color: var(--amber); }
+  .act.held .out { color: var(--amber); }
+  .act .detail { flex-basis: 100%; color: var(--faint); font-size: 12px; }
+
+  .end { color: var(--dim); font-size: 12.5px; padding: 14px 14px 0; border-top: 1px solid var(--line-soft); margin-top: 18px; }
+  .empty { color: var(--dim); padding: 40px 0; text-align: center; }
+</style>
+
+<header class="masthead">
+  <div class="brand">
+    <div class="mark">◍</div>
+    <div class="lines">
+      <div class="title">servant <span>/</span> call log</div>
+      <div class="lead" id="log-id"></div>
+    </div>
+  </div>
+  <div class="facts" id="facts"></div>
+</header>
+
+<div class="wrap">
+  <div id="banner"></div>
+  <ol class="timeline" id="timeline"></ol>
+  <div class="end" id="end"></div>
+</div>
+
+<script id="call-log-data" type="application/json">__CALL_LOG_DATA__</script>
+
+<script>
+  "use strict";
+  // Read the injected payload (no network, no deps). Every element below is built from it.
+  var DATA = JSON.parse(document.getElementById("call-log-data").textContent || "{}");
+  var SUMMARY = DATA.summary || {};
+  var ENTRIES = DATA.entries || [];
+
+  function el(tag, attrs, kids) {
+    var n = document.createElement(tag);
+    if (attrs) for (var key in attrs) {
+      if (key === "class") n.className = attrs[key];
+      else if (key === "text") n.textContent = attrs[key];
+      else n.setAttribute(key, attrs[key]);
+    }
+    if (kids != null) (Array.isArray(kids) ? kids : [kids]).forEach(function (c) {
+      if (c == null || c === false) return;
+      n.appendChild(typeof c === "string" ? document.createTextNode(c) : c);
+    });
+    return n;
+  }
+
+  function clockOf(iso) {
+    var d = new Date(iso);
+    if (isNaN(d.getTime())) return "";
+    function two(n) { return String(n).padStart(2, "0"); }
+    return two(d.getHours()) + ":" + two(d.getMinutes()) + ":" + two(d.getSeconds());
+  }
+
+  function fact(label, value) {
+    return el("div", { class: "fact" }, [el("span", { text: label }), el("b", { text: value })]);
+  }
+
+  function duration(ms) {
+    if (typeof ms !== "number" || !isFinite(ms) || ms <= 0) return "0ms";
+    if (ms < 1000) return Math.round(ms) + "ms";
+    if (ms < 60000) return (ms / 1000).toFixed(1) + "s";
+    return Math.round(ms / 60000) + "m " + Math.round((ms % 60000) / 1000) + "s";
+  }
+
+  // ── header ─────────────────────────────────────────────────────────────────
+  document.getElementById("log-id").textContent = SUMMARY.id || "";
+  document.title = "servant call log — " + (SUMMARY.id || "");
+  var facts = document.getElementById("facts");
+  facts.appendChild(fact("workspace", SUMMARY.workspace || "—"));
+  facts.appendChild(fact("scope", SUMMARY.scope || "—"));
+  if (SUMMARY.startedAt) facts.appendChild(fact("started", new Date(SUMMARY.startedAt).toLocaleString()));
+  if (typeof SUMMARY.durationMs === "number") facts.appendChild(fact("lasted", duration(SUMMARY.durationMs)));
+  facts.appendChild(fact("model", SUMMARY.model || "—"));
+
+  // A record with no ending was cut off — say so, rather than letting it read as a tidy finish.
+  if (!SUMMARY.endReason) {
+    document.getElementById("banner").appendChild(el("div", {
+      class: "banner",
+      text: "This Summons has no ending recorded — the process was killed mid-conversation. Everything up to that point is below.",
+    }));
+  }
+
+  // ── timeline ───────────────────────────────────────────────────────────────
+  function saidRow(entry) {
+    return el("div", { class: "said " + (entry.who === "user" ? "user" : "servant") }, [
+      el("div", { class: "who", text: entry.who === "user" ? "you" : "servant" }),
+      el("div", { class: "text", text: entry.text || "" }),
+    ]);
+  }
+
+  function actRow(glyph, tone, name, target, outcome, detail) {
+    return el("div", { class: "act" + (tone ? " " + tone : "") }, [
+      el("span", { class: "glyph", text: glyph }),
+      el("span", { class: "name", text: name }),
+      el("span", { class: "target", text: target || "" }),
+      el("span", { class: "out", text: outcome || "" }),
+      detail ? el("span", { class: "detail", text: detail }) : null,
+    ]);
+  }
+
+  function bodyFor(entry) {
+    switch (entry.type) {
+      case "said":
+        return saidRow(entry);
+      case "tool":
+        return actRow("⚙", entry.outcome === "error" ? "bad" : entry.outcome === "held" ? "held" : "",
+          entry.name, entry.target,
+          entry.outcome === "ok" ? duration(entry.durationMs)
+            : entry.outcome === "held" ? "held for confirmation" : "failed",
+          entry.detail);
+      case "gate":
+        return actRow("?", entry.verdict === "confirmed" ? "good" : "held",
+          "confirm", '"' + entry.label + '"',
+          entry.verdict, "heard: " + (entry.heard || ""));
+      case "delegation":
+        return actRow("⇒", entry.status === "launched" ? "good" : entry.status === "failed" ? "bad" : "held",
+          entry.mode, '"' + entry.label + '"',
+          entry.status === "launched" ? "→ " + entry.session : entry.status,
+          [entry.task, entry.ticket ? "#" + entry.ticket : null, entry.repo, entry.detail]
+            .filter(Boolean).join(" · "));
+      case "hands":
+        return actRow("⚙", entry.outcome === "error" ? "bad" : "", "hands", entry.request,
+          entry.outcome === "ok" ? duration(entry.durationMs) : "failed", entry.response || "");
+      case "note":
+        return actRow(entry.level === "error" ? "!" : "·", entry.level === "error" ? "bad" : "",
+          entry.level, entry.text, "");
+      default:
+        return null;
+    }
+  }
+
+  var timeline = document.getElementById("timeline");
+  var shown = 0;
+  ENTRIES.forEach(function (entry) {
+    if (entry.type === "opened" || entry.type === "ended") return;
+    var body = bodyFor(entry);
+    if (!body) return;
+    shown++;
+    timeline.appendChild(el("li", { class: "row" }, [
+      el("div", { class: "when", text: clockOf(entry.at) }),
+      body,
+    ]));
+  });
+  if (shown === 0) {
+    timeline.appendChild(el("li", { class: "empty", text: "Nothing was said or done in this Summons." }));
+  }
+
+  document.getElementById("end").textContent = SUMMARY.endReason
+    ? "Summons ended (" + SUMMARY.endReason + ") at " + new Date(SUMMARY.endedAt).toLocaleString()
+    : "No ending recorded.";
+</script>

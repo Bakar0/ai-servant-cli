@@ -1,5 +1,8 @@
 import { existsSync } from "node:fs";
 import { defineCommand } from "citty";
+import { createLiveCallLogView } from "../core/call-log/live.ts";
+import { teeCallLog } from "../core/call-log/record.ts";
+import { openCallLog } from "../core/call-log/store.ts";
 import { requireInit } from "../core/config.ts";
 import { applyRootOverride, workspacePath } from "../core/paths.ts";
 import { readServantEnv } from "../core/servant-env.ts";
@@ -122,6 +125,21 @@ export const summonCommand = defineCommand({
     // Read now, not from a cache: the session must open on the workspace as it is today.
     const snapshot = await readWorkspaceSnapshot(scope);
 
+    // Opened before the socket is: a Summons that dies during the handshake still leaves a record
+    // saying it was attempted. The live view and the durable record are the same entries, fanned
+    // out — what the user watches scroll past is exactly what is kept.
+    const callLog = await openCallLog({
+      workspace,
+      scope: scope.label,
+      model: args.model,
+      voice: args.voice,
+      onWriteError: (message) =>
+        console.error(`servant summon: call log write failed — ${message}`),
+    });
+    const live = createLiveCallLogView({
+      write: (line) => process.stdout.write(`${line}\n`),
+    });
+
     let ended: () => void = () => {};
     const finished = new Promise<void>((resolve) => {
       ended = resolve;
@@ -133,6 +151,7 @@ export const summonCommand = defineCommand({
       // the agent may read out loud, never what Claude is allowed to work on.
       actions: createSummonsActions({ workspace, hubRepo, terminal: args.terminal }),
       audio,
+      callLog: teeCallLog([callLog.port, live]),
       instructions: composeSummonsInstructions(snapshot, briefing),
       model: args.model,
       voice: args.voice,
@@ -151,11 +170,14 @@ export const summonCommand = defineCommand({
     await session.start();
     console.log(
       `servant: talking about workspace "${workspace}" (${scope.label}) — ${snapshot.tickets.length} open ticket(s).\n` +
-        "  The mic is open; just start speaking. Ctrl-C to hang up.",
+        `  Call log: ${callLog.path}\n` +
+        "  The mic is open; just start speaking. Ctrl-C to hang up.\n",
     );
 
     process.on("SIGINT", () => void session.stop());
     await finished;
-    console.log("servant: Summons ended.");
+    // Only the tail is waited on — every entry before it was already on disk when it happened.
+    await callLog.close();
+    console.log(`\nservant: Summons ended. Read it back with:\n  servant call-log ${callLog.id}`);
   },
 });

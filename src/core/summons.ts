@@ -2,6 +2,7 @@
 // single seam the feature is tested at — the Realtime socket, the sox audio pipes and the
 // filesystem all sit outside it as injected ports (see workspace ADR 0009).
 
+import { type CallLogEndReason, type CallLogPort, NULL_CALL_LOG } from "./call-log/record.ts";
 import { classifyConfirmation } from "./summons-confirm.ts";
 
 /** Default Realtime model. Native speech-to-speech, so there is no STT/TTS pipeline in the path. */
@@ -158,7 +159,8 @@ export interface DelegationRequest {
   repo?: string | undefined;
   /**
    * The conversation the request came out of, so the session starts informed rather than from one
-   * decontextualised sentence. Becomes a pointer to the Call log once that exists (majordomo#28).
+   * decontextualised sentence. Kept inline rather than pointed at the Call log: the session must
+   * arrive knowing what was said, not needing to go and read it.
    */
   conversation?: string | undefined;
 }
@@ -296,6 +298,11 @@ export interface SummonsSessionOptions {
   /** Silence window before the session hangs up. 0 (or negative) keeps it open indefinitely. */
   idleTimeoutMs?: number | undefined;
   timers?: TimerPort | undefined;
+  /**
+   * Where the Summons writes its Call log. Omitted, the conversation happens unrecorded — which is
+   * fine for a test and not fine for a Summons with a headless Hands session behind it (ADR 0010).
+   */
+  callLog?: CallLogPort | undefined;
   /** Fires once when the session ends — including when it hangs itself up on silence. */
   onStopped?: (() => void) | undefined;
   /** Called with anything the API reports going wrong, so the user isn't left talking to silence. */
@@ -361,6 +368,12 @@ async function runTool(
 /** How much of the conversation a delegated session is handed, so it starts informed. */
 const CONVERSATION_MEMORY_TURNS = 12;
 
+/**
+ * What a delegation tool did with the call, reported back so the controller can record the tool
+ * call itself — `research` and `delegate` answer their own calls, so it cannot see the result.
+ */
+type ToolOutcome = { outcome: "ok" | "error" | "held"; detail?: string | undefined };
+
 interface TrackedDelegation {
   /** The label lives on the request alone, so it cannot drift from what was delegated. */
   request: DelegationRequest;
@@ -396,6 +409,7 @@ function labelMatches(tracked: string, wanted: string): boolean {
  */
 function createDelegations(opts: SummonsSessionOptions) {
   const actions = opts.actions;
+  const log = opts.callLog ?? NULL_CALL_LOG;
   const tracked: TrackedDelegation[] = [];
   const conversation: string[] = [];
   let pending: { request: DelegationRequest; askedAfterItemId: string | null } | null = null;
@@ -488,6 +502,31 @@ function createDelegations(opts: SummonsSessionOptions) {
     | { launched: true; label: string; session: string }
     | { launched: false; label: string; queuedBehind: string };
 
+  /**
+   * What the Call log says about a delegation. It is the record of the `research`/`delegate` tool
+   * call *and* of the work — which session was spawned is the part that matters later, since the
+   * name is the address the session is reachable at.
+   */
+  function recordDelegation(
+    request: DelegationRequest,
+    result:
+      | { status: "launched"; session: string | null }
+      | { status: "queued"; detail: string }
+      | { status: "failed"; detail: string },
+  ): void {
+    log.record({
+      type: "delegation",
+      mode: request.readOnly ? "research" : "delegate",
+      label: request.label,
+      task: request.task,
+      session: result.status === "launched" ? result.session : null,
+      status: result.status,
+      ...(result.status === "launched" ? {} : { detail: result.detail }),
+      ...(request.ticket ? { ticket: request.ticket } : {}),
+      ...(request.repo ? { repo: request.repo } : {}),
+    });
+  }
+
   /** Track and launch. Throws only if the launch itself failed, leaving nothing tracked. */
   async function dispatch(request: DelegationRequest): Promise<DispatchOutcome> {
     const entry: TrackedDelegation = {
@@ -499,11 +538,21 @@ function createDelegations(opts: SummonsSessionOptions) {
     tracked.push(entry);
     try {
       const outcome = await launchOrQueue(entry);
-      return outcome.started
-        ? { launched: true, label: request.label, session: entry.handle?.sessionName ?? "" }
-        : { launched: false, label: request.label, queuedBehind: outcome.behind };
+      if (outcome.started) {
+        const session = entry.handle?.sessionName ?? "";
+        // `session: null` in the record means "no session to point at", so a nameless launch must
+        // record null rather than an empty string a reader would see as a blank address.
+        recordDelegation(request, { status: "launched", session: session || null });
+        return { launched: true, label: request.label, session };
+      }
+      recordDelegation(request, { status: "queued", detail: outcome.behind });
+      return { launched: false, label: request.label, queuedBehind: outcome.behind };
     } catch (err) {
       tracked.pop();
+      recordDelegation(request, {
+        status: "failed",
+        detail: err instanceof Error ? err.message : String(err),
+      });
       throw err;
     }
   }
@@ -516,14 +565,13 @@ function createDelegations(opts: SummonsSessionOptions) {
      * *change*, and this cannot change anything (see `DELEGATION_TOOLS`). Making the user confirm
      * every question was the cost that made them stop asking questions.
      */
-    async research(callId: string, rawArgs: string): Promise<void> {
+    async research(callId: string, rawArgs: string): Promise<ToolOutcome> {
       const answer = (payload: Record<string, unknown>) =>
         opts.transport.sendToolResult(callId, JSON.stringify(payload));
       if (!actions) {
-        answer({
-          error: "This Summons cannot delegate — it was started without workspace actions.",
-        });
-        return;
+        const error = "This Summons cannot delegate — it was started without workspace actions.";
+        answer({ error });
+        return { outcome: "error", detail: error };
       }
       try {
         const outcome = await dispatch(readRequest(rawArgs, "research", true));
@@ -532,8 +580,11 @@ function createDelegations(opts: SummonsSessionOptions) {
             ? { launched: true, label: outcome.label, session: outcome.session }
             : { launched: false, label: outcome.label, queued_behind: outcome.queuedBehind },
         );
+        return { outcome: "ok" };
       } catch (err) {
-        answer({ error: err instanceof Error ? err.message : String(err) });
+        const detail = err instanceof Error ? err.message : String(err);
+        answer({ error: detail });
+        return { outcome: "error", detail };
       }
     },
 
@@ -543,27 +594,26 @@ function createDelegations(opts: SummonsSessionOptions) {
      * the utterance that *caused* this proposal, so a late transcript of it is not mistaken for
      * the answer to it.
      */
-    propose(callId: string, rawArgs: string, lastUserItemId: string | null): void {
+    propose(callId: string, rawArgs: string, lastUserItemId: string | null): ToolOutcome {
       const answer = (payload: Record<string, unknown>) =>
         opts.transport.sendToolResult(callId, JSON.stringify(payload));
       if (!actions) {
-        answer({
-          error: "This Summons cannot delegate — it was started without workspace actions.",
-        });
-        return;
+        const error = "This Summons cannot delegate — it was started without workspace actions.";
+        answer({ error });
+        return { outcome: "error", detail: error };
       }
       if (pending) {
-        answer({
-          error: `"${pending.request.label}" is already waiting on a yes or no. Get an answer to that first.`,
-        });
-        return;
+        const error = `"${pending.request.label}" is already waiting on a yes or no. Get an answer to that first.`;
+        answer({ error });
+        return { outcome: "error", detail: error };
       }
       let request: DelegationRequest;
       try {
         request = readRequest(rawArgs, "delegate", false);
       } catch (err) {
-        answer({ error: err instanceof Error ? err.message : String(err) });
-        return;
+        const detail = err instanceof Error ? err.message : String(err);
+        answer({ error: detail });
+        return { outcome: "error", detail };
       }
       pending = { request, askedAfterItemId: lastUserItemId };
       answer({
@@ -573,6 +623,7 @@ function createDelegations(opts: SummonsSessionOptions) {
         instruction:
           "Nothing has been launched. Say out loud, in one sentence, what you are about to hand to Claude, then ask the user to answer yes or no. Do not call delegate again — their spoken answer is what decides.",
       });
+      return { outcome: "held", detail: request.label };
     },
 
     /**
@@ -588,6 +639,15 @@ function createDelegations(opts: SummonsSessionOptions) {
       pending = null;
 
       const verdict = classifyConfirmation(text);
+      // Recorded before anything acts on it: the gate's verdict, and the words it was read from,
+      // are the one thing a later reader most needs to check the agent against.
+      log.record({
+        type: "gate",
+        label: held.request.label,
+        verdict:
+          verdict === "negative" ? "declined" : verdict === "unclear" ? "unclear" : "confirmed",
+        heard: text,
+      });
       if (verdict === "negative") {
         opts.transport.sendAgentNote(
           `The user declined "${held.request.label}". Nothing was launched. Acknowledge briefly and move on.`,
@@ -675,9 +735,28 @@ function createDelegations(opts: SummonsSessionOptions) {
   };
 }
 
+/**
+ * The one thing about a tool call worth reading at a glance — the path, the pattern, the label.
+ * Best-effort by design: an unparseable argument blob is a thing to record, not to fail on.
+ */
+function toolTarget(name: string, rawArgs: string): string {
+  let args: Record<string, unknown>;
+  try {
+    args = parseArgs(rawArgs, name);
+  } catch {
+    return "(unreadable arguments)";
+  }
+  for (const key of ["path", "pattern", "label"]) {
+    const value = args[key];
+    if (typeof value === "string" && value.length > 0) return value;
+  }
+  return "";
+}
+
 export function createSummonsSession(opts: SummonsSessionOptions): SummonsSession {
   const timers = opts.timers ?? realTimers;
   const idleTimeoutMs = opts.idleTimeoutMs ?? DEFAULT_SUMMONS_IDLE_TIMEOUT_MS;
+  const log = opts.callLog ?? NULL_CALL_LOG;
   const delegations = createDelegations(opts);
   let idleHandle: unknown = null;
   let stopped = false;
@@ -688,14 +767,27 @@ export function createSummonsSession(opts: SummonsSessionOptions): SummonsSessio
 
   // Tool failures are conversation, not crashes: the agent hears what went wrong and can say so.
   async function handleToolCall(call: Extract<RealtimeInbound, { type: "tool_call" }>) {
+    const startedAt = timers.now();
+    // Every tool call is recorded, whatever it did — the point of the Call log is that nothing the
+    // agent does on the user's behalf happens invisibly.
+    const recordCall = ({ outcome, detail }: ToolOutcome) =>
+      log.record({
+        type: "tool",
+        name: call.name,
+        target: toolTarget(call.name, call.args),
+        outcome,
+        durationMs: timers.now() - startedAt,
+        ...(detail ? { detail } : {}),
+      });
+
     // `delegate` and `research` answer their own call — the first from inside the gate once the
     // user has spoken, the second as soon as it has launched. Neither returns a result here.
     if (call.name === "delegate") {
-      delegations.propose(call.callId, call.args, lastUserItemId);
+      recordCall(delegations.propose(call.callId, call.args, lastUserItemId));
       return;
     }
     if (call.name === "research") {
-      await delegations.research(call.callId, call.args);
+      recordCall(await delegations.research(call.callId, call.args));
       return;
     }
     let result: Record<string, unknown>;
@@ -708,11 +800,14 @@ export function createSummonsSession(opts: SummonsSessionOptions): SummonsSessio
       result = { error: err instanceof Error ? err.message : String(err) };
     }
     opts.transport.sendToolResult(call.callId, JSON.stringify(result));
+    const failure = typeof result.error === "string" ? result.error : null;
+    recordCall(failure ? { outcome: "error", detail: failure } : { outcome: "ok" });
   }
 
-  async function stop(): Promise<void> {
+  async function stop(reason: CallLogEndReason = "hung up"): Promise<void> {
     if (stopped) return;
     stopped = true;
+    log.record({ type: "ended", reason });
     timers.clearTimeout(idleHandle);
     idleHandle = null;
     await opts.audio?.stop();
@@ -723,7 +818,7 @@ export function createSummonsSession(opts: SummonsSessionOptions): SummonsSessio
   function markActive(): void {
     if (stopped || idleTimeoutMs <= 0) return;
     timers.clearTimeout(idleHandle);
-    idleHandle = timers.setTimeout(() => void stop(), idleTimeoutMs);
+    idleHandle = timers.setTimeout(() => void stop("idle"), idleTimeoutMs);
   }
 
   async function handleInbound(event: RealtimeInbound): Promise<void> {
@@ -737,20 +832,23 @@ export function createSummonsSession(opts: SummonsSessionOptions): SummonsSessio
         opts.audio?.play(event.pcm);
         return;
       case "error":
+        log.record({ type: "note", level: "error", text: event.message });
         opts.onError?.(event.message);
         return;
       case "closed":
-        await stop();
+        await stop("closed");
         return;
       case "user_speaking":
         lastUserItemId = event.itemId ?? null;
         return;
       case "user_transcript":
+        log.record({ type: "said", who: "user", text: event.text });
         // The one place a spoken word decides something: releasing a held delegation.
         await delegations.resolve(event.text, event.itemId ?? null);
         delegations.remember("user", event.text);
         return;
       case "assistant_transcript":
+        log.record({ type: "said", who: "servant", text: event.text });
         delegations.remember("servant", event.text);
         return;
       default:
@@ -788,6 +886,8 @@ export function createSummonsSession(opts: SummonsSessionOptions): SummonsSessio
       }
       markActive();
     },
-    stop,
+    // Only the controller knows why a session ended, and the record wants that — so the reason is
+    // internal, and everyone outside is hanging up.
+    stop: () => stop("hung up"),
   };
 }
