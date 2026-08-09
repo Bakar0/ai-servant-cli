@@ -5,6 +5,7 @@
 import { listWorkspaceSessions } from "./claude-session.ts";
 import { claimTicket, releaseTicketClaim } from "./claims.ts";
 import { type SessionLiveness, readSessionLiveness } from "./session-registry.ts";
+import { sessionNameSlug } from "./session-name.ts";
 import { launchWorkspaceSession } from "./spawn.ts";
 import type {
   DelegationHandle,
@@ -25,13 +26,6 @@ const MAX_SPOKEN_LATEST_CHARS = 1_200;
  */
 const READ_ONLY_PERMISSION_MODE = "plan";
 
-function slug(text: string): string {
-  return text
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "");
-}
-
 /**
  * A Worker session's name, and therefore its address. Ticketed work is `<workspace>-t<ticket>`,
  * which anything holding the ticket can compute without searching for it (workspace ADR 0010).
@@ -42,8 +36,10 @@ function slug(text: string): string {
  * but `[a-z0-9]` produces an address that resolves to nothing.
  */
 export function delegationSessionName(workspace: string, request: DelegationRequest): string {
-  const base = slug(workspace);
-  return request.ticket ? `${base}-t${request.ticket}` : `${base}-${slug(request.label)}`;
+  const base = sessionNameSlug(workspace);
+  return request.ticket
+    ? `${base}-t${request.ticket}`
+    : `${base}-${sessionNameSlug(request.label)}`;
 }
 
 /**

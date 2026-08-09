@@ -47,8 +47,16 @@ function isAlive(pid: number): boolean {
   }
 }
 
-/** What the registry knows about the session going by `name`. */
-export async function readSessionLiveness(name: string): Promise<SessionLiveness> {
+export type LiveSessions =
+  /** The registry could not be read at all — this host says nothing about any session. */
+  { known: false } | { known: true; sessions: LiveSession[] };
+
+/**
+ * Every session this host says is alive. The pull half of ADR 0010: asking a session what it is
+ * doing costs it a full turn, while this costs a directory scan — so status, liveness and "who is
+ * on this" are read, never asked.
+ */
+export async function readLiveSessions(): Promise<LiveSessions> {
   const root = claudeSessionsRoot();
   let files: string[];
   try {
@@ -56,6 +64,7 @@ export async function readSessionLiveness(name: string): Promise<SessionLiveness
   } catch {
     return { known: false };
   }
+  const sessions: LiveSession[] = [];
   for (const file of files) {
     let raw: Record<string, unknown>;
     try {
@@ -63,19 +72,22 @@ export async function readSessionLiveness(name: string): Promise<SessionLiveness
     } catch {
       continue; // one unreadable entry says nothing about the rest
     }
-    if (str(raw.name) !== name) continue;
     const pid = typeof raw.pid === "number" ? raw.pid : Number(file.replace(/\.json$/, ""));
     if (!Number.isFinite(pid) || !isAlive(pid)) continue;
-    return {
-      known: true,
-      session: {
-        pid,
-        name,
-        sessionId: str(raw.sessionId),
-        cwd: str(raw.cwd),
-        status: str(raw.status),
-      },
-    };
+    sessions.push({
+      pid,
+      name: str(raw.name),
+      sessionId: str(raw.sessionId),
+      cwd: str(raw.cwd),
+      status: str(raw.status),
+    });
   }
-  return { known: true, session: null };
+  return { known: true, sessions };
+}
+
+/** What the registry knows about the session going by `name`. */
+export async function readSessionLiveness(name: string): Promise<SessionLiveness> {
+  const live = await readLiveSessions();
+  if (!live.known) return { known: false };
+  return { known: true, session: live.sessions.find((s) => s.name === name) ?? null };
 }

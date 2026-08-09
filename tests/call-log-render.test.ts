@@ -74,6 +74,80 @@ describe("call log view data", () => {
     };
     expect(buildCallLogViewData(cutOff).summary.durationMs).toBeNull();
   });
+
+  test("drops the asking half of a round trip the answer already covers", () => {
+    const asked: CallLogContents = {
+      summary: SUMMARY,
+      records: [
+        { type: "hands-asked", at: "2026-08-09T10:46:56.000Z", request: "run the tests" },
+        ...CONTENTS.records.slice(5),
+      ],
+    };
+    const entries = buildCallLogViewData(asked).entries;
+    expect(entries.filter((e) => e.type === "hands-asked")).toEqual([]);
+    expect(entries.filter((e) => e.type === "hands")).toHaveLength(1);
+  });
+
+  test("a failure with no question in front of it does not answer someone else's question", () => {
+    const killed: CallLogContents = {
+      summary: SUMMARY,
+      records: [
+        { type: "hands-asked", at: "2026-08-09T10:46:56.000Z", request: "run the whole suite" },
+        // `ask_hands` called with unreadable arguments: an answer, but to nothing that was asked.
+        {
+          type: "hands",
+          at: "2026-08-09T10:46:57.000Z",
+          request: "",
+          response: 'ask_hands needs a non-empty "request" argument.',
+          outcome: "error",
+          durationMs: 1,
+        },
+      ],
+    };
+    const entries = buildCallLogViewData(killed).entries;
+    expect(entries.filter((e) => e.type === "hands-asked")).toHaveLength(1);
+  });
+
+  test("two requests in flight at once are each paired with their own answer", () => {
+    const overlapping: CallLogContents = {
+      summary: SUMMARY,
+      records: [
+        { type: "hands-asked", at: "2026-08-09T10:46:00.000Z", request: "run the suite" },
+        { type: "hands-asked", at: "2026-08-09T10:46:01.000Z", request: "run the linter" },
+        {
+          type: "hands",
+          at: "2026-08-09T10:47:00.000Z",
+          request: "run the suite",
+          response: "all green",
+          outcome: "ok",
+          durationMs: 60_000,
+        },
+        {
+          type: "hands",
+          at: "2026-08-09T10:47:30.000Z",
+          request: "run the linter",
+          response: "clean",
+          outcome: "ok",
+          durationMs: 90_000,
+        },
+      ],
+    };
+    // Paired by position, the second request would survive as a false "no answer came back".
+    expect(
+      buildCallLogViewData(overlapping).entries.filter((e) => e.type === "hands-asked"),
+    ).toEqual([]);
+  });
+
+  test("keeps a request no answer ever followed — the one case only it can show", () => {
+    const killed: CallLogContents = {
+      summary: { ...SUMMARY, endedAt: null, endReason: null, handsCalls: 0 },
+      records: [
+        { type: "opened", at: SUMMARY.startedAt, ...SUMMARY },
+        { type: "hands-asked", at: "2026-08-09T10:46:56.000Z", request: "run the whole suite" },
+      ],
+    };
+    expect(buildCallLogViewData(killed).entries).toHaveLength(2);
+  });
 });
 
 describe("rendering a call log", () => {

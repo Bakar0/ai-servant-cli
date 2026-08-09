@@ -1,5 +1,6 @@
 import { existsSync } from "node:fs";
 import { defineCommand } from "citty";
+import { DEFAULT_AGENT } from "../agents/index.ts";
 import { createLiveCallLogView } from "../core/call-log/live.ts";
 import { teeCallLog } from "../core/call-log/record.ts";
 import { openCallLog } from "../core/call-log/store.ts";
@@ -13,6 +14,7 @@ import {
   resolveSummonsScope,
 } from "../core/summons-context.ts";
 import { createSummonsActions } from "../core/summons-delegate.ts";
+import { createHandsSession } from "../core/summons-hands.ts";
 import { requireOpenAiApiKey } from "../core/summons-preflight.ts";
 import { createOpenAiRealtimeTransport } from "../core/summons-realtime.ts";
 import { createWorkspaceReader } from "../core/summons-reader.ts";
@@ -22,7 +24,8 @@ import {
   DEFAULT_SUMMONS_VOICE,
   createSummonsSession,
 } from "../core/summons.ts";
-import { resolveWorkspaceName } from "../core/workspace.ts";
+import { readWorkspaceAgent, resolveWorkspaceName } from "../core/workspace.ts";
+import { readWorkspaceSessions } from "../core/workspace-sessions.ts";
 
 const DEFAULT_IDLE_TIMEOUT_SECONDS = DEFAULT_SUMMONS_IDLE_TIMEOUT_MS / 1000;
 
@@ -120,6 +123,12 @@ export const summonCommand = defineCommand({
     let onAudioFailure: (message: string) => void = () => {};
     const audio = createSoxAudio({ onDebug: debug, onFailure: (m) => onAudioFailure(m) });
 
+    // A Hands session is a resumable headless Claude thread and has no equivalent on Codex, whose
+    // headless runs are ephemeral by design. A Codex workspace summons without hands rather than
+    // being handed a tool that would spawn the wrong agent.
+    const backend = (await readWorkspaceAgent(workspace)) ?? DEFAULT_AGENT;
+    const hands = backend === "claude-code" ? createHandsSession({ workspace }) : undefined;
+
     const scope = await resolveSummonsScope(workspace, args.repo);
     const briefing = args.brief ? await readBriefing(args.brief) : undefined;
     // Read now, not from a cache: the session must open on the workspace as it is today.
@@ -150,6 +159,12 @@ export const summonCommand = defineCommand({
       // Delegated sessions open on the workspace, not the Summons' scope: `--repo` narrows what
       // the agent may read out loud, never what Claude is allowed to work on.
       actions: createSummonsActions({ workspace, hubRepo, terminal: args.terminal }),
+      // Constructed, not started: the session behind this is spawned by the first request that
+      // needs it, and a Summons where nothing ever needs hands costs nothing.
+      hands,
+      // A directory scan, not a question put to anyone — so it is always available, even in a
+      // workspace whose backend has no hands to reach.
+      sessions: { list: () => readWorkspaceSessions(workspace) },
       audio,
       callLog: teeCallLog([callLog.port, live]),
       instructions: composeSummonsInstructions(snapshot, briefing),

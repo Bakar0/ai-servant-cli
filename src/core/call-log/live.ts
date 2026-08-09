@@ -71,6 +71,10 @@ export function formatCallLogEntry(entry: CallLogEntry): string[] {
             : `failed — ${entry.detail ?? "no reason given"}`;
       return [toolLine("⇒", entry.mode, `"${entry.label}"`, outcome)];
     }
+    // The one line written while something is still happening, so a long request is visibly
+    // running rather than indistinguishable from the agent having gone quiet.
+    case "hands-asked":
+      return [toolLine("⚙", "hands", oneLine(entry.request), "working…")];
     case "hands": {
       const lines = [
         toolLine(

@@ -311,6 +311,97 @@ describe("a Summons records every Delegation, and which session carries it", () 
   });
 });
 
+describe("a Summons records what its Hands session did", () => {
+  const hands = (ask: (request: string) => Promise<string>) => ({ ask, end: async () => {} });
+  const askHands = (emit: (e: RealtimeInbound) => Promise<void>, request: string) =>
+    emit(call("ask_hands", { request }, "call_h"));
+
+  test("the request is recorded as it goes out, not held back until the answer", async () => {
+    let answer: ((text: string) => void) | null = null;
+    const { session, emit, of } = summoned({
+      hands: hands(() => new Promise<string>((resolve) => (answer = resolve))),
+    });
+    await session.start();
+
+    const pending = askHands(emit, "run the whole suite");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    // The point of the entry: mid-request, the record already shows what is being waited on.
+    expect(of("hands-asked")).toEqual([{ type: "hands-asked", request: "run the whole suite" }]);
+    expect(of("hands")).toEqual([]);
+
+    (answer as unknown as (text: string) => void)("all green");
+    await pending;
+    expect(of("hands")).toHaveLength(1);
+  });
+
+  test("what it was asked, what it came back with, and how long it took", async () => {
+    const { session, emit, of } = summoned({
+      timers: tickingTimers(500),
+      hands: hands(async () => "3 tests failed, all in the parser"),
+    });
+    await session.start();
+
+    await askHands(emit, "run the unit tests");
+
+    expect(of("hands")).toEqual([
+      {
+        type: "hands",
+        request: "run the unit tests",
+        response: "3 tests failed, all in the parser",
+        outcome: "ok",
+        durationMs: 500,
+      },
+    ]);
+  });
+
+  test("a request that failed, which is the case nothing else would show", async () => {
+    const { session, emit, of } = summoned({
+      hands: hands(async () => {
+        throw new Error("claude exited 1");
+      }),
+    });
+    await session.start();
+
+    await askHands(emit, "run the unit tests");
+
+    expect(of("hands")[0]).toMatchObject({
+      request: "run the unit tests",
+      outcome: "error",
+      response: "claude exited 1",
+    });
+  });
+
+  test("as a Hands entry alone — it is not a Delegation, and carries no ticket to claim", async () => {
+    const { actions, launched } = fakeActions();
+    const { session, emit, of } = summoned({ actions, hands: hands(async () => "done") });
+    await session.start();
+
+    await askHands(emit, "run the unit tests");
+
+    expect(launched).toEqual([]);
+    expect(of("delegation")).toEqual([]);
+    expect(of("tool")).toEqual([]);
+    expect(of("hands")).toHaveLength(1);
+  });
+
+  test("a Summons killed mid-request still records what it was asked", async () => {
+    const { session, emit, of } = summoned({
+      hands: { ask: () => new Promise<string>(() => {}), end: async () => {} },
+    });
+    await session.start();
+
+    void askHands(emit, "run the whole suite");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await session.stop();
+
+    // The failure this closes: before the asking was its own moment, a Summons that died while its
+    // Hands session was still working left no trace that it had ever been asked anything.
+    expect(of("hands-asked")).toHaveLength(1);
+    expect(of("ended")).toEqual([{ type: "ended", reason: "hung up" }]);
+  });
+});
+
 describe("a Summons records how it ended", () => {
   test("hanging up", async () => {
     const { session, of } = summoned();
