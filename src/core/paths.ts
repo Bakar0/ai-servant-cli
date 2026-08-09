@@ -181,6 +181,29 @@ export function workspaceDashboardPath(name: string): string {
   return join(workspaceDashboardsDir(), `${name}.html`);
 }
 
+/**
+ * Durable Call logs — one append-only JSONL record per Summons, sibling to insights/ and
+ * knowledge/. Deliberately outside every workspace and repo: a Summons writes nothing into the
+ * working tree (ADR 0009), and the record has to outlive the worktree it talked about anyway.
+ */
+export function callLogsRoot(): string {
+  return join(aiServantRoot(), "call-logs");
+}
+
+/** One Summons' record. Appended to as the conversation happens, so a kill loses only the tail. */
+export function callLogPath(id: string): string {
+  return join(callLogsRoot(), `${id}.jsonl`);
+}
+
+/** Rendered HTML lives apart from the records, so a regenerated artifact is never mistaken for one. */
+export function callLogRenderedDir(): string {
+  return join(callLogsRoot(), "rendered");
+}
+
+export function callLogHtmlPath(id: string): string {
+  return join(callLogRenderedDir(), `${id}.html`);
+}
+
 /** Queue of pending session-end extraction jobs (one JSON object per line). */
 export function extractQueuePath(): string {
   return join(cacheDir(), "extract-queue.jsonl");

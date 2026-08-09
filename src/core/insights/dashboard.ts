@@ -1,3 +1,4 @@
+import { fillDataSlot } from "../html-artifact.ts";
 import type { ChangeEntry } from "./changes.ts";
 import { DASHBOARD_TEMPLATE } from "./dashboard-template.ts";
 import type { Digest } from "./digest.ts";
@@ -321,14 +322,6 @@ export function buildDashboardData(opts: {
 }
 
 /**
- * Serialize the payload for safe embedding inside an HTML `<script>` block: `</` is broken so a
- * `</script>` inside any string can't close the tag early (`<\/script>` is still valid JSON).
- */
-function encodeForScript(data: DashboardData): string {
-  return JSON.stringify(data).replace(/<\//g, "<\\/");
-}
-
-/**
  * Render the full, self-contained dashboard HTML by injecting the data payload into the shipped
  * template's single data slot. Deterministic and offline: the returned string references no network
  * resource. Throws if the template asset somehow lacks the slot (a build/asset error, not user input).
@@ -339,9 +332,5 @@ export function renderDashboard(opts: {
   judgments: JudgmentRecord[];
   changes: ChangeEntry[];
 }): string {
-  if (!DASHBOARD_TEMPLATE.includes(DATA_SLOT)) {
-    throw new Error(`dashboard template is missing the ${DATA_SLOT} data slot`);
-  }
-  const data = buildDashboardData(opts);
-  return DASHBOARD_TEMPLATE.replace(DATA_SLOT, encodeForScript(data));
+  return fillDataSlot(DASHBOARD_TEMPLATE, DATA_SLOT, buildDashboardData(opts));
 }

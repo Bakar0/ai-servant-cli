@@ -28,6 +28,12 @@ export const spawnCommand = defineCommand({
       required: false,
       description: `Coding agent to launch: claude-code | codex. Defaults to the workspace's recorded agent, else ${DEFAULT_AGENT}.`,
     },
+    name: {
+      type: "string",
+      required: false,
+      description:
+        "Name the session runs under, which is also its address for Claims and cross-session messaging. A Worker carrying a ticket is <workspace>-t<ticket>. Without this, the agent derives a name that collides with every other session in the workspace.",
+    },
     prompt: {
       type: "string",
       required: false,
@@ -74,6 +80,7 @@ export const spawnCommand = defineCommand({
       workspace: args.workspace,
       agent: args.agent,
       prompt: args.prompt,
+      sessionName: args.name,
       terminal: args.terminal,
       // The picker is interactive, so it must run in this TTY, not the freshly-spawned tab.
       beforeLaunch: args.repo
@@ -89,7 +96,7 @@ export const spawnCommand = defineCommand({
     });
 
     console.log(
-      `servant: opened ${session.terminal} tab for workspace "${session.workspace}" at ${session.cwd} running "${session.command}"`,
+      `servant: opened ${session.terminal} tab${session.sessionName ? ` "${session.sessionName}"` : ""} for workspace "${session.workspace}" at ${session.cwd} running "${session.command}"`,
     );
   },
 });
