@@ -316,6 +316,25 @@ describe("a Summons records what its Hands session did", () => {
   const askHands = (emit: (e: RealtimeInbound) => Promise<void>, request: string) =>
     emit(call("ask_hands", { request }, "call_h"));
 
+  test("the request is recorded as it goes out, not held back until the answer", async () => {
+    let answer: ((text: string) => void) | null = null;
+    const { session, emit, of } = summoned({
+      hands: hands(() => new Promise<string>((resolve) => (answer = resolve))),
+    });
+    await session.start();
+
+    const pending = askHands(emit, "run the whole suite");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    // The point of the entry: mid-request, the record already shows what is being waited on.
+    expect(of("hands-asked")).toEqual([{ type: "hands-asked", request: "run the whole suite" }]);
+    expect(of("hands")).toEqual([]);
+
+    (answer as unknown as (text: string) => void)("all green");
+    await pending;
+    expect(of("hands")).toHaveLength(1);
+  });
+
   test("what it was asked, what it came back with, and how long it took", async () => {
     const { session, emit, of } = summoned({
       timers: tickingTimers(500),
@@ -364,6 +383,22 @@ describe("a Summons records what its Hands session did", () => {
     expect(of("delegation")).toEqual([]);
     expect(of("tool")).toEqual([]);
     expect(of("hands")).toHaveLength(1);
+  });
+
+  test("a Summons killed mid-request still records what it was asked", async () => {
+    const { session, emit, of } = summoned({
+      hands: { ask: () => new Promise<string>(() => {}), end: async () => {} },
+    });
+    await session.start();
+
+    void askHands(emit, "run the whole suite");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await session.stop();
+
+    // The failure this closes: before the asking was its own moment, a Summons that died while its
+    // Hands session was still working left no trace that it had ever been asked anything.
+    expect(of("hands-asked")).toHaveLength(1);
+    expect(of("ended")).toEqual([{ type: "ended", reason: "hung up" }]);
   });
 });
 

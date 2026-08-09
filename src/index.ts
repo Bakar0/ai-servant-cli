@@ -12,6 +12,7 @@ import { memoriesCommand } from "./commands/memories.ts";
 import { recallCommand } from "./commands/recall.ts";
 import { repoCommand } from "./commands/repo/index.ts";
 import { resumeCommand } from "./commands/resume.ts";
+import { sessionsCommand } from "./commands/sessions.ts";
 import { spawnCommand } from "./commands/spawn.ts";
 import { statuslineCommand } from "./commands/statusline.ts";
 import { summonCommand } from "./commands/summon.ts";
@@ -31,6 +32,7 @@ const main = defineCommand({
     "call-log": callLogCommand,
     repo: repoCommand,
     resume: resumeCommand,
+    sessions: sessionsCommand,
     dashboard: dashboardCommand,
     recall: recallCommand,
     memories: memoriesCommand,

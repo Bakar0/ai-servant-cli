@@ -16,9 +16,36 @@ export interface CallLogViewData {
   entries: CallLogContents["records"];
 }
 
+/**
+ * Drop the "asked" half of every round trip that came back — reading a Summons afterwards, the
+ * answer row says everything the question row did. What survives is a request no answer ever
+ * followed, which is the one case reading it back cannot otherwise show: a Summons killed while
+ * its Hands session was still working.
+ *
+ * Paired on the request text, not on position. Two requests can be in flight at once, and a
+ * request that failed before it was ever sent records an answer with no question in front of it —
+ * either way "the next answer after a question" pairs the wrong two, and the casualty is exactly
+ * the still-running request this exists to keep.
+ */
+function withoutAnsweredRequests(records: CallLogContents["records"]): CallLogContents["records"] {
+  const answered = new Set<number>();
+  const waiting = new Map<string, number[]>();
+  records.forEach((record, at) => {
+    if (record.type === "hands-asked") {
+      waiting.set(record.request, [...(waiting.get(record.request) ?? []), at]);
+    } else if (record.type === "hands") {
+      // Oldest first: asked the same thing twice, the first answer belongs to the first question.
+      const asked = waiting.get(record.request)?.shift();
+      if (asked !== undefined) answered.add(asked);
+    }
+  });
+  return records.filter((_record, at) => !answered.has(at));
+}
+
 /** Derived from the record and nothing else, so the page has no second source of truth. */
 export function buildCallLogViewData(contents: CallLogContents): CallLogViewData {
-  const { summary, records } = contents;
+  const { summary } = contents;
+  const records = withoutAnsweredRequests(contents.records);
   const started = Date.parse(summary.startedAt);
   const ended = summary.endedAt ? Date.parse(summary.endedAt) : Number.NaN;
   const durationMs =

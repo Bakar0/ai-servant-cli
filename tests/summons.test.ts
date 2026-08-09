@@ -7,6 +7,7 @@ import {
   type RealtimeInbound,
   type RealtimeSessionSpec,
   type RealtimeTransport,
+  type SessionsPort,
   type SummonsActions,
   type TimerPort,
   type WorkspaceReader,
@@ -779,6 +780,74 @@ describe("the Summons agent's own hands", () => {
     await ask(emit, "run the tests");
 
     expect(outputFor(state.toolResults, "h1")).toEqual({ error: "claude exited 1" });
+  });
+});
+
+describe("seeing what else is running", () => {
+  async function summoned(sessions: SessionsPort) {
+    const { transport, state, emit } = fakeTransport();
+    const session = createSummonsSession({
+      transport,
+      reader: fakeReader().reader,
+      actions: fakeActions().actions,
+      sessions,
+      instructions: "hi",
+    });
+    await session.start();
+    return { state, emit };
+  }
+
+  const listing = (
+    sessions: { name: string; kind: "worker" | "hands" | "other"; ticket: number | null }[],
+  ): SessionsPort => ({
+    list: async () => ({
+      known: true,
+      sessions: sessions.map((s, at) => ({ ...s, status: "idle", pid: 100 + at })),
+    }),
+  });
+
+  const askWhatIsRunning = (emit: (e: RealtimeInbound) => Promise<void>) =>
+    emit({ type: "tool_call", callId: "s1", name: "list_sessions", args: "{}" });
+
+  test("the tool is offered only when the Summons can actually see them", async () => {
+    const { state } = await summoned(listing([]));
+    expect((state.spec?.tools ?? []).map((t) => t.name)).toContain("list_sessions");
+
+    const { transport, state: blind } = fakeTransport();
+    await createSummonsSession({
+      transport,
+      reader: fakeReader().reader,
+      instructions: "hi",
+    }).start();
+    expect((blind.spec?.tools ?? []).map((t) => t.name)).not.toContain("list_sessions");
+  });
+
+  test("what is running comes back with what each session is carrying", async () => {
+    const { state, emit } = await summoned(
+      listing([
+        { name: "demo-t24", kind: "worker", ticket: 24 },
+        { name: "demo-hands", kind: "hands", ticket: null },
+      ]),
+    );
+
+    await askWhatIsRunning(emit);
+
+    const answer = outputFor(state.toolResults, "s1");
+    expect(answer.count).toBe(2);
+    expect(answer.sessions[0]).toMatchObject({ name: "demo-t24", kind: "worker", ticket: 24 });
+  });
+
+  test("an unreadable registry is reported as not knowing, never as nothing running", async () => {
+    const { state, emit } = await summoned({ list: async () => ({ known: false }) });
+
+    await askWhatIsRunning(emit);
+
+    // The live failure this closes: the agent said "there are no active sessions" while fourteen
+    // were running. Not knowing has to be sayable, or the agent invents the confident answer.
+    const answer = outputFor(state.toolResults, "s1");
+    expect(answer.known).toBe(false);
+    expect(answer.count).toBeUndefined();
+    expect(answer.instruction).toContain("do not say nothing is running");
   });
 });
 

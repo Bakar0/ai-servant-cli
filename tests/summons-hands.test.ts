@@ -5,13 +5,17 @@ import { describe, expect, test } from "bun:test";
 import { handsSessionName } from "../src/core/session-name.ts";
 import { type HandsRun, createHandsSession } from "../src/core/summons-hands.ts";
 
-function hands(answer: (run: HandsRun, index: number) => string | Promise<string> = () => "ok") {
+function hands(
+  answer: (run: HandsRun, index: number) => string | Promise<string> = () => "ok",
+  timeoutMs?: number,
+) {
   const runs: HandsRun[] = [];
   const registered: string[] = [];
   let n = 0;
   const session = createHandsSession({
     workspace: "ai_servant",
     cwd: "/tmp/ws",
+    ...(timeoutMs === undefined ? {} : { timeoutMs }),
     runner: async (run) => {
       runs.push(run);
       return answer(run, runs.length - 1);
@@ -83,6 +87,17 @@ describe("reaching the Hands session", () => {
     expect(runs[0]?.argv).toContain("--dangerously-skip-permissions");
   });
 
+  test("it is told its own commands are headless, so it does not reach for a picker", async () => {
+    const { session, runs } = hands();
+
+    await session.ask("what sessions are running");
+
+    // The exact trap that hung a live Summons: it ran `servant resume`, whose picker cannot be
+    // answered from a headless child, and never came back.
+    expect(promptOf(runs[0])).toContain("servant resume");
+    expect(promptOf(runs[0])).toMatch(/no stdin|headless|hang/i);
+  });
+
   test("it is told what it is, once, and asked plainly after that", async () => {
     const { session, runs } = hands();
 
@@ -148,6 +163,70 @@ describe("reaching the Hands session", () => {
   });
 });
 
+describe("a request that will not come back", () => {
+  /** A run that never resolves, and reports whether it was aborted. */
+  const neverAnswers = (run: HandsRun) =>
+    new Promise<string>((_resolve, reject) => {
+      run.signal.addEventListener("abort", () => reject(new Error("aborted")));
+    });
+
+  test("is given up on, and says so in words the agent can read out", async () => {
+    const { session } = hands(neverAnswers, 5);
+
+    // The failure this closes: with no deadline, the agent could only keep saying "just a moment".
+    await expect(session.ask("run the whole suite")).rejects.toThrow(/still working|stopped/i);
+  });
+
+  test("is killed, not merely abandoned to keep running for nobody", async () => {
+    const { session, runs } = hands(neverAnswers, 5);
+
+    await session.ask("run the whole suite").catch(() => {});
+
+    expect(runs[0]?.signal.aborted).toBe(true);
+  });
+
+  test("leaves the Hands session usable, rather than poisoning every request after it", async () => {
+    let first = true;
+    const { session } = hands((run) => {
+      if (!first) return "all green";
+      first = false;
+      return neverAnswers(run);
+    }, 5);
+
+    await session.ask("run the whole suite").catch(() => {});
+
+    expect(await session.ask("just the unit tests")).toBe("all green");
+  });
+
+  test("a timeout is told apart from the Summons hanging up", async () => {
+    // A real deadline, far enough out that hanging up is unambiguously what ended this request.
+    const { session } = hands(neverAnswers, 60_000);
+
+    const pending = session.ask("run the whole suite");
+    await inFlight();
+    await session.end();
+
+    await expect(pending).rejects.toThrow(/Summons ended/i);
+  });
+
+  test("keeps the thread, so the next request does not open a second session at one address", async () => {
+    let first = true;
+    const { session, runs } = hands((run) => {
+      if (!first) return "all green";
+      first = false;
+      return neverAnswers(run);
+    }, 5);
+
+    await session.ask("run the whole suite").catch(() => {});
+    await session.ask("just the unit tests");
+
+    // It ran long enough to have a session on disk. Minting a second `--session-id` under the same
+    // `--name` would leave two sessions at one address for the registry to choose between.
+    expect(flag(runs[1]?.argv ?? [], "--resume")).toBe("session-1");
+    expect(flag(runs[1]?.argv ?? [], "--session-id")).toBe(null);
+  });
+});
+
 describe("the Hands session ends with the Summons", () => {
   test("ending one that never started runs nothing", async () => {
     const { session, runs } = hands();
@@ -169,7 +248,7 @@ describe("the Hands session ends with the Summons", () => {
     await inFlight();
     await session.end();
 
-    await expect(pending).rejects.toThrow("aborted");
+    await expect(pending).rejects.toThrow(/Summons ended/i);
     expect(runs[0]?.signal.aborted).toBe(true);
   });
 

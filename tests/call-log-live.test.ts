@@ -44,6 +44,13 @@ describe("watching a Summons live", () => {
     expect(line).toContain("4.2s");
   });
 
+  test("shows a request that is still running, so working is not mistaken for hung", () => {
+    const [line] = watched([{ type: "hands-asked", request: "run the whole suite" }]);
+    expect(line).toContain("hands");
+    expect(line).toContain("run the whole suite");
+    expect(line).toContain("working");
+  });
+
   test("shows what the Hands session came back with — its only visible trace", () => {
     const lines = watched([
       {

@@ -147,6 +147,43 @@ export const DELEGATION_TOOLS: readonly SummonsTool[] = [
 ];
 
 /**
+ * Who is working in this workspace right now. A free file read (ADR 0010 decision 3) — the Summons
+ * agent must never satisfy this by asking a session, which costs that session a whole turn.
+ */
+export interface SessionsPort {
+  list(): Promise<
+    | { known: false }
+    | {
+        known: true;
+        sessions: {
+          name: string;
+          kind: "worker" | "hands" | "other";
+          ticket: number | null;
+          status: string | null;
+          /** So "kill the stuck one" is answerable without a second lookup. */
+          pid: number;
+        }[];
+      }
+  >;
+}
+
+/**
+ * Seeing what is running. Silent and never Guarded: it reads a directory and changes nothing.
+ *
+ * It exists because without it the agent answered "there are no sessions running" while fourteen
+ * were — it had only `check_delegation`, which knows about this conversation and nothing else, and
+ * a confidently wrong answer is worse than no tool at all.
+ */
+export const SESSIONS_TOOLS: readonly SummonsTool[] = [
+  {
+    name: "list_sessions",
+    description:
+      "List the Claude sessions working in this workspace right now — the tabs the user has open, what each is named, which ticket it carries, and whether it is idle or busy. Use this whenever the user asks what is running, who is on a ticket, or how many sessions there are. It is a silent local read: never ask permission, and never answer these questions from memory or from check_delegation, which only knows about work delegated in this conversation.",
+    parameters: { type: "object", properties: {} },
+  },
+];
+
+/**
  * The Summons agent's own hands: one Claude session it keeps for small, ad-hoc work — running the
  * tests, reading `git blame`, checking whether a change compiles. Ticket-scale work is a Delegation
  * and gets its own tab; this is the stuff that is too heavy for a local read and not worth a tab.
@@ -336,6 +373,8 @@ export interface SummonsSessionOptions {
   actions?: SummonsActions | undefined;
   /** Omitted, the agent has no hands: it can talk, read and delegate, and nothing else. */
   hands?: HandsPort | undefined;
+  /** Omitted, the agent cannot see what else is running in the workspace. */
+  sessions?: SessionsPort | undefined;
   audio?: AudioPort | undefined;
   instructions: string;
   model?: string | undefined;
@@ -811,6 +850,23 @@ export function createSummonsSession(opts: SummonsSessionOptions): SummonsSessio
   let lastUserItemId: string | null = null;
 
   /**
+   * What is running, as the agent should say it. An unreadable registry is reported as unknown and
+   * never as an empty list: "I cannot tell" is a true answer and "nothing is running" is not.
+   */
+  async function listSessions(): Promise<Record<string, unknown>> {
+    if (!opts.sessions) return { error: "This Summons cannot see what else is running." };
+    const report = await opts.sessions.list();
+    if (!report.known) {
+      return {
+        known: false,
+        instruction:
+          "This machine's session registry could not be read, so you do not know what is running. Say that — do not say nothing is running.",
+      };
+    }
+    return { known: true, count: report.sessions.length, sessions: report.sessions };
+  }
+
+  /**
    * One round trip to the Hands session. The record is written whatever happened — a request that
    * failed is exactly the case the user cannot see any other way, so the failure goes where the
    * answer would have gone.
@@ -840,6 +896,10 @@ export function createSummonsSession(opts: SummonsSessionOptions): SummonsSessio
       fail("This Summons has no hands — it was started without a Hands session.");
       return;
     }
+    // Recorded before the call goes out, not after it returns. A round trip can run for minutes,
+    // and until this line existed the live view showed nothing at all while it did — the user
+    // heard "just a moment" and had no way to tell working from hung.
+    log.record({ type: "hands-asked", request });
     try {
       const answer = await opts.hands.ask(request);
       opts.transport.sendToolResult(call.callId, JSON.stringify({ answer }));
@@ -893,7 +953,9 @@ export function createSummonsSession(opts: SummonsSessionOptions): SummonsSessio
       result =
         call.name === "check_delegation"
           ? await delegations.observe(call.args)
-          : await runTool(opts.reader, call.name, call.args);
+          : call.name === "list_sessions"
+            ? await listSessions()
+            : await runTool(opts.reader, call.name, call.args);
     } catch (err) {
       result = { error: err instanceof Error ? err.message : String(err) };
     }
@@ -980,6 +1042,7 @@ export function createSummonsSession(opts: SummonsSessionOptions): SummonsSessio
             ...SUMMONS_TOOLS,
             ...(opts.actions ? DELEGATION_TOOLS : []),
             ...(opts.hands ? HANDS_TOOLS : []),
+            ...(opts.sessions ? SESSIONS_TOOLS : []),
           ],
         },
         handleInbound,

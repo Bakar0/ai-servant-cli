@@ -239,6 +239,8 @@
           entry.status === "launched" ? "→ " + entry.session : entry.status,
           [entry.task, entry.ticket ? "#" + entry.ticket : null, entry.repo, entry.detail]
             .filter(Boolean).join(" · "));
+      case "hands-asked":
+        return actRow("⚙", "bad", "hands", entry.request, "no answer came back", "");
       case "hands":
         return actRow("⚙", entry.outcome === "error" ? "bad" : "", "hands", entry.request,
           entry.outcome === "ok" ? duration(entry.durationMs) : "failed", entry.response || "");

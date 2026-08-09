@@ -38,9 +38,18 @@ export type CallLogEntry =
       repo?: string;
     }
   /**
-   * A round-trip to the Hands session. It runs headless and has no tab, so this is the only place
-   * its work is visible — which is why the Call log had to exist before it could (ADR 0010).
-   * `response` carries what came back, or why nothing did when the round trip failed.
+   * A request going out to the Hands session, recorded *before* there is an answer to record.
+   *
+   * A round trip can take minutes, and the session it goes to has no tab — so without this the
+   * live view shows nothing at all while the only visible work in the conversation is happening,
+   * and a Summons killed mid-request leaves no trace that it was ever asked. Both are the failure
+   * the Call log exists to prevent, so the asking is a moment of its own.
+   */
+  | { type: "hands-asked"; request: string }
+  /**
+   * A round-trip to the Hands session, once it has come back. It runs headless and has no tab, so
+   * this is the only place its work is visible — which is why the Call log had to exist before it
+   * could (ADR 0010). `response` carries what came back, or why nothing did when it failed.
    */
   | {
       type: "hands";

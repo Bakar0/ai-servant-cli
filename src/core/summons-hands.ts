@@ -40,6 +40,8 @@ export interface HandsSessionDeps {
   newSessionId?: (() => string) | undefined;
   /** Injected in tests, so asserting the argv does not write to servant's real cache. */
   register?: ((sessionId: string) => Promise<void>) | undefined;
+  /** How long one request may run. 0 (or negative) waits indefinitely. */
+  timeoutMs?: number | undefined;
 }
 
 /**
@@ -52,10 +54,22 @@ export function composeHandsPrompt(workspace: string, request: string): string {
     `You are the hands of a spoken Summons of the "${workspace}" servant workspace.`,
     "A voice agent is talking with the user out loud. It can read and search, but it cannot run or change anything — so it hands you the small jobs it needs the result of: run the tests, check whether that compiles, see what git blame says.",
     "Your reply is read back to the user out loud, so lead with the answer and keep it to a few sentences. Nobody is watching this session and you cannot ask anything: if a job needs a decision that is not yours, do what you safely can and say what you stopped at.",
-    "This session carries no ticket and holds no Claim on one. Work at that scale gets a session of its own — if a request turns out to be that, say so rather than starting it.",
+    // Learned the hard way: asked "what sessions are running", a Hands session reached for
+    // `servant resume` — whose picker cannot be answered from here — and hung until the Summons
+    // was killed. It knows it is unwatched; it has to be told its subprocesses are too.
+    "## You are headless\n\nEvery command you run has no terminal and no stdin. Anything that prompts, pages, or opens a picker will hang until you are killed, and hanging is worse than failing: the user is left listening to silence. Never run one — no `servant resume` without an id, no `git rebase -i`, no `fzf`, no pager. Pass every flag up front, pipe anything long through `cat`, and prefer a command that prints and exits. To see what sessions are running, `servant sessions [--json]` is the one that answers and exits.",
+    "## What you have\n\nThe full Claude Code harness in this workspace: reading, searching, editing, git, `gh`, and the `servant` CLI itself. This workspace's skills are available to you as slash commands — use the small ones freely when they fit the request. Anything big enough to want its own session is not yours: say so instead of starting it.",
+    "This session carries no ticket and holds no Claim on one.",
     `## Request\n\n${request}`,
   ].join("\n\n");
 }
+
+/**
+ * How long a request may run before it is given up on. A Summons is a conversation: past a couple
+ * of minutes the answer has stopped being worth waiting for, and the agent saying so out loud beats
+ * it saying "just a moment" forever, which is what happened without this.
+ */
+export const DEFAULT_HANDS_TIMEOUT_MS = 2 * 60 * 1000;
 
 /**
  * Argv for one headless call. The first carries `--session-id` and `--name`, which is what makes
@@ -88,6 +102,18 @@ export function handsArgv(
   ];
 }
 
+/** How long a killed request is given to die politely before it is killed outright. */
+const KILL_GRACE_MS = 2_000;
+
+/** Rejects the moment the run is abandoned, so nothing downstream keeps waiting on the child. */
+function abandoned(signal: AbortSignal): Promise<never> {
+  return new Promise((_resolve, reject) => {
+    const give = () => reject(new Error("The request was abandoned before it came back."));
+    if (signal.aborted) give();
+    else signal.addEventListener("abort", give, { once: true });
+  });
+}
+
 const defaultRunner: HandsRunner = async (run) => {
   const proc = Bun.spawn(run.argv, {
     cwd: run.cwd,
@@ -96,24 +122,36 @@ const defaultRunner: HandsRunner = async (run) => {
     stderr: "pipe",
     env: { ...process.env },
   });
-  const kill = () => proc.kill();
+  let escalation: ReturnType<typeof setTimeout> | undefined;
+  const kill = () => {
+    proc.kill();
+    // A wedged child — or a grandchild of it still holding the pipe — would otherwise sit there
+    // ignoring SIGTERM, which is the hang this deadline exists to end.
+    escalation = setTimeout(() => proc.kill("SIGKILL"), KILL_GRACE_MS);
+  };
   run.signal.addEventListener("abort", kill, { once: true });
   try {
     // Both pipes are drained alongside the exit, never after it. "Run the whole test suite" is one
     // of the jobs this exists for, and a child that fills a pipe nobody is reading blocks forever
     // — which would look from the outside exactly like Claude thinking.
-    const [out, err, code] = await Promise.all([
-      new Response(proc.stdout).text(),
-      new Response(proc.stderr).text(),
-      proc.exited,
+    //
+    // Raced against the abort rather than awaited through it: once a request has been given up on,
+    // waiting for its output to close is waiting on exactly the process we stopped trusting.
+    const [out, err, code] = await Promise.race([
+      Promise.all([
+        new Response(proc.stdout).text(),
+        new Response(proc.stderr).text(),
+        proc.exited,
+      ]),
+      abandoned(run.signal),
     ]);
-    if (run.signal.aborted) throw new Error("The Summons ended before the answer came back.");
     if (code !== 0) {
       throw new Error(`The Hands session exited ${code}: ${err.trim().slice(0, 200)}`);
     }
     return out.trim();
   } finally {
     run.signal.removeEventListener("abort", kill);
+    clearTimeout(escalation);
   }
 };
 
@@ -125,6 +163,7 @@ export function createHandsSession(deps: HandsSessionDeps): HandsPort {
   const runner = deps.runner ?? defaultRunner;
   const newSessionId = deps.newSessionId ?? (() => crypto.randomUUID());
   const register = deps.register ?? registerHeadlessSession;
+  const timeoutMs = deps.timeoutMs ?? DEFAULT_HANDS_TIMEOUT_MS;
   const cwd = deps.cwd ?? workspacePath(deps.workspace);
   const name = handsSessionName(deps.workspace);
   const ending = new AbortController();
@@ -146,15 +185,43 @@ export function createHandsSession(deps: HandsSessionDeps): HandsPort {
     // work, not one of the user's sessions, so it must not be measured as one — but failing to
     // register is no reason to refuse the job the user asked for out loud.
     if (!started) await register(id).catch(() => {});
-    const answer = await runner({
-      argv: handsArgv(started ? request : composeHandsPrompt(deps.workspace, request), {
-        id,
-        name,
-        started,
-      }),
-      cwd,
-      signal: ending.signal,
-    });
+    // Two ways a request stops early, and the agent has to be able to say which out loud — so the
+    // deadline is watched here rather than left to the runner, which only ever sees "aborted".
+    const overdue = new AbortController();
+    let deadline: ReturnType<typeof setTimeout> | undefined;
+    if (timeoutMs > 0) deadline = setTimeout(() => overdue.abort(), timeoutMs);
+    let answer: string;
+    try {
+      answer = await runner({
+        argv: handsArgv(started ? request : composeHandsPrompt(deps.workspace, request), {
+          id,
+          name,
+          started,
+        }),
+        cwd,
+        signal: AbortSignal.any([ending.signal, overdue.signal]),
+      });
+    } catch (err) {
+      // The Summons ending is checked first: it is the answer the user is owed, and a request that
+      // runs out its deadline in the same moment the call is hung up is a hang-up, not a timeout.
+      if (ending.signal.aborted) {
+        throw new Error("The Summons ended before the answer came back.", { cause: err });
+      }
+      if (overdue.signal.aborted) {
+        // A request that ran long enough to time out has a session on disk, so the thread is kept
+        // and the next request resumes it. Losing it would mint a second `--session-id` under the
+        // same `--name`, leaving two sessions at one address for the registry to choose between.
+        threadId = id;
+        const seconds = Math.max(1, Math.round(timeoutMs / 1000));
+        throw new Error(
+          `The Hands session was still working after ${seconds} seconds, so it was stopped. Nothing it may have started was finished.`,
+          { cause: err },
+        );
+      }
+      throw err;
+    } finally {
+      clearTimeout(deadline);
+    }
     // Only a call that came back proves there is a thread to resume: resuming an id whose first
     // run died before writing a transcript fails, and would fail on every request after it.
     threadId = id;
