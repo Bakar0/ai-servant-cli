@@ -84,7 +84,7 @@ There are two ways to move work to another agent — pick by layer:
 - **In-session subagent (the `Agent` tool)** — ephemeral, runs inside *your* session and returns a report to your context. This is what `/code-review`, `/research`, `/wayfinder`, and the design skills use to fan out. Reach for it for tightly-scoped, AFK work you want back in this thread.
 - **`servant spawn` (a new tab / fresh top-level agent)** — persistent, its own context, human-visible. Reach for it when a chunk of work deserves its own session: continuing after a `/handoff`, an independent subtask you want running in parallel, or a sibling agent. **Proactively suggest `servant spawn`** when you notice work that should live in its own session rather than crowding this one.
 
-**Handing work forward — `/servant:handoff`.** This is the one "take it forward" gesture at any seam in the flow. It writes the handoff doc, decides the next step (route: `/to-spec` → `/to-tickets` → `/implement`), and **spawns the continuation session(s) itself** — one per ready ticket — so the user never hand-types a `servant spawn`. It reads the dispatchable set from `servant tasks --frontier --ws <name> --json` (ready = blockers closed) and fans out: tickets on different repos run in parallel; two on the same repo run first-then-rest. Plain mattpocock `/handoff` still exists for the rare "just write a doc, I'll continue myself" case; `servant spawn --prompt "…"` remains the one-session primitive underneath.
+**Handing work forward — `/servant:handoff`.** This is the one "take it forward" gesture at any seam in the flow. It writes the handoff doc, decides the next step (route: `/to-spec` → `/to-tickets` → `/implement`), and **spawns the continuation session(s) itself** — one per ready ticket — so the user never hand-types a `servant spawn`. It reads the dispatchable set from `servant tasks --frontier --ws <name> --json`, which sorts open tickets into `ready` (unblocked, unclaimed), `stale` (claimed by a session that is gone — reclaimed silently), `inFlight` (someone is on it — **refused** without an explicit override) and `blocked`. It fans out over `ready` + `stale`: tickets on different repos run in parallel; two on the same repo run first-then-rest. Plain mattpocock `/handoff` still exists for the rare "just write a doc, I'll continue myself" case; `servant spawn --prompt "…"` remains the one-session primitive underneath.
 
 **Worktree safety for research/wayfinder.** A mounted repo under `repos/` is a live git **worktree**. A subagent that does `git checkout -b research/<name>` there would switch the shared checkout's branch out from under the main agent. Research/wayfinder subagents must stay **read-only** or use their own worktree, and write `/research` findings into `docs/` — never switch the shared checkout.
 
@@ -92,7 +92,7 @@ There are two ways to move work to another agent — pick by layer:
 
 ```
 servant tasks [--ws <name>]     # cross-workspace issue view (grouped, deep-linked)
-servant tasks --frontier --ws … # ready (blockers closed) vs blocked tickets; feeds /servant:handoff
+servant tasks --frontier --ws … # ready / stale / in-flight / blocked; feeds /servant:handoff
 servant recall <query>          # search accumulated knowledge notes
 servant spawn -w <name> [-r]    # new workspace / tab; -r mounts repo worktrees
 servant resume                  # re-attach to an earlier session

@@ -15,7 +15,7 @@ export const claimCommand = defineCommand({
   meta: {
     name: "claim",
     description:
-      "Record which session is carrying a hub ticket, or release it when the work is done. A Claim is written as part of spawning; this is how the session that holds one hands it back.",
+      "Record which session is carrying a hub ticket, or release it when the work is done. The voice delegation path writes a Claim as it spawns; everywhere else — /servant:handoff reclaiming a stale one, a session releasing its own — goes through this command.",
   },
   args: {
     ticket: {

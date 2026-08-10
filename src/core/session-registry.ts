@@ -85,6 +85,36 @@ export async function readLiveSessions(): Promise<LiveSessions> {
   return { known: true, sessions };
 }
 
+/** Every live session's name, or unknown when the enumeration cannot be trusted. */
+export type LiveSessionNames = { known: false } | { known: true; names: string[] };
+
+/**
+ * The registry reduced to the one question staleness asks: which sessions are alive *by name*?
+ *
+ * Strict about answering at all, because of what the answer is used for. A Claim whose session is
+ * missing from this list is reported stale, a stale Claim is reclaimed without asking, and a
+ * reclaim spawns a second session onto a live worktree — the collision ADR 0010 exists to prevent.
+ * So the three ways this could be a short list rather than a wrong one all report unknown instead:
+ *
+ * - the registry could not be read;
+ * - it holds nothing, which looks identical whether every session exited or the directory moved;
+ * - it holds entries it could not name, which is version skew showing.
+ *
+ * Unknown is an ordinary answer here, never an error: callers treat a Claim they cannot check as
+ * still held, which is the safe direction.
+ */
+export function liveSessionNames(live: LiveSessions): LiveSessionNames {
+  if (!live.known || live.sessions.length === 0) return { known: false };
+  const names: (string | null)[] = live.sessions.map((s) => s.name);
+  if (names.some((name) => name === null)) return { known: false };
+  return { known: true, names: names.filter((name) => name !== null) };
+}
+
+/** The same answer, read fresh from disk. */
+export async function readLiveSessionNames(): Promise<LiveSessionNames> {
+  return liveSessionNames(await readLiveSessions());
+}
+
 /** What the registry knows about the session going by `name`. */
 export async function readSessionLiveness(name: string): Promise<SessionLiveness> {
   const live = await readLiveSessions();

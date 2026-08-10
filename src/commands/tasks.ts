@@ -1,10 +1,13 @@
 import { defineCommand } from "citty";
 import { loadConfig } from "../core/config.ts";
 import { applyRootOverride } from "../core/paths.ts";
+import { readLiveSessionNames } from "../core/session-registry.ts";
 import {
+  type ClaimLiveness,
   type HubIssue,
   type IssueState,
   computeFrontier,
+  defaultNativeBlockersRunner,
   fetchHubTasks,
   groupByWorkspace,
 } from "../core/tasks.ts";
@@ -42,7 +45,7 @@ export const tasksCommand = defineCommand({
       required: false,
       default: false,
       description:
-        "Classify open tickets as ready (blockers closed) vs blocked, from their Blocked-by edges. Used by /servant:handoff to pick dispatchable tickets.",
+        "Classify open tickets as ready, in-flight (a live session holds the Claim), stale (the holding session is gone) or blocked. Used by /servant:handoff to pick dispatchable tickets.",
     },
     json: {
       type: "boolean",
@@ -63,23 +66,54 @@ export const tasksCommand = defineCommand({
       : "open";
     const { hubRepo } = await loadConfig();
 
-    const { issues, fromCache, cachedAt } = await fetchHubTasks(hubRepo, state);
+    // Dependencies cost extra API calls, so they are only read for --frontier, which is the one
+    // caller whose answer is wrong without them (majordomo#23).
+    const { issues, fromCache, cachedAt } = await fetchHubTasks(
+      hubRepo,
+      state,
+      args.frontier ? { nativeRunner: defaultNativeBlockersRunner } : {},
+    );
     const filtered = args.ws ? issues.filter((i) => i.workspace === args.ws) : issues;
 
-    // --frontier: classify ready vs blocked (dependency-aware), the backstop /servant:handoff reads.
+    // --frontier: what is dispatchable, from every blocking form and every Claim — the backstop
+    // /servant:handoff reads before it spawns anything.
     if (args.frontier) {
-      const { ready, blocked } = computeFrontier(filtered);
+      // A directory scan, never a question put to a session (workspace ADR 0010, decision 3).
+      // It degrades to unknown rather than to a short list of names — see `liveSessionNames`.
+      const live = await readLiveSessionNames();
+      const liveness: ClaimLiveness = live.known
+        ? { known: true, liveSessions: live.names }
+        : { known: false };
+      const { ready, stale, inFlight, blocked } = computeFrontier(filtered, liveness);
       if (args.json) {
         console.log(
           JSON.stringify({
             hubRepo,
             workspace: args.ws ?? null,
             fromCache,
+            /** Liveness reported as-is, so a consumer can tell "nobody is on it" from "cannot tell". */
+            livenessKnown: liveness.known,
             ready: ready.map((i) => ({
               number: i.number,
               title: i.title,
               url: i.url,
               labels: i.labels,
+            })),
+            // Dispatchable too, but only after its dead Claim is reclaimed — which is cleanup, not
+            // a decision, so /servant:handoff does it without asking.
+            stale: stale.map((c) => ({
+              number: c.issue.number,
+              title: c.issue.title,
+              url: c.issue.url,
+              labels: c.issue.labels,
+              claim: { session: c.claim.session, since: c.claim.at },
+            })),
+            inFlight: inFlight.map((c) => ({
+              number: c.issue.number,
+              title: c.issue.title,
+              url: c.issue.url,
+              claim: { session: c.claim.session, since: c.claim.at },
+              liveness: c.liveness,
             })),
             blocked: blocked.map((b) => ({
               number: b.issue.number,
@@ -94,24 +128,38 @@ export const tasksCommand = defineCommand({
       console.log(
         `servant: frontier for ${args.ws ? `"${args.ws}"` : "all workspaces"} in ${hubRepo}${
           fromCache ? "  (offline cache)" : ""
-        }\n`,
+        }${live.known ? "" : "  (session liveness unknown — claimed tickets shown as in-flight)"}\n`,
       );
-      console.log(`  ready (${ready.length}) — dispatchable now:`);
-      console.log(
-        ready.length ? ready.map((i) => `    #${i.number}  ${i.title}`).join("\n") : "    none",
+      const section = (title: string, lines: string[]) => {
+        console.log(`  ${title} (${lines.length}):`);
+        console.log(lines.length ? lines.join("\n") : "    none");
+        console.log("");
+      };
+      section(
+        "ready — dispatchable now",
+        ready.map((i) => `    #${i.number}  ${i.title}`),
       );
-      console.log(`\n  blocked (${blocked.length}):`);
-      console.log(
-        blocked.length
-          ? blocked
-              .map(
-                (b) =>
-                  `    #${b.issue.number}  ${b.issue.title}   ← blocked-by ${b.openBlockers
-                    .map((n) => `#${n}`)
-                    .join(", ")}`,
-              )
-              .join("\n")
-          : "    none",
+      section(
+        "stale — claim held by a session that is gone, reclaimable",
+        stale.map((c) => `    #${c.issue.number}  ${c.issue.title}   ← ${c.claim.session} (gone)`),
+      );
+      section(
+        "in-flight — someone is on it",
+        inFlight.map(
+          (c) =>
+            `    #${c.issue.number}  ${c.issue.title}   ← ${c.claim.session}${
+              c.liveness === "unknown" ? " (liveness unknown)" : ""
+            }`,
+        ),
+      );
+      section(
+        "blocked",
+        blocked.map(
+          (b) =>
+            `    #${b.issue.number}  ${b.issue.title}   ← blocked-by ${b.openBlockers
+              .map((n) => `#${n}`)
+              .join(", ")}`,
+        ),
       );
       return;
     }
