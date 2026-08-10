@@ -53,6 +53,8 @@ gh issue list --repo <hub> --label ws:<name>
 
 The concrete hub repo + label for this workspace are in the `## Agent skills` block (per workspace) and `docs/agents/issue-tracker.md`. **Do not** create per-workspace `briefs/` or `plans/` files — file issues instead.
 
+To see where the whole initiative stands rather than one ticket — what is in flight and under which session, what is ready, what is blocked, and which Claims have gone stale — run **`/servant:lead`**. It joins the hub, the Claims, the session registry and the transcripts into one report, and can redirect a running session from there. It is a skill, not a session type: any session runs it and leads for that turn.
+
 ## The workspace goal
 
 `GOAL.md` at the workspace root is the **north star** for everyone working here — its intent:

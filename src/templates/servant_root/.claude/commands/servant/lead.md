@@ -44,12 +44,17 @@ whether each session is idle or busy.
 
 `livenessKnown: false` means the machine could not be asked who is alive. Everything claimed is
 then reported as in flight, because a ticket you cannot prove is free is not free. **Say that you
-could not check** — do not report "nothing is stale" as though you had looked.
+could not check** — do not report "nothing is stale" as though you had looked. And note what it
+costs you in step 4: a session you cannot prove is alive is one you must not redirect either.
+
+`fromCache: true` means the hub was unreachable and this is a snapshot. Report from it, say so, and
+do not redirect off it — the Claims in it may be hours stale.
 
 Both commands read files and exit. Never ask a session what it is doing to fill this in: that costs
 it a whole turn and is billed like a typed prompt, and the answer is already on disk
 (workspace ADR-0010, decision 5). If you want to know what a session actually *did*, read its
-transcript — `servant sessions --json` gives you the handle.
+transcript directly; `servant sessions --json` gives you its name, ticket, status and pid, which is
+what you need to find it — it carries no transcript id of its own.
 
 ## 3. Report
 
@@ -77,34 +82,49 @@ Noticing something is off and correcting it should be one gesture, not two. You 
 session, so you can message another one directly — under exactly the rules voice steering follows
 (ADR-0010, decisions 8 and 9):
 
-- **Only sessions in `inFlight[]`, plus this workspace's own hands session.** A session holding no
-  Claim on this workspace's tickets is not addressable, and a session in another workspace or
-  another project is not reachable at all. Do not work around this by name.
+- **Only sessions in `inFlight[]`, plus this workspace's own hands session** — and address them by
+  the exact `claim.session` name the join reports, not one you inferred. A session holding no Claim
+  on this workspace's tickets is not addressable, and a session in another workspace or another
+  project is not reachable at all. Do not work around this by name.
+- **If you could not verify, do not send.** `livenessKnown: false` or `fromCache: true` means you
+  cannot tell who is really carrying what, and an instruction sent on that basis can land in work
+  nobody meant. Say you could not check and stop. This is the one place where "in flight" being a
+  fail-closed *report* does not make it a licence to act.
+- **If it is ambiguous which session the user means, ask.** Never guess, and never send it to all
+  of them.
 - **Say what it is for, and let it land at a safe point.** Include: *"Take this up at your next
   safe point — finish the edit or command you are part-way through first. Never leave a file
   half-written to act on this."* A session that pivots mid-edit leaves the tree in a state nobody
   asked for.
 - **A redirect needs no confirmation.** Sessions run in auto mode and their own permission prompts
   are the real gate. Just say what you passed on, and to whom.
-- **Stopping or abandoning a session does.** It destroys work already done and nothing downstream
-  catches it. Say out loud what you are about to stop and that work may be lost, get a plain yes,
-  and only then send it.
+- **Anything that stops or abandons a session does need one** — and that is decided by what the
+  instruction *says*, not by how you framed it. "Stop what you're doing", "abandon that", "drop
+  everything", "give up on it", "cancel it", "stand down" are stops even when they arrive inside a
+  sentence that also redirects. Voice steering escalates these to the gate on the words alone,
+  precisely because a stop can always be phrased as a redirect; do the same. Say what you are about
+  to stop and that work already done may be lost, get a plain yes, and only then send it.
 - **Report delivery honestly.** Sending proves the instruction was *queued*, not that it was
-  applied — the session takes it up later, on purpose. Say it has been passed on. Do not say it has
-  been done, and do not say it landed if the send failed.
+  applied — the session takes it up later, on purpose. Say it has been passed on. Do not say it
+  has been done, and do not say it landed if the send failed.
 - **An instruction that changes what *done* means goes on the ticket**, because that outlives the
   session. A plain course correction does not — the transcripts already have it twice.
 
-To reclaim a stale claim rather than redirect, hand the ticket to a new session:
+To reclaim a stale claim rather than redirect, hand the ticket to a new session. Spawning is a side
+effect, so confirm it first, exactly as `/servant:handoff` does:
 
 ```bash
 servant claim <N> --session <workspace>-t<N>
-servant spawn -w <workspace> --prompt "…"
+servant spawn -w <workspace> --name <workspace>-t<N> --prompt "…"
 ```
 
 `servant spawn` writes no Claim of its own, so the `servant claim` line is what actually transfers
-it. For a full fan-out over everything dispatchable, use `/servant:handoff` instead — that is the
-skill that writes a handoff doc and spawns one session per ready ticket.
+it — and `--name` is not optional here: without it the session gets a derived name that collides
+with every other session in the workspace, so the Claim you just wrote would point at an address
+nothing answers to, and the ticket would read as stale all over again.
+
+For a full fan-out over everything dispatchable, use `/servant:handoff` instead — that is the skill
+that writes a handoff doc and spawns one session per ready ticket.
 
 ## Notes
 
