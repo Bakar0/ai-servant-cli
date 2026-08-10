@@ -191,6 +191,7 @@ export const summonCommand = defineCommand({
       voice: args.voice,
       idleTimeoutMs: idleMs,
       onStopped: () => ended(),
+      onDebug: debug,
       onError: (message) => console.error(`servant summon: ${message}`),
     });
 

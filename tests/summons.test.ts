@@ -1429,6 +1429,27 @@ describe("barging in on the agent", () => {
     expect(s.sent.audioSent).toEqual([]);
   });
 
+  // The live failure this closes. A frame is 200ms of history, so the first frame of the playback
+  // window was recorded *before* any sound left the speakers — it is silence. Seeding the echo floor
+  // from it put the floor at nearly zero, every real echo frame after it cleared the threshold, and
+  // the agent flushed and respawned its own speaker every 400ms for the length of the reply. On the
+  // speakers that is not speech, it is a growl; the log showed a perfectly ordinary reply.
+  test("the silence just before playback starts does not become the echo floor", async () => {
+    const s = await agentTalking();
+
+    // A frame arriving 100ms into the reply covers the 200ms before it — mostly the room from
+    // *before* the agent spoke, so it says nothing about how loud the echo is.
+    s.advance(100);
+    s.mic(micChunk(200, 0));
+
+    // Room echo at an ordinary speaker volume, far above any absolute idea of "loud enough to be a
+    // voice" — the only thing that can tell it from a person is a floor learned from real echo.
+    frame(s, 4_000, 12);
+
+    expect(s.sent.cancelled).toBe(0);
+    expect(s.flushes).toEqual([]);
+  });
+
   test("the speakers turned up do not interrupt the agent — the threshold is relative to the room", async () => {
     const s = await agentTalking();
 

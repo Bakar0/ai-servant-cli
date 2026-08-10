@@ -510,6 +510,14 @@ const BARGE_IN_MIN_LEVEL = 1_200;
 const BARGE_IN_FRAMES = 2;
 /** How fast the echo floor follows the room. Slow, so a voice cannot drag the floor up after it. */
 const ECHO_FLOOR_WEIGHT = 0.3;
+/** Frames spent learning how loud the room is before an interruption can be heard at all. */
+const ECHO_WARMUP_FRAMES = 1;
+/**
+ * The least time between two interruptions the level detector may cause. The detector is a
+ * heuristic, so what this bounds is the cost of it being wrong: a mistake should sound like one
+ * clipped word, never like a reply being shredded frame by frame.
+ */
+const BARGE_IN_COOLDOWN_MS = 1_500;
 /** 20ms — short enough that a syllable starting late in a frame still stands out in it. */
 const LEVEL_WINDOW_SAMPLES = 24_000 / 50;
 
@@ -580,6 +588,12 @@ export interface SummonsSessionOptions {
   onStopped?: (() => void) | undefined;
   /** Called with anything the API reports going wrong, so the user isn't left talking to silence. */
   onError?: ((message: string) => void) | undefined;
+  /**
+   * Traces the decisions no other output can explain — above all what the echo detector heard and
+   * what it made of it. Those thresholds are a heuristic against a real room, so tuning them needs
+   * the numbers, and the numbers only exist during a live conversation.
+   */
+  onDebug?: ((message: string) => void) | undefined;
 }
 
 export interface SummonsSession {
@@ -1508,7 +1522,10 @@ function createMicGate(opts: SummonsSessionOptions, timers: TimerPort) {
   let generating = false;
   /** The level the agent's own echo settles at, learned from the frames the echo gate holds back. */
   let echoFloor: number | null = null;
+  /** Frames of echo seen so far. Until there are enough, the room is not yet characterised. */
+  let framesObserved = 0;
   let loudFrames = 0;
+  let lastInterruptAt = Number.NEGATIVE_INFINITY;
   let muted = false;
 
   /**
@@ -1540,10 +1557,39 @@ function createMicGate(opts: SummonsSessionOptions, timers: TimerPort) {
    */
   function detect(pcm: string): void {
     if (!playing) return;
+    /**
+     * A frame that *began* before this reply reached the speakers holds no echo — it is the room
+     * from before the agent spoke, and it is silence. Reading it as evidence of how loud the echo is
+     * put the floor near zero; every real echo frame after that looked like a voice, and since a
+     * candidate frame deliberately does not move the floor, it never recovered. Live that was the
+     * agent flushing and respawning its own speaker every 400ms for the whole of every reply — a
+     * growl out of the speakers, and a perfectly ordinary-looking reply in the log.
+     *
+     * Frames are ~200ms of history, so at the start of every reply there is exactly one of these.
+     * It is not evidence either way: not a floor sample, and not a candidate.
+     */
+    if (timers.now() - playbackDurationMs(pcm) < playing.startedAt) return;
     const level = peakLevel(pcm);
+    if (framesObserved < ECHO_WARMUP_FRAMES) {
+      framesObserved += 1;
+      echoFloor = Math.max(echoFloor ?? 0, level);
+      opts.onDebug?.(
+        `echo: learning the room — level ${Math.round(level)}, floor ${Math.round(echoFloor)}`,
+      );
+      return;
+    }
     const floor = echoFloor ?? level;
     if (level > floor * BARGE_IN_RATIO && level > BARGE_IN_MIN_LEVEL) {
-      if (++loudFrames >= BARGE_IN_FRAMES) gate.interrupt("over the speakers");
+      loudFrames += 1;
+      opts.onDebug?.(
+        `echo: candidate ${loudFrames}/${BARGE_IN_FRAMES} — level ${Math.round(level)} over floor ${Math.round(floor)}`,
+      );
+      if (loudFrames < BARGE_IN_FRAMES) return;
+      if (timers.now() - lastInterruptAt < BARGE_IN_COOLDOWN_MS) {
+        opts.onDebug?.("echo: within the cooldown, so not treated as an interruption");
+        return;
+      }
+      gate.interrupt("over the speakers");
       return;
     }
     // Only frames that are *not* candidates move the floor, or a voice would pull the threshold up
@@ -1614,6 +1660,8 @@ function createMicGate(opts: SummonsSessionOptions, timers: TimerPort) {
       playing = null;
       generating = false;
       loudFrames = 0;
+      lastInterruptAt = timers.now();
+      opts.onDebug?.(`echo: cut the reply off (${heardBy})`);
       log.record({
         type: "note",
         level: "info",
