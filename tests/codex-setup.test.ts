@@ -24,7 +24,7 @@ describe("toCodexPrompt", () => {
 });
 
 describe("ensureCodexAssets", () => {
-  test("installs all five servant prompts into CODEX_HOME/prompts, transformed", async () => {
+  test("installs every servant prompt into CODEX_HOME/prompts, transformed", async () => {
     const home = await mkdtemp(join(tmpdir(), "servant-codex-home-"));
     const prevHome = process.env.CODEX_HOME;
     process.env.CODEX_HOME = home;
@@ -37,6 +37,7 @@ describe("ensureCodexAssets", () => {
         "servant-fine-tune.md",
         "servant-goal.md",
         "servant-handoff.md",
+        "servant-lead.md",
         "servant-recall.md",
       ]);
       const goal = await readFile(join(home, "prompts", "servant-goal.md"), "utf8");
