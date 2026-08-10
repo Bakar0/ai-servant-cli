@@ -51,7 +51,12 @@ export function createSoxAudio(opts: SoxAudioOptions = {}): AudioPort {
   let pump: Promise<void> | null = null;
   let stopping = false;
 
-  const fifoPath = join(tmpdir(), `servant-summons-${process.pid}.pcm`);
+  /**
+   * Each speaker gets its own FIFO. A flush abandons the pipe rather than draining it, and a fresh
+   * path means the replacement cannot inherit anything still sitting in the old one.
+   */
+  const fifoPathFor = (gen: number) => join(tmpdir(), `servant-summons-${process.pid}-${gen}.pcm`);
+  let generation = 0;
   let fifo: Awaited<ReturnType<typeof open>> | null = null;
   let speakerReady: Promise<void> | null = null;
   let writes: Promise<unknown> = Promise.resolve();
@@ -59,11 +64,18 @@ export function createSoxAudio(opts: SoxAudioOptions = {}): AudioPort {
   /**
    * Watch a `sox` we did not kill ourselves. Silence here is what makes this layer's failures
    * invisible: the mic dying mid-conversation looks exactly like the user having gone quiet.
+   *
+   * `retired` is how a speaker killed by a flush is told apart from one that died: without it the
+   * first barge-in would report the speaker as having failed and hang the whole Summons up.
    */
-  function watch(role: string, proc: Bun.Subprocess<never, never, "pipe">): void {
+  function watch(
+    role: string,
+    proc: Bun.Subprocess<never, never, "pipe">,
+    retired: () => boolean = () => false,
+  ): void {
     void (async () => {
       const [code, stderr] = await Promise.all([proc.exited, new Response(proc.stderr).text()]);
-      if (stopping) return;
+      if (stopping || retired()) return;
       const detail = stderr.trim() || `exit code ${code}`;
       opts.onFailure?.(`the ${role} (sox) stopped: ${detail}`);
     })();
@@ -77,13 +89,15 @@ export function createSoxAudio(opts: SoxAudioOptions = {}): AudioPort {
    * (we hold a reader ourselves) and never blocks on open, so silence is just an empty pipe.
    */
   async function startSpeaker(): Promise<void> {
+    const gen = generation;
+    const fifoPath = fifoPathFor(gen);
     await rm(fifoPath, { force: true });
     const made = Bun.spawn(["mkfifo", fifoPath], { stderr: "pipe" });
     if ((await made.exited) !== 0) {
       throw new Error((await new Response(made.stderr).text()).trim() || "mkfifo failed");
     }
-    fifo = await open(fifoPath, "r+");
-    speaker = Bun.spawn(
+    const handle = await open(fifoPath, "r+");
+    const proc = Bun.spawn(
       [
         sox,
         "-q",
@@ -95,8 +109,22 @@ export function createSoxAudio(opts: SoxAudioOptions = {}): AudioPort {
       ],
       { stdin: "ignore", stdout: "ignore", stderr: "pipe" },
     );
+    // A flush that lands while this was still starting up has already moved the generation on, so
+    // the pipe it was building belongs to nobody: close it rather than installing it.
+    if (gen !== generation) {
+      proc.kill();
+      await handle.close().catch(() => {});
+      await rm(fifoPath, { force: true });
+      return;
+    }
+    fifo = handle;
+    speaker = proc;
     opts.onDebug?.("speaker: playback started");
-    watch("speaker", speaker as unknown as Bun.Subprocess<never, never, "pipe">);
+    watch(
+      "speaker",
+      proc as unknown as Bun.Subprocess<never, never, "pipe">,
+      () => gen !== generation,
+    );
   }
 
   /** Re-chunk sox's arbitrary-sized reads into the frame size the API wants. */
@@ -133,35 +161,65 @@ export function createSoxAudio(opts: SoxAudioOptions = {}): AudioPort {
       pump = drainMic(recorder.stdout, onChunk).catch((err: unknown) => {
         if (!stopping) opts.onFailure?.(`the microphone stream failed: ${String(err)}`);
       });
+      // Started here rather than on the first delta, which is the whole point. Spawning sox takes a
+      // couple of hundred milliseconds, and the controller starts its half-duplex clock the moment
+      // the audio arrives — so a lazy speaker means real playback runs that far behind the
+      // controller's estimate of it, the mic reopens while the reply is still coming out, and the
+      // agent interrupts itself on its own first sentence. Silence costs nothing: it is an empty pipe.
+      speakerReady ??= startSpeaker();
       return Promise.resolve();
     },
 
     play(pcm) {
+      const gen = generation;
       speakerReady ??= startSpeaker();
       const bytes = Buffer.from(pcm, "base64");
       // Serialized and never awaited here: a reply longer than the pipe buffer applies real
       // backpressure, and blocking on it would stall the socket that is still receiving it.
       writes = writes
         .then(() => speakerReady)
-        .then(() => fifo?.write(bytes))
+        // A write queued before a flush must not land in the pipe that replaced it, or the audio
+        // the user interrupted comes back out after the interruption.
+        .then(() => (gen === generation ? fifo?.write(bytes) : undefined))
         .catch((err: unknown) => {
           if (!stopping) opts.onFailure?.(`playback failed: ${String(err)}`);
         });
     },
 
+    flush() {
+      const dead = { speaker, fifo, path: fifoPathFor(generation) };
+      generation += 1;
+      speaker = null;
+      fifo = null;
+      writes = Promise.resolve();
+      dead.speaker?.kill();
+      void (async () => {
+        await dead.fifo?.close().catch(() => {});
+        await rm(dead.path, { force: true });
+      })();
+      // Replaced straight away rather than lazily: the reply to the interruption is a few hundred
+      // milliseconds behind it, and spawning sox inside that gap reintroduces exactly the latency
+      // the eager start above exists to remove.
+      speakerReady = startSpeaker();
+      opts.onDebug?.("speaker: queued playback flushed");
+    },
+
     async stop() {
       stopping = true;
       recorder?.kill();
-      speaker?.kill();
       recorder = null;
-      speaker = null;
       await pump;
       pump = null;
       await writes.catch(() => {});
+      // Awaited before the kill, not after: a speaker still spawning would otherwise install itself
+      // once we had already killed its predecessor, and outlive the Summons playing to nobody.
+      await speakerReady?.catch(() => {});
+      speaker?.kill();
+      speaker = null;
       await fifo?.close().catch(() => {});
       fifo = null;
       speakerReady = null;
-      await rm(fifoPath, { force: true });
+      await rm(fifoPathFor(generation), { force: true });
     },
   };
 }

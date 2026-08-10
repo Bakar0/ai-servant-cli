@@ -15,6 +15,7 @@ import {
 } from "../core/summons-context.ts";
 import { createSummonsActions } from "../core/summons-delegate.ts";
 import { createHandsSession } from "../core/summons-hands.ts";
+import { attachKeyControls } from "../core/summons-keys.ts";
 import { createSummonsTickets } from "../core/summons-tickets.ts";
 import { requireOpenAiApiKey } from "../core/summons-preflight.ts";
 import { createOpenAiRealtimeTransport } from "../core/summons-realtime.ts";
@@ -93,6 +94,13 @@ export const summonCommand = defineCommand({
       default: String(DEFAULT_IDLE_TIMEOUT_SECONDS),
       description: `Seconds of silence before the session hangs up, so a forgotten mic stops billing (default: ${DEFAULT_IDLE_TIMEOUT_SECONDS}; 0 disables).`,
     },
+    headphones: {
+      type: "boolean",
+      required: false,
+      default: false,
+      description:
+        "You are on headphones, so the agent cannot hear itself. Keeps the mic open through its replies, which lets it be interrupted the instant you start speaking. On speakers this must stay off: an open mic there hears the agent and it interrupts itself.",
+    },
     debug: {
       type: "boolean",
       required: false,
@@ -150,6 +158,11 @@ export const summonCommand = defineCommand({
       write: (line) => process.stdout.write(`${line}\n`),
     });
 
+    // One adapter over the hub, handed to the controller as two narrow ports: the Claims steering
+    // reads, and the one write a Summons can make. The Call log id goes with it so anything filed
+    // by voice can be traced back to the conversation that produced it.
+    const hub = createSummonsTickets({ hubRepo, workspace, callLogId: callLog.id });
+
     let ended: () => void = () => {};
     const finished = new Promise<void>((resolve) => {
       ended = resolve;
@@ -168,8 +181,10 @@ export const summonCommand = defineCommand({
       sessions: { list: () => readWorkspaceSessions(workspace) },
       // What makes steering Claim-scoped. Offered alongside the registry and the hands, since all
       // three are needed before a session may be addressed at all (workspace ADR 0010).
-      tickets: createSummonsTickets({ hubRepo }),
+      tickets: hub,
+      filing: hub,
       audio,
+      headphones: args.headphones,
       callLog: teeCallLog([callLog.port, live]),
       instructions: composeSummonsInstructions(snapshot, briefing),
       model: args.model,
@@ -190,11 +205,24 @@ export const summonCommand = defineCommand({
     console.log(
       `servant: talking about workspace "${workspace}" (${scope.label}) — ${snapshot.tickets.length} open ticket(s).\n` +
         `  Call log: ${callLog.path}\n` +
-        "  The mic is open; just start speaking. Ctrl-C to hang up.\n",
+        `  Echo gate: ${args.headphones ? "off (headphones) — talk over it any time" : "on (speakers) — start talking to cut it off"}\n` +
+        "  The mic is open; just start speaking. m to mute, Ctrl-C to hang up.\n",
     );
 
+    // The SIGINT handler below is not redundant: it is what covers a non-terminal stdin, which the
+    // key controls deliberately leave alone.
+    const releaseKeys = attachKeyControls({
+      input: process.stdin,
+      toggleMute: () => session.toggleMute(),
+      hangUp: () => void session.stop(),
+      report: (message) => console.log(`servant: ${message}`),
+    });
     process.on("SIGINT", () => void session.stop());
-    await finished;
+    try {
+      await finished;
+    } finally {
+      releaseKeys();
+    }
     // Only the tail is waited on — every entry before it was already on disk when it happened.
     await callLog.close();
     console.log(`\nservant: Summons ended. Read it back with:\n  servant call-log ${callLog.id}`);

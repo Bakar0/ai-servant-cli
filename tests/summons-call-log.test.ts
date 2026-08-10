@@ -21,6 +21,8 @@ function fakeTransport() {
       emit = onInbound;
     },
     sendAudio() {},
+    cancelResponse() {},
+    truncateAudio() {},
     sendToolResult() {},
     sendAgentNote() {},
     async close() {},
@@ -399,6 +401,66 @@ describe("a Summons records what its Hands session did", () => {
     // Hands session was still working left no trace that it had ever been asked anything.
     expect(of("hands-asked")).toHaveLength(1);
     expect(of("ended")).toEqual([{ type: "ended", reason: "hung up" }]);
+  });
+});
+
+describe("a Summons records the things a listener could not have inferred", () => {
+  /** A silence in the record has to be explicable: a shut mic looks exactly like a quiet user. */
+  test("the mic being muted, and unmuted again", async () => {
+    const { session, of } = summoned();
+    await session.start();
+
+    session.toggleMute();
+    session.toggleMute();
+
+    const notes = of("note").map((n) => n.text);
+    expect(notes[0]).toContain("muted");
+    expect(notes[1]).toContain("unmuted");
+  });
+
+  // Without this the log holds a reply the user only heard the first second of, with nothing saying
+  // why the rest never arrived.
+  test("a reply the user talked over, so the log does not imply it was all heard", async () => {
+    const { session, emit, of } = summoned({
+      audio: {
+        async startCapture() {},
+        play() {},
+        flush() {},
+        async stop() {},
+      },
+    });
+    await session.start();
+
+    await emit({ type: "audio", pcm: Buffer.alloc(48_000).toString("base64"), itemId: "item_1" });
+    await emit({ type: "user_speaking", itemId: "utterance_2" });
+
+    expect(
+      of("note")
+        .map((n) => n.text)
+        .join(" "),
+    ).toContain("talked over");
+  });
+
+  test("the ticket it filed, and where to find it", async () => {
+    const { session, emit, of } = summoned({
+      filing: {
+        async file() {
+          return { number: 42, url: "https://github.com/acme/hub/issues/42" };
+        },
+      },
+    });
+    await session.start();
+
+    await emit(call("file_ticket", { title: "Pin the language", body: "Wrong script." }));
+    await emit({ type: "user_transcript", text: "yes", itemId: "answer" });
+
+    // The gate entry says what was heard to authorise it; this says what came of it.
+    expect(of("gate")[0]).toMatchObject({ verdict: "confirmed" });
+    expect(
+      of("note")
+        .map((n) => n.text)
+        .join(" "),
+    ).toContain("Filed #42");
   });
 });
 
