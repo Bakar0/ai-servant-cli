@@ -56,8 +56,10 @@ export function formatCallLogEntry(entry: CallLogEntry): string[] {
         entry.verdict === "confirmed"
           ? "confirmed"
           : entry.verdict === "declined"
-            ? "declined — nothing launched"
-            : "unclear — nothing launched";
+            ? // Not "nothing launched": the gate holds stops as well as delegations now, and a
+              // declined stop launched nothing in a sense that reads as the opposite of the truth.
+              "declined — nothing happened"
+            : "unclear — nothing happened";
       return [
         toolLine("?", "confirm", `"${entry.label}"`, `${verdict} ← "${oneLine(entry.heard)}"`),
       ];
@@ -86,6 +88,24 @@ export function formatCallLogEntry(entry: CallLogEntry): string[] {
       ];
       if (entry.response) lines.push(`${INDENT}  ↳ ${clip(oneLine(entry.response), 72)}`);
       return lines;
+    }
+    case "steer-sent":
+      return [toolLine("→", "steer", `${entry.target}: ${oneLine(entry.instruction)}`, "sending…")];
+    case "steer": {
+      const outcome =
+        entry.status === "delivered"
+          ? `delivered — applied at its next safe point (${formatDuration(entry.durationMs)})`
+          : entry.status === "unconfirmed"
+            ? "UNCONFIRMED — the relay did not say it sent it"
+            : `failed — ${entry.detail ?? "no reason given"}`;
+      return [
+        toolLine(
+          "→",
+          entry.stop ? "stop" : "steer",
+          `${entry.target}: ${oneLine(entry.instruction)}`,
+          outcome,
+        ),
+      ];
     }
     case "note":
       return [`${INDENT}${entry.level === "error" ? "!" : "·"} ${oneLine(entry.text)}`];

@@ -15,6 +15,7 @@ import {
 } from "../core/summons-context.ts";
 import { createSummonsActions } from "../core/summons-delegate.ts";
 import { createHandsSession } from "../core/summons-hands.ts";
+import { createSummonsTickets } from "../core/summons-tickets.ts";
 import { requireOpenAiApiKey } from "../core/summons-preflight.ts";
 import { createOpenAiRealtimeTransport } from "../core/summons-realtime.ts";
 import { createWorkspaceReader } from "../core/summons-reader.ts";
@@ -165,6 +166,9 @@ export const summonCommand = defineCommand({
       // A directory scan, not a question put to anyone — so it is always available, even in a
       // workspace whose backend has no hands to reach.
       sessions: { list: () => readWorkspaceSessions(workspace) },
+      // What makes steering Claim-scoped. Offered alongside the registry and the hands, since all
+      // three are needed before a session may be addressed at all (workspace ADR 0010).
+      tickets: createSummonsTickets({ hubRepo }),
       audio,
       callLog: teeCallLog([callLog.port, live]),
       instructions: composeSummonsInstructions(snapshot, briefing),

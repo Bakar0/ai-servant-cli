@@ -24,6 +24,7 @@ function summaryLine(log: CallLogSummary): string {
   ];
   if (log.delegations > 0) parts.push(`${log.delegations} delegated`);
   if (log.handsCalls > 0) parts.push(`${log.handsCalls} hands`);
+  if (log.steers > 0) parts.push(`${log.steers} steered`);
   if (!log.endReason) parts.push("cut off");
   return `  ${log.id.padEnd(34)}${when(log.startedAt)}  ${log.scope}  —  ${parts.join(", ")}`;
 }

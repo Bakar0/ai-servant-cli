@@ -77,24 +77,48 @@ export function parseClaim(comments: readonly { body?: string }[]): Claim | null
   return latest;
 }
 
+/**
+ * A ticket's Claim, keeping "we could not look" apart from "nobody holds it".
+ *
+ * Most callers do not need the difference — a spawn that cannot read the hub claims anyway. Steering
+ * does: it is scoped to sessions holding a Claim, and a scope that reads an unreachable hub as an
+ * unclaimed ticket is not a scope at all (ADR 0010 decision 9).
+ */
+export type ClaimResult = { known: false } | { known: true; claim: Claim | null };
+
+export async function readClaimResult(
+  hubRepo: string,
+  ticket: number,
+  opts: ClaimOptions = {},
+): Promise<ClaimResult> {
+  const runner = opts.ghRunner ?? defaultRunner;
+  try {
+    const raw = await runner([
+      "issue",
+      "view",
+      String(ticket),
+      "--repo",
+      hubRepo,
+      "--json",
+      "comments",
+    ]);
+    const parsed = JSON.parse(raw) as { comments?: { body?: string }[] };
+    return { known: true, claim: parseClaim(parsed.comments ?? []) };
+  } catch {
+    // Unreachable and unparseable land together on purpose: an answer whose shape has moved tells
+    // us as little as no answer did.
+    return { known: false };
+  }
+}
+
+/** The Claim, with an unreadable ticket flattened to "no claim known" — never a hard stop. */
 export async function readClaim(
   hubRepo: string,
   ticket: number,
   opts: ClaimOptions = {},
 ): Promise<Claim | null> {
-  const runner = opts.ghRunner ?? defaultRunner;
-  let raw: string;
-  try {
-    raw = await runner(["issue", "view", String(ticket), "--repo", hubRepo, "--json", "comments"]);
-  } catch {
-    return null; // an unreadable ticket is "no claim known", never a hard stop on the caller
-  }
-  try {
-    const parsed = JSON.parse(raw) as { comments?: { body?: string }[] };
-    return parseClaim(parsed.comments ?? []);
-  } catch {
-    return null;
-  }
+  const result = await readClaimResult(hubRepo, ticket, opts);
+  return result.known ? result.claim : null;
 }
 
 /**

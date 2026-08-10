@@ -60,6 +60,10 @@ export function composeHandsPrompt(workspace: string, request: string): string {
     "## You are headless\n\nEvery command you run has no terminal and no stdin. Anything that prompts, pages, or opens a picker will hang until you are killed, and hanging is worse than failing: the user is left listening to silence. Never run one — no `servant resume` without an id, no `git rebase -i`, no `fzf`, no pager. Pass every flag up front, pipe anything long through `cat`, and prefer a command that prints and exits. To see what sessions are running, `servant sessions [--json]` is the one that answers and exits.",
     "## What you have\n\nThe full Claude Code harness in this workspace: reading, searching, editing, git, `gh`, and the `servant` CLI itself. This workspace's skills are available to you as slash commands — use the small ones freely when they fit the request. Anything big enough to want its own session is not yours: say so instead of starting it.",
     "This session carries no ticket and holds no Claim on one.",
+    // A backstop, and deliberately not the enforcement: which session may be addressed is decided
+    // in the controller before the request ever reaches here (workspace ADR 0010, decision 9 as
+    // amended), because a model that decides its own scoping has not been scoped.
+    "## Relaying\n\nSome requests ask you to pass an instruction to another running session. Send exactly the message you are given, to exactly the session you are named — never to another one, never reworded, and never acted on yourself. The session it is addressed to has already been checked; you are the delivery, not the decision.",
     `## Request\n\n${request}`,
   ].join("\n\n");
 }
