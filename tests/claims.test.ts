@@ -4,6 +4,7 @@ import {
   claimTicket,
   parseClaim,
   readClaim,
+  readClaimResult,
   releaseTicketClaim,
 } from "../src/core/claims.ts";
 
@@ -64,6 +65,46 @@ describe("reading a ticket's Claim", () => {
       },
     });
     expect(claim).toBeNull();
+  });
+});
+
+// Steering is scoped to sessions holding a Claim, so it has to fail closed — and it cannot, if a
+// hub it could not reach is indistinguishable from a ticket nobody has claimed (ADR 0010).
+describe("telling an unreadable ticket from an unclaimed one", () => {
+  test("a ticket that read fine and has no Claim is known", async () => {
+    const { runner } = fakeGh([{ body: "looks good to me" }]);
+
+    expect(await readClaimResult("acme/hub", 7, { ghRunner: runner })).toEqual({
+      known: true,
+      claim: null,
+    });
+  });
+
+  test("a ticket that read fine reports the Claim it carries", async () => {
+    const { runner } = fakeGh([
+      { body: "<!-- servant:claim -->\n**Claim:** `ws-t7` — since 2026-08-01T00:00:00Z" },
+    ]);
+
+    expect(await readClaimResult("acme/hub", 7, { ghRunner: runner })).toEqual({
+      known: true,
+      claim: { kind: "held", session: "ws-t7", at: "2026-08-01T00:00:00Z" },
+    });
+  });
+
+  test("a hub that could not be reached is unknown, never 'nobody has claimed it'", async () => {
+    const result = await readClaimResult("acme/hub", 7, {
+      ghRunner: async () => {
+        throw new Error("gh: not authenticated");
+      },
+    });
+
+    expect(result).toEqual({ known: false });
+  });
+
+  test("an answer that is not JSON is unknown too — the shape moved, so nothing is known", async () => {
+    const result = await readClaimResult("acme/hub", 7, { ghRunner: async () => "not json" });
+
+    expect(result).toEqual({ known: false });
   });
 });
 

@@ -17,6 +17,12 @@ export interface CallLogViewData {
 }
 
 /**
+ * Joins the parts of a pairing key. A separator no part can contain, so "steer at b" and
+ * "steer a tb" cannot collide — an instruction is free text and a session name is not.
+ */
+const SEP = "\u0000";
+
+/**
  * Drop the "asked" half of every round trip that came back — reading a Summons afterwards, the
  * answer row says everything the question row did. What survives is a request no answer ever
  * followed, which is the one case reading it back cannot otherwise show: a Summons killed while
@@ -30,14 +36,26 @@ export interface CallLogViewData {
 function withoutAnsweredRequests(records: CallLogContents["records"]): CallLogContents["records"] {
   const answered = new Set<number>();
   const waiting = new Map<string, number[]>();
-  records.forEach((record, at) => {
-    if (record.type === "hands-asked") {
-      waiting.set(record.request, [...(waiting.get(record.request) ?? []), at]);
-    } else if (record.type === "hands") {
-      // Oldest first: asked the same thing twice, the first answer belongs to the first question.
-      const asked = waiting.get(record.request)?.shift();
-      if (asked !== undefined) answered.add(asked);
+  // The two round trips that record their asking separately. A steer is keyed on the session as
+  // well as the words, since the same instruction really does go to two sessions.
+  const keyOf = (record: CallLogContents["records"][number]): string | null => {
+    if (record.type === "hands-asked" || record.type === "hands")
+      return `hands${SEP}${record.request}`;
+    if (record.type === "steer-sent" || record.type === "steer") {
+      return `steer${SEP}${record.target}${SEP}${record.instruction}`;
     }
+    return null;
+  };
+  records.forEach((record, at) => {
+    const key = keyOf(record);
+    if (key === null) return;
+    if (record.type === "hands-asked" || record.type === "steer-sent") {
+      waiting.set(key, [...(waiting.get(key) ?? []), at]);
+      return;
+    }
+    // Oldest first: asked the same thing twice, the first answer belongs to the first question.
+    const asked = waiting.get(key)?.shift();
+    if (asked !== undefined) answered.add(asked);
   });
   return records.filter((_record, at) => !answered.has(at));
 }

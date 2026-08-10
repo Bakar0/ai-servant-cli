@@ -244,6 +244,14 @@
       case "hands":
         return actRow("⚙", entry.outcome === "error" ? "bad" : "", "hands", entry.request,
           entry.outcome === "ok" ? duration(entry.durationMs) : "failed", entry.response || "");
+      case "steer-sent":
+        return actRow("→", "bad", "steer", entry.target, "never came back", entry.instruction);
+      case "steer":
+        return actRow("→", entry.status === "delivered" ? "good" : entry.status === "unconfirmed" ? "held" : "bad",
+          entry.stop ? "stop" : "steer", entry.target,
+          entry.status === "delivered" ? "delivered · " + duration(entry.durationMs)
+            : entry.status === "unconfirmed" ? "not confirmed" : "failed",
+          [entry.instruction, entry.detail].filter(Boolean).join(" · "));
       case "note":
         return actRow(entry.level === "error" ? "!" : "·", entry.level === "error" ? "bad" : "",
           entry.level, entry.text, "");

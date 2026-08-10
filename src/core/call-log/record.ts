@@ -58,6 +58,29 @@ export type CallLogEntry =
       outcome: "ok" | "error";
       durationMs: number;
     }
+  /**
+   * An instruction going out to a running session, recorded before it has landed — for the same
+   * reason `hands-asked` is, since it travels through the same headless round trip.
+   */
+  | { type: "steer-sent"; target: string; instruction: string }
+  /**
+   * An instruction relayed to a running session, once the relay has answered.
+   *
+   * `status` is the distinction the whole feature turns on. `delivered` means the send tool
+   * reported success — the instruction is queued, not applied, since a session takes it up at its
+   * next safe point. `unconfirmed` means the relay came back without confirming it sent anything,
+   * which is not the same as failure and must never be recorded as delivery.
+   */
+  | {
+      type: "steer";
+      target: string;
+      instruction: string;
+      status: "delivered" | "unconfirmed" | "failed";
+      /** True when this stopped or abandoned the session — the Guarded kind. */
+      stop?: boolean;
+      detail?: string;
+      durationMs: number;
+    }
   /** Anything the session reported that was not speech — an API error, most of all. */
   | { type: "note"; level: "info" | "error"; text: string }
   | { type: "ended"; reason: CallLogEndReason };

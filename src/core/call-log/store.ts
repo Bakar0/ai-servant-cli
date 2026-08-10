@@ -116,6 +116,8 @@ export interface CallLogSummary extends CallLogHeader {
   tools: number;
   delegations: number;
   handsCalls: number;
+  /** Instructions relayed to running sessions — delivered, unconfirmed and failed alike. */
+  steers: number;
 }
 
 export interface CallLogContents {
@@ -159,6 +161,7 @@ function summarize(id: string, records: CallLogRecord[]): CallLogSummary | null 
     tools: count("tool"),
     delegations: count("delegation"),
     handsCalls: count("hands"),
+    steers: count("steer"),
   };
 }
 

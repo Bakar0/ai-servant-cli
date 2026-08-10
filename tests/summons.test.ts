@@ -9,6 +9,7 @@ import {
   type RealtimeTransport,
   type SessionsPort,
   type SummonsActions,
+  type TicketsPort,
   type TimerPort,
   type WorkspaceReader,
   createSummonsSession,
@@ -1241,5 +1242,771 @@ describe("the agent does not hear itself", () => {
     mic("c3RpbGwtcGxheWluZw==");
 
     expect(sent.audioSent).toEqual([]);
+  });
+});
+
+describe("steering a running session", () => {
+  /** A fake Hands session standing in for the relay — no `claude`, no SendMessage, no socket. */
+  function fakeHands(
+    reply: (request: string) => string | Promise<string> = () => "SERVANT-STEER: delivered",
+  ) {
+    const asked: string[] = [];
+    const hands: HandsPort = {
+      async ask(request) {
+        asked.push(request);
+        return reply(request);
+      },
+      async end() {},
+    };
+    return { hands, asked };
+  }
+
+  /** A fake hub: records every ticket comment written, answers who holds each Claim. */
+  function fakeTickets(claims: Record<number, string | null> = {}) {
+    const comments: { ticket: number; body: string }[] = [];
+    const tickets: TicketsPort = {
+      async claim(ticket) {
+        return { known: true, session: claims[ticket] ?? null };
+      },
+      async comment(ticket, body) {
+        comments.push({ ticket, body });
+      },
+    };
+    return { tickets, comments };
+  }
+
+  const listing = (
+    sessions: { name: string; kind: "worker" | "hands" | "other"; ticket: number | null }[],
+  ): SessionsPort => ({
+    list: async () => ({
+      known: true,
+      sessions: sessions.map((s, at) => ({ ...s, status: "busy", pid: 100 + at })),
+    }),
+  });
+
+  /** One Worker on #23 and the conversation's own hands — the ordinary case. */
+  const oneWorker = () =>
+    listing([
+      { name: "demo-t23", kind: "worker", ticket: 23 },
+      { name: "demo-hands", kind: "hands", ticket: null },
+    ]);
+
+  async function summoned(
+    opts: {
+      sessions?: SessionsPort;
+      hands?: HandsPort;
+      tickets?: TicketsPort;
+    } = {},
+  ) {
+    const { transport, state, emit } = fakeTransport();
+    await createSummonsSession({
+      transport,
+      reader: fakeReader().reader,
+      actions: fakeActions().actions,
+      sessions: opts.sessions ?? oneWorker(),
+      hands: opts.hands ?? fakeHands().hands,
+      tickets: opts.tickets ?? fakeTickets({ 23: "demo-t23" }).tickets,
+      instructions: "hi",
+    }).start();
+    return { state, emit };
+  }
+
+  const steer = (
+    emit: (e: RealtimeInbound) => Promise<void>,
+    args: Record<string, unknown>,
+    callId = "st1",
+  ) => emit({ type: "tool_call", callId, name: "steer_session", args: JSON.stringify(args) });
+
+  test("the steering tools are offered once there is a relay and a registry to resolve against", async () => {
+    const { state } = await summoned();
+
+    const names = (state.spec?.tools ?? []).map((t) => t.name);
+    expect(names).toContain("steer_session");
+    expect(names).toContain("stop_session");
+  });
+
+  test("without hands there is nothing to relay through, so neither tool is offered", async () => {
+    const { transport, state } = fakeTransport();
+    await createSummonsSession({
+      transport,
+      reader: fakeReader().reader,
+      sessions: oneWorker(),
+      instructions: "hi",
+    }).start();
+
+    const names = (state.spec?.tools ?? []).map((t) => t.name);
+    expect(names).not.toContain("steer_session");
+    expect(names).not.toContain("stop_session");
+  });
+
+  // AC 2. The Summons agent is not a Claude session and cannot address a Worker; what it does is
+  // ask its hands to. The assertion is that the instruction went through the relay at all.
+  test("the instruction goes out through the Hands session, never straight at the Worker", async () => {
+    const { hands, asked } = fakeHands();
+    const { emit } = await summoned({ hands });
+
+    await steer(emit, {
+      session: "demo-t23",
+      instruction: "rebase onto main before you go further",
+    });
+
+    expect(asked).toHaveLength(1);
+    expect(asked[0]).toContain("demo-t23");
+    expect(asked[0]).toContain("rebase onto main before you go further");
+  });
+
+  // AC 8 travels with the message rather than being assumed of the receiver.
+  test("what the session is handed tells it to wait for a safe point", async () => {
+    const { hands, asked } = fakeHands();
+    const { emit } = await summoned({ hands });
+
+    await steer(emit, { session: "demo-t23", instruction: "also check the tests" });
+
+    expect(asked[0]?.toLowerCase()).toContain("safe point");
+  });
+
+  // AC 3, the half that works.
+  test("a confirmed send is reported as delivered — and pointedly not as done", async () => {
+    const { state, emit } = await summoned();
+
+    await steer(emit, { session: "demo-t23", instruction: "rebase first" });
+
+    const answer = outputFor(state.toolResults, "st1");
+    expect(answer.status).toBe("delivered");
+    expect(answer.session).toBe("demo-t23");
+    expect(answer.instruction).toContain("safe point");
+    expect(answer.instruction.toLowerCase()).not.toContain("it is doing");
+  });
+
+  // AC 3, the half that matters. A relay that answered in prose has proven nothing, and the
+  // difference between "queued" and "applied" is exactly what the agent must not paper over.
+  test("a relay that did not confirm the send is unconfirmed, never delivered", async () => {
+    const { hands } = fakeHands(() => "Sure, I passed that along.");
+    const { state, emit } = await summoned({ hands });
+
+    await steer(emit, { session: "demo-t23", instruction: "rebase first" });
+
+    const answer = outputFor(state.toolResults, "st1");
+    expect(answer.status).toBe("unconfirmed");
+    expect(answer.instruction).toContain("do not say it was delivered");
+  });
+
+  test("a relay that reports a failure says so, with the reason", async () => {
+    const { hands } = fakeHands(() => "SERVANT-STEER: failed — that session has no inbox");
+    const { state, emit } = await summoned({ hands });
+
+    await steer(emit, { session: "demo-t23", instruction: "rebase first" });
+
+    const answer = outputFor(state.toolResults, "st1");
+    expect(answer.status).toBe("failed");
+    expect(answer.reason).toBe("that session has no inbox");
+  });
+
+  test("a relay that threw is a failure the user hears about, not silence", async () => {
+    const { emit, state } = await summoned({
+      hands: {
+        async ask() {
+          throw new Error("the Hands session was still working after 120 seconds");
+        },
+        async end() {},
+      },
+    });
+
+    await steer(emit, { session: "demo-t23", instruction: "rebase first" });
+
+    const answer = outputFor(state.toolResults, "st1");
+    expect(answer.status).toBe("failed");
+    expect(answer.reason).toContain("still working");
+  });
+});
+
+describe("which sessions a Summons may steer", () => {
+  function harness(
+    sessions: { name: string; kind: "worker" | "hands" | "other"; ticket: number | null }[],
+    claims: Record<number, string | null> = {},
+    claimKnown = true,
+  ) {
+    const asked: string[] = [];
+    const comments: { ticket: number; body: string }[] = [];
+    const { transport, state, emit } = fakeTransport();
+    const started = createSummonsSession({
+      transport,
+      reader: fakeReader().reader,
+      actions: fakeActions().actions,
+      sessions: {
+        list: async () => ({
+          known: true,
+          sessions: sessions.map((s, at) => ({ ...s, status: "busy", pid: 100 + at })),
+        }),
+      },
+      hands: {
+        async ask(request) {
+          asked.push(request);
+          return "SERVANT-STEER: delivered";
+        },
+        async end() {},
+      },
+      tickets: {
+        async claim(ticket) {
+          return claimKnown ? { known: true, session: claims[ticket] ?? null } : { known: false };
+        },
+        async comment(ticket, body) {
+          comments.push({ ticket, body });
+        },
+      },
+      instructions: "hi",
+    }).start();
+    return started.then(() => ({ state, emit, asked, comments }));
+  }
+
+  const steer = (
+    emit: (e: RealtimeInbound) => Promise<void>,
+    args: Record<string, unknown>,
+    callId = "st1",
+  ) => emit({ type: "tool_call", callId, name: "steer_session", args: JSON.stringify(args) });
+
+  const worker = (name: string, ticket: number) => ({ name, kind: "worker" as const, ticket });
+
+  // AC 4. A session the user started by hand carries no ticket, so nothing says it is theirs to
+  // redirect — it is nameable and deliberately not addressable.
+  test("a session holding no Claim is not addressable, and the agent is told why", async () => {
+    const { state, emit, asked } = await harness([
+      { name: "demo-scratch", kind: "other", ticket: null },
+    ]);
+
+    await steer(emit, { session: "demo-scratch", instruction: "rebase first" });
+
+    expect(asked).toEqual([]);
+    expect(outputFor(state.toolResults, "st1").error).toContain("no ticket");
+  });
+
+  test("a Worker whose ticket somebody else claimed is not addressable", async () => {
+    const { state, emit, asked } = await harness([worker("demo-t23", 23)], {
+      23: "demo-t23-redo",
+    });
+
+    await steer(emit, { session: "demo-t23", instruction: "rebase first" });
+
+    expect(asked).toEqual([]);
+    expect(outputFor(state.toolResults, "st1").error).toContain("demo-t23-redo");
+  });
+
+  test("a Worker on a ticket nobody has claimed is not addressable", async () => {
+    const { state, emit, asked } = await harness([worker("demo-t23", 23)], { 23: null });
+
+    await steer(emit, { session: "demo-t23", instruction: "rebase first" });
+
+    expect(asked).toEqual([]);
+    expect(outputFor(state.toolResults, "st1").error).toContain("Nobody holds the Claim");
+  });
+
+  // Fail closed: a hub we could not reach must never be read as a ticket nobody has claimed.
+  test("a hub that could not be reached refuses the steer rather than waving it through", async () => {
+    const { state, emit, asked } = await harness([worker("demo-t23", 23)], {}, false);
+
+    await steer(emit, { session: "demo-t23", instruction: "rebase first" });
+
+    expect(asked).toEqual([]);
+    expect(outputFor(state.toolResults, "st1").error).toContain("could not be reached");
+  });
+
+  // AC 5. The registry read is scoped to this workspace's directory, so another project's session
+  // is not in the list at all — there is no name here that could reach it.
+  test("a session in another workspace is not reachable, and cannot be named into reach", async () => {
+    const { state, emit, asked } = await harness([worker("demo-t23", 23)], { 23: "demo-t23" });
+
+    await steer(emit, { session: "otherproject-t5", instruction: "rebase first" });
+
+    expect(asked).toEqual([]);
+    expect(outputFor(state.toolResults, "st1").error).toContain("other workspaces");
+  });
+
+  test("an unreadable registry refuses rather than guessing at a name", async () => {
+    const { transport, state, emit } = fakeTransport();
+    const asked: string[] = [];
+    await createSummonsSession({
+      transport,
+      reader: fakeReader().reader,
+      sessions: { list: async () => ({ known: false }) },
+      hands: {
+        async ask(r) {
+          asked.push(r);
+          return "SERVANT-STEER: delivered";
+        },
+        async end() {},
+      },
+      tickets: {
+        async claim() {
+          return { known: false };
+        },
+        async comment() {},
+      },
+      instructions: "hi",
+    }).start();
+
+    await steer(emit, { instruction: "rebase first" });
+
+    expect(asked).toEqual([]);
+    expect(outputFor(state.toolResults, "st1").error).toContain("could not be read");
+  });
+
+  test("the ticket number is a name too, since that is what the user says out loud", async () => {
+    const { emit, asked } = await harness([worker("demo-t23", 23)], { 23: "demo-t23" });
+
+    await steer(emit, { session: "#23", instruction: "rebase first" });
+
+    expect(asked).toHaveLength(1);
+    expect(asked[0]).toContain("demo-t23");
+  });
+
+  // AC 11.
+  test("with several claimed sessions running, an unqualified instruction asks which one", async () => {
+    const { state, emit, asked } = await harness([worker("demo-t23", 23), worker("demo-t26", 26)], {
+      23: "demo-t23",
+      26: "demo-t26",
+    });
+
+    await steer(emit, { instruction: "rebase first" });
+
+    expect(asked).toEqual([]);
+    const answer = outputFor(state.toolResults, "st1");
+    expect(answer.needs_disambiguation).toBe(true);
+    expect(answer.sessions.map((s: { session: string }) => s.session)).toEqual([
+      "demo-t23",
+      "demo-t26",
+    ]);
+    expect(answer.instruction).toContain("Do not guess");
+  });
+
+  test("with only one session running, an unqualified instruction goes to it", async () => {
+    const { emit, asked } = await harness([worker("demo-t23", 23)], { 23: "demo-t23" });
+
+    await steer(emit, { instruction: "rebase first" });
+
+    expect(asked).toHaveLength(1);
+    expect(asked[0]).toContain("demo-t23");
+  });
+
+  // The hands are reachable by name, but "steer it" means the work, not the errand-runner.
+  test("the conversation's own hands are never what an unqualified instruction means", async () => {
+    const { state, emit, asked } = await harness([
+      { name: "demo-hands", kind: "hands", ticket: null },
+    ]);
+
+    await steer(emit, { instruction: "rebase first" });
+
+    expect(asked).toEqual([]);
+    expect(outputFor(state.toolResults, "st1").error).toContain("No session is running");
+  });
+});
+
+describe("what a steer writes down", () => {
+  function harness() {
+    const asked: string[] = [];
+    const comments: { ticket: number; body: string }[] = [];
+    const { transport, state, emit } = fakeTransport();
+    return createSummonsSession({
+      transport,
+      reader: fakeReader().reader,
+      sessions: {
+        list: async () => ({
+          known: true,
+          sessions: [
+            { name: "demo-t23", kind: "worker" as const, ticket: 23, status: "busy", pid: 1 },
+          ],
+        }),
+      },
+      hands: {
+        async ask(request) {
+          asked.push(request);
+          return "SERVANT-STEER: delivered";
+        },
+        async end() {},
+      },
+      tickets: {
+        async claim() {
+          return { known: true, session: "demo-t23" };
+        },
+        async comment(ticket, body) {
+          comments.push({ ticket, body });
+        },
+      },
+      instructions: "hi",
+    })
+      .start()
+      .then(() => ({ state, emit, asked, comments }));
+  }
+
+  const steer = (
+    emit: (e: RealtimeInbound) => Promise<void>,
+    args: Record<string, unknown>,
+    callId = "st1",
+  ) => emit({ type: "tool_call", callId, name: "steer_session", args: JSON.stringify(args) });
+
+  // AC 6 and AC 9 together: the ordinary case is silent and leaves no trace on the ticket.
+  test("a routine redirect goes straight out, with no confirmation asked for", async () => {
+    const { state, emit, asked } = await harness();
+
+    await steer(emit, { instruction: "also check the tests before you push" });
+
+    expect(asked).toHaveLength(1);
+    expect(state.notes).toEqual([]);
+    expect(outputFor(state.toolResults, "st1").status).toBe("delivered");
+  });
+
+  test("a routine redirect writes nothing to the ticket — the transcripts already have it twice", async () => {
+    const { emit, comments } = await harness();
+
+    await steer(emit, { instruction: "use a map instead of the array scan" });
+
+    expect(comments).toEqual([]);
+  });
+
+  // AC 10. This one outlives the session, so it goes where the session does not.
+  test("an instruction that changes what done means is written to the ticket", async () => {
+    const { emit, comments } = await harness();
+
+    await steer(emit, {
+      instruction: "it also has to work when the registry is unreadable",
+      changes_acceptance_criteria: true,
+    });
+
+    expect(comments).toHaveLength(1);
+    expect(comments[0]?.ticket).toBe(23);
+    expect(comments[0]?.body).toContain("it also has to work when the registry is unreadable");
+    expect(comments[0]?.body).toContain("demo-t23");
+  });
+
+  test("nothing is written to the ticket for an instruction that never reached the session", async () => {
+    const comments: { ticket: number; body: string }[] = [];
+    const { transport, state, emit } = fakeTransport();
+    await createSummonsSession({
+      transport,
+      reader: fakeReader().reader,
+      sessions: {
+        list: async () => ({
+          known: true,
+          sessions: [
+            { name: "demo-t23", kind: "worker" as const, ticket: 23, status: "busy", pid: 1 },
+          ],
+        }),
+      },
+      hands: {
+        async ask() {
+          return "SERVANT-STEER: failed — no such session";
+        },
+        async end() {},
+      },
+      tickets: {
+        async claim() {
+          return { known: true, session: "demo-t23" };
+        },
+        async comment(ticket, body) {
+          comments.push({ ticket, body });
+        },
+      },
+      instructions: "hi",
+    }).start();
+
+    await steer(emit, {
+      instruction: "drop the cache entirely",
+      changes_acceptance_criteria: true,
+    });
+
+    expect(outputFor(state.toolResults, "st1").status).toBe("failed");
+    expect(comments).toEqual([]);
+  });
+});
+
+describe("stopping a session is Guarded", () => {
+  function harness() {
+    const asked: string[] = [];
+    const { transport, state, emit } = fakeTransport();
+    return createSummonsSession({
+      transport,
+      reader: fakeReader().reader,
+      actions: fakeActions().actions,
+      sessions: {
+        list: async () => ({
+          known: true,
+          sessions: [
+            { name: "demo-t23", kind: "worker" as const, ticket: 23, status: "busy", pid: 1 },
+          ],
+        }),
+      },
+      hands: {
+        async ask(request) {
+          asked.push(request);
+          return "SERVANT-STEER: delivered";
+        },
+        async end() {},
+      },
+      tickets: {
+        async claim() {
+          return { known: true, session: "demo-t23" };
+        },
+        async comment() {},
+      },
+      instructions: "hi",
+    })
+      .start()
+      .then(() => ({ state, emit, asked }));
+  }
+
+  const stop = (
+    emit: (e: RealtimeInbound) => Promise<void>,
+    args: Record<string, unknown> = {},
+    callId = "sp1",
+  ) => emit({ type: "tool_call", callId, name: "stop_session", args: JSON.stringify(args) });
+
+  const steer = (
+    emit: (e: RealtimeInbound) => Promise<void>,
+    args: Record<string, unknown>,
+    callId = "st1",
+  ) => emit({ type: "tool_call", callId, name: "steer_session", args: JSON.stringify(args) });
+
+  test("asking to stop sends nothing and comes back asking to confirm", async () => {
+    const { state, emit, asked } = await harness();
+
+    await stop(emit, { session: "demo-t23", reason: "we are going a different way" });
+
+    expect(asked).toEqual([]);
+    const answer = outputFor(state.toolResults, "sp1");
+    expect(answer.status).toBe("awaiting_confirmation");
+    expect(answer.instruction).toContain("yes or no");
+    expect(answer.instruction).toContain("may be lost");
+  });
+
+  test("a spoken yes sends it", async () => {
+    const { emit, asked } = await harness();
+    await stop(emit, { session: "demo-t23" });
+
+    await emit({ type: "user_transcript", text: "Yes, go ahead.", itemId: "item_2" });
+
+    expect(asked).toHaveLength(1);
+    expect(asked[0]).toContain("demo-t23");
+  });
+
+  // A sharp edge worth knowing about: "yes, stop it" is the most natural thing to say here, and
+  // the classifier reads it as neither — "stop" is one of the words it treats as a decline. It
+  // declines, which is the safe direction, and the agent asks for a plain yes. Deliberately not
+  // loosened: the classifier is strict on purpose, and this is the action that destroys work.
+  test("'yes, stop it' is not a clear yes — it declines and asks again", async () => {
+    const { state, emit, asked } = await harness();
+    await stop(emit, { session: "demo-t23" });
+
+    await emit({ type: "user_transcript", text: "Yes, stop it.", itemId: "item_2" });
+
+    expect(asked).toEqual([]);
+    expect(state.notes.join(" ")).toContain("Ask again");
+  });
+
+  test("a spoken no sends nothing", async () => {
+    const { state, emit, asked } = await harness();
+    await stop(emit, { session: "demo-t23" });
+
+    await emit({ type: "user_transcript", text: "No.", itemId: "item_2" });
+
+    expect(asked).toEqual([]);
+    expect(state.notes.join(" ")).toContain("declined");
+    expect(state.notes.join(" ")).toContain("still running");
+  });
+
+  // Caught by a live run, not by this file: "no, leave it running" is the natural way to decline,
+  // and the classifier reads it as *unclear* rather than negative — "no" and "leave it" are both
+  // decline phrases but "running" is left over, and it only accepts an utterance made entirely of
+  // them. Nothing is sent either way, which is what matters; the agent just asks again instead of
+  // moving on. Pinned rather than loosened, for the same reason as "yes, stop it" above.
+  test("'no, leave it running' declines too, by the unclear route", async () => {
+    const { state, emit, asked } = await harness();
+    await stop(emit, { session: "demo-t23" });
+
+    await emit({ type: "user_transcript", text: "no, leave it running", itemId: "item_2" });
+
+    expect(asked).toEqual([]);
+    expect(state.notes.join(" ")).toContain("Ask again");
+  });
+
+  test("an ambiguous answer declines it — a misheard sentence must not destroy work", async () => {
+    const { state, emit, asked } = await harness();
+    await stop(emit, { session: "demo-t23" });
+
+    await emit({ type: "user_transcript", text: "hang on, what?", itemId: "item_2" });
+
+    expect(asked).toEqual([]);
+    expect(state.notes.join(" ")).toContain("Ask again");
+  });
+
+  // The separate tool is a signpost, not a fence: a model can always phrase a stop as a redirect.
+  test("a stop phrased as a redirect is still held at the gate", async () => {
+    const { state, emit, asked } = await harness();
+
+    await steer(emit, {
+      session: "demo-t23",
+      instruction: "stop what you are doing and stand down",
+    });
+
+    expect(asked).toEqual([]);
+    expect(outputFor(state.toolResults, "st1").status).toBe("awaiting_confirmation");
+  });
+
+  test("a redirect that merely mentions stopping something is not held", async () => {
+    const { emit, asked } = await harness();
+
+    await steer(emit, { session: "demo-t23", instruction: "stop using the old parser" });
+
+    expect(asked).toHaveLength(1);
+  });
+
+  // One gate for the whole conversation: two things waiting on "yes" is a yes with no referent.
+  test("a stop cannot be proposed while a delegation is already waiting on an answer", async () => {
+    const { state, emit } = await harness();
+    await emit({
+      type: "tool_call",
+      callId: "d1",
+      name: "delegate",
+      args: JSON.stringify({ task: "refactor auth", label: "auth" }),
+    });
+
+    await stop(emit, { session: "demo-t23" });
+
+    expect(outputFor(state.toolResults, "sp1").error).toContain("waiting on a yes or no");
+  });
+});
+
+// Both found in review, and both are the same shape of bug: a fact about one action leaking into
+// another because the gate and the ticket note were reasoning about the wrong thing.
+describe("holes review found in steering", () => {
+  function harness(reply = "SERVANT-STEER: delivered") {
+    const asked: string[] = [];
+    const comments: { ticket: number; body: string }[] = [];
+    const { transport, state, emit } = fakeTransport();
+    return createSummonsSession({
+      transport,
+      reader: fakeReader().reader,
+      actions: fakeActions().actions,
+      sessions: {
+        list: async () => ({
+          known: true,
+          sessions: [
+            { name: "demo-t23", kind: "worker" as const, ticket: 23, status: "busy", pid: 1 },
+          ],
+        }),
+      },
+      hands: {
+        async ask(request) {
+          asked.push(request);
+          return reply;
+        },
+        async end() {},
+      },
+      tickets: {
+        async claim() {
+          return { known: true, session: "demo-t23" };
+        },
+        async comment(ticket, body) {
+          comments.push({ ticket, body });
+        },
+      },
+      instructions: "hi",
+    })
+      .start()
+      .then(() => ({ state, emit, asked, comments }));
+  }
+
+  const steer = (
+    emit: (e: RealtimeInbound) => Promise<void>,
+    args: Record<string, unknown>,
+    callId = "st1",
+  ) => emit({ type: "tool_call", callId, name: "steer_session", args: JSON.stringify(args) });
+
+  const stop = (emit: (e: RealtimeInbound) => Promise<void>, callId = "sp1") =>
+    emit({
+      type: "tool_call",
+      callId,
+      name: "stop_session",
+      args: JSON.stringify({ session: "demo-t23" }),
+    });
+
+  // The gate holds one thing at a time, so a "yes" has one referent. A steer accepted while a stop
+  // waits would put a second question in the air, and the user's yes — meant for the steer — would
+  // release the stop. That is a session destroyed on a confirmation nobody gave.
+  test("a steer cannot be issued while a stop is waiting on an answer", async () => {
+    const { state, emit, asked } = await harness();
+    await stop(emit);
+
+    await steer(emit, { instruction: "also check the tests" });
+
+    expect(asked).toEqual([]);
+    expect(outputFor(state.toolResults, "st1").error).toContain("waiting on a yes or no");
+  });
+
+  test("and the yes that follows still resolves the stop it was asked about", async () => {
+    const { emit, asked } = await harness();
+    await stop(emit);
+    await steer(emit, { instruction: "also check the tests" });
+
+    await emit({ type: "user_transcript", text: "yes", itemId: "item_2" });
+
+    expect(asked).toHaveLength(1);
+    expect(asked[0]).toContain("stand down");
+  });
+
+  // AC 10 against the unconfirmed case. The note outlives the session; dropping it because the
+  // relay went quiet rounds "unconfirmed" down to "failed", which is the conflation this feature
+  // exists to avoid — and the send may well have landed.
+  test("a criteria change is written to the ticket even when delivery was unconfirmed", async () => {
+    const { emit, comments } = await harness("I passed it along.");
+
+    await steer(emit, {
+      instruction: "it also has to work when the registry is unreadable",
+      changes_acceptance_criteria: true,
+    });
+
+    expect(comments).toHaveLength(1);
+    expect(comments[0]?.body).toContain("it also has to work when the registry is unreadable");
+    // ...and the note says so, rather than reading as a change that certainly landed.
+    expect(comments[0]?.body.toLowerCase()).toContain("not confirmed");
+  });
+
+  test("a steer that outright failed still writes nothing to the ticket", async () => {
+    const { emit, comments } = await harness("SERVANT-STEER: failed — no such session");
+
+    await steer(emit, {
+      instruction: "drop the cache entirely",
+      changes_acceptance_criteria: true,
+    });
+
+    expect(comments).toEqual([]);
+  });
+
+  // A refused steer leaves no `steer` record, so without this it leaves no trace at all — and the
+  // Call log's whole promise is that nothing the agent does on the user's behalf is invisible.
+  test("a steer that was refused still shows up in the Call log", async () => {
+    const recorded: { type: string }[] = [];
+    const { transport, emit } = fakeTransport();
+    await createSummonsSession({
+      transport,
+      reader: fakeReader().reader,
+      sessions: { list: async () => ({ known: true, sessions: [] }) },
+      hands: {
+        async ask() {
+          return "SERVANT-STEER: delivered";
+        },
+        async end() {},
+      },
+      tickets: {
+        async claim() {
+          return { known: true, session: null };
+        },
+        async comment() {},
+      },
+      callLog: { record: (entry) => recorded.push(entry) },
+      instructions: "hi",
+    }).start();
+
+    await steer(emit, { session: "demo-t99", instruction: "rebase first" });
+
+    expect(recorded.map((e) => e.type)).toContain("tool");
   });
 });

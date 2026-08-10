@@ -155,6 +155,13 @@ describe("reading call logs back", () => {
       outcome: "ok",
       durationMs: 4200,
     });
+    log.port.record({
+      type: "steer",
+      target: "counted-t28",
+      instruction: "rebase onto main first",
+      status: "delivered",
+      durationMs: 900,
+    });
     log.port.record({ type: "ended", reason: "hung up" });
     await log.close();
 
@@ -165,9 +172,10 @@ describe("reading call logs back", () => {
       tools: 1,
       delegations: 1,
       handsCalls: 1,
+      steers: 1,
       endReason: "hung up",
     });
-    expect(contents?.records).toHaveLength(6);
+    expect(contents?.records).toHaveLength(7);
   });
 
   test("lists past Summonses newest first, and narrows to one workspace", async () => {

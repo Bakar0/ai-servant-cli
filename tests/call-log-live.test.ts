@@ -172,3 +172,70 @@ describe("watching a Summons live", () => {
     for (const entry of all) expect(formatCallLogEntry(entry).length).toBeGreaterThan(0);
   });
 });
+
+describe("watching a steer go out", () => {
+  test("shows the instruction going out before anything has come back", () => {
+    const [line] = watched([
+      { type: "steer-sent", target: "demo-t23", instruction: "rebase onto main first" },
+    ]);
+    expect(line).toContain("demo-t23: rebase onto main first");
+    expect(line).toContain("sending…");
+  });
+
+  // The user is watching this scroll past while they talk. "Delivered" has to read as what it is —
+  // queued, applied later — or the view repeats the conflation the tool result works to avoid.
+  test("a delivered steer says it lands at the session's next safe point", () => {
+    const [line] = watched([
+      {
+        type: "steer",
+        target: "demo-t23",
+        instruction: "rebase onto main first",
+        status: "delivered",
+        durationMs: 3400,
+      },
+    ]);
+    expect(line).toContain("delivered");
+    expect(line).toContain("safe point");
+  });
+
+  test("an unconfirmed steer is loud about not knowing", () => {
+    const [line] = watched([
+      {
+        type: "steer",
+        target: "demo-t23",
+        instruction: "rebase first",
+        status: "unconfirmed",
+        durationMs: 900,
+      },
+    ]);
+    expect(line).toContain("UNCONFIRMED");
+  });
+
+  test("a stop is named as a stop, not as another redirect", () => {
+    const [line] = watched([
+      {
+        type: "steer",
+        target: "demo-t23",
+        instruction: "stop and stand down",
+        status: "delivered",
+        stop: true,
+        durationMs: 500,
+      },
+    ]);
+    expect(line).toContain("stop");
+  });
+
+  test("a failed steer carries the reason it failed", () => {
+    const [line] = watched([
+      {
+        type: "steer",
+        target: "demo-t23",
+        instruction: "rebase first",
+        status: "failed",
+        detail: "no session at that name",
+        durationMs: 120,
+      },
+    ]);
+    expect(line).toContain("failed — no session at that name");
+  });
+});

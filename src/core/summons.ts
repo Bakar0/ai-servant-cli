@@ -4,6 +4,12 @@
 
 import { type CallLogEndReason, type CallLogPort, NULL_CALL_LOG } from "./call-log/record.ts";
 import { classifyConfirmation } from "./summons-confirm.ts";
+import {
+  composeSteerMessage,
+  composeSteerRequest,
+  looksLikeStopInstruction,
+  parseSteerAck,
+} from "./summons-steer.ts";
 
 /** Default Realtime model. Native speech-to-speech, so there is no STT/TTS pipeline in the path. */
 export const DEFAULT_SUMMONS_MODEL = "gpt-realtime";
@@ -226,6 +232,78 @@ export const HANDS_TOOLS: readonly SummonsTool[] = [
   },
 ];
 
+/**
+ * The hub ticket, as steering needs it: who is carrying it, and somewhere to record a change.
+ *
+ * `claim` degrades to unknown rather than to "nobody holds it", and steering fails closed on
+ * unknown. That distinction is the whole guarantee — a scope that reads an unreachable hub as an
+ * unclaimed ticket would let a spoken instruction into work nobody meant (ADR 0010 decision 9).
+ */
+export interface TicketsPort {
+  claim(ticket: number): Promise<{ known: false } | { known: true; session: string | null }>;
+  /** Only ever called for an instruction that changes what *done* means — see `STEER_TOOLS`. */
+  comment(ticket: number, body: string): Promise<void>;
+}
+
+/**
+ * Redirecting work that is already running. Neither tool addresses a session itself: the Summons
+ * agent is not a Claude session, so both go out through the Hands session, which is (ADR 0010
+ * decision 6). Which session may be addressed is decided here and not there — see `resolveTarget`.
+ *
+ * `steer_session` is not Guarded, deliberately. Sessions run in auto mode and their own permission
+ * prompts are the real gate; a message is speech to another agent, not an action on the workspace,
+ * and confirming every steer would make the feature unusable in the workflow it exists for.
+ * `stop_session` is Guarded, because it destroys work already done and nothing downstream catches
+ * it (decision 8).
+ */
+export const STEER_TOOLS: readonly SummonsTool[] = [
+  {
+    name: "steer_session",
+    description:
+      "Redirect a Claude session that is ALREADY RUNNING — 'rebase onto main first', 'drop that approach', 'also check the tests'. Use this the moment the user wants to change what a running session is doing; it is the whole point of talking while work is in flight. It launches nothing and needs no confirmation. The instruction is relayed to that session, which takes it up at its next safe point rather than immediately, so report it as passed on, never as done. To stop or abandon a session, use stop_session instead — not this.",
+    parameters: {
+      type: "object",
+      properties: {
+        session: {
+          type: "string",
+          description:
+            "Which session to steer, by the name list_sessions reports, or its ticket number. Omit only when there is just one session running; with several, you will be asked which.",
+        },
+        instruction: {
+          type: "string",
+          description:
+            "What to tell it, written out for someone who cannot hear this conversation. The user's own words and specifics, in full sentences — it is relayed verbatim.",
+        },
+        changes_acceptance_criteria: {
+          type: "boolean",
+          description:
+            "True only when this changes what *done* means for the ticket — a new requirement, a dropped one, a different definition of finished. That gets written to the ticket, because it outlives the session. A plain course correction does not: leave this out.",
+        },
+      },
+      required: ["instruction"],
+    },
+  },
+  {
+    name: "stop_session",
+    description:
+      "Tell a running session to stop or abandon what it is doing. Calling this stops NOTHING: it asks the user to confirm out loud first, because stopping destroys work already done and nothing else will catch it. Say out loud what you are about to stop, ask for a plain yes or no, and stop — their spoken answer is what decides.",
+    parameters: {
+      type: "object",
+      properties: {
+        session: {
+          type: "string",
+          description:
+            "Which session to stop, by the name list_sessions reports, or its ticket number.",
+        },
+        reason: {
+          type: "string",
+          description: "Why it is being stopped, so the session can wind up knowing what happened.",
+        },
+      },
+    },
+  },
+];
+
 /** What the user asked for, once the agent has written it down as an instruction. */
 export interface DelegationRequest {
   task: string;
@@ -375,6 +453,8 @@ export interface SummonsSessionOptions {
   hands?: HandsPort | undefined;
   /** Omitted, the agent cannot see what else is running in the workspace. */
   sessions?: SessionsPort | undefined;
+  /** Omitted, the agent cannot steer: it has no way to check who is claimed to what. */
+  tickets?: TicketsPort | undefined;
   audio?: AudioPort | undefined;
   instructions: string;
   model?: string | undefined;
@@ -485,18 +565,110 @@ function labelMatches(tracked: string, wanted: string): boolean {
 }
 
 /**
- * The Guarded half of the controller: it holds a proposed delegation until the user says yes out
- * loud, tracks what has been handed out, and keeps two tasks on one repo from running at once.
- *
- * The gate lives here, and not in the agent's instructions, for the reason the whole design turns
- * on: a model that decides its own confirmations has not been gated at all.
+ * An action held back until the user says yes out loud. There is one gate for the whole
+ * conversation and every Guarded action goes through it — a second gate would be a second place
+ * for the rule to drift, and two proposals waiting at once is a spoken "yes" with no clear referent.
  */
-function createDelegations(opts: SummonsSessionOptions) {
+interface GatedAction {
+  /** What the user is being asked about, as the Call log names it. */
+  label: string;
+  /**
+   * The utterance that *caused* the proposal. Transcription lags, so the request can be transcribed
+   * after the reply it provoked, and the gate must not read it as the answer to itself.
+   */
+  askedAfterItemId: string | null;
+  /** What did not happen, said back when the answer is anything but a clear yes. */
+  nothingHappened: string;
+  /** Runs on a spoken yes, and returns the note the agent is given. */
+  run(): Promise<string>;
+  /** How a failure of `run` is put to the user. */
+  failed(message: string): string;
+}
+
+/**
+ * The confirm-gate. It lives here, and not in the agent's instructions, for the reason the whole
+ * design turns on: a model that decides its own confirmations has not been gated at all.
+ */
+function createGate(opts: SummonsSessionOptions) {
+  const log = opts.callLog ?? NULL_CALL_LOG;
+  let pending: GatedAction | null = null;
+
+  return {
+    /**
+     * Why this call must not proceed, when something is already waiting on an answer.
+     *
+     * Every tool that could put a second question in the air asks this first — not just the ones
+     * that hold the gate themselves. A steer accepted while a stop waits makes the agent speak
+     * again, and the user's "yes" to *that* releases the stop instead: a session destroyed on a
+     * confirmation nobody gave.
+     */
+    blocked(): string | null {
+      return pending
+        ? `"${pending.label}" is already waiting on a yes or no. Get an answer to that first.`
+        : null;
+    },
+
+    /** Put an action aside. Does no I/O at all — nothing can be launched from here. */
+    hold(action: GatedAction): void {
+      pending = action;
+    },
+
+    /**
+     * The user has spoken while something is held. Only an unambiguous yes releases it: a no and
+     * anything unclear both decline, because a misheard sentence must never act. Returns false when
+     * the utterance was not an answer at all, leaving the gate held.
+     */
+    async resolve(text: string, itemId: string | null): Promise<boolean> {
+      const action = pending;
+      if (!action) return false;
+      if (itemId && itemId === action.askedAfterItemId) return false;
+      pending = null;
+
+      const verdict = classifyConfirmation(text);
+      // Recorded before anything acts on it: the gate's verdict, and the words it was read from,
+      // are the one thing a later reader most needs to check the agent against.
+      log.record({
+        type: "gate",
+        label: action.label,
+        verdict:
+          verdict === "negative" ? "declined" : verdict === "unclear" ? "unclear" : "confirmed",
+        heard: text,
+      });
+      if (verdict === "negative") {
+        opts.transport.sendAgentNote(
+          `The user declined "${action.label}". ${action.nothingHappened} Acknowledge briefly and move on.`,
+        );
+        return true;
+      }
+      if (verdict === "unclear") {
+        opts.transport.sendAgentNote(
+          `That was not a clear yes, so "${action.label}" did NOT go ahead. ${action.nothingHappened} Ask again for a plain yes or no.`,
+        );
+        return true;
+      }
+      try {
+        opts.transport.sendAgentNote(await action.run());
+      } catch (err) {
+        opts.transport.sendAgentNote(
+          action.failed(err instanceof Error ? err.message : String(err)),
+        );
+      }
+      return true;
+    },
+  };
+}
+
+type Gate = ReturnType<typeof createGate>;
+
+/**
+ * Delegation: holding a proposed job at the gate until the user says yes, tracking what has been
+ * handed out, and keeping two tasks on one repo from running at once.
+ */
+function createDelegations(opts: SummonsSessionOptions, gate: Gate) {
   const actions = opts.actions;
   const log = opts.callLog ?? NULL_CALL_LOG;
   const tracked: TrackedDelegation[] = [];
   const conversation: string[] = [];
-  let pending: { request: DelegationRequest; askedAfterItemId: string | null } | null = null;
 
   const labelOf = (t: TrackedDelegation) => t.request.label;
   const labels = () => tracked.map(labelOf);
@@ -673,10 +845,8 @@ function createDelegations(opts: SummonsSessionOptions) {
     },
 
     /**
-     * Hold a proposed delegation. Nothing is launched here, and nothing can be — this does no I/O
-     * at all; the request is put aside and the agent is told to go and ask. `lastUserItemId` marks
-     * the utterance that *caused* this proposal, so a late transcript of it is not mistaken for
-     * the answer to it.
+     * Hold a proposed delegation at the gate. Nothing is launched here, and nothing can be — this
+     * does no I/O at all; the request is put aside and the agent is told to go and ask.
      */
     propose(callId: string, rawArgs: string, lastUserItemId: string | null): ToolOutcome {
       const answer = (payload: Record<string, unknown>) =>
@@ -686,10 +856,10 @@ function createDelegations(opts: SummonsSessionOptions) {
         answer({ error });
         return { outcome: "error", detail: error };
       }
-      if (pending) {
-        const error = `"${pending.request.label}" is already waiting on a yes or no. Get an answer to that first.`;
-        answer({ error });
-        return { outcome: "error", detail: error };
+      const blocked = gate.blocked();
+      if (blocked) {
+        answer({ error: blocked });
+        return { outcome: "error", detail: blocked };
       }
       let request: DelegationRequest;
       try {
@@ -699,66 +869,28 @@ function createDelegations(opts: SummonsSessionOptions) {
         answer({ error: detail });
         return { outcome: "error", detail };
       }
-      pending = { request, askedAfterItemId: lastUserItemId };
+      const label = request.label;
+      gate.hold({
+        label,
+        askedAfterItemId: lastUserItemId,
+        nothingHappened: "Nothing was launched.",
+        async run() {
+          const outcome = await dispatch(request);
+          return outcome.launched
+            ? `Launched "${label}" in a Claude session (${outcome.session}). Tell the user it is running and that they can ask how it is going.`
+            : `"${label}" is queued behind "${outcome.queuedBehind}" — they touch the same repo, so they cannot run at once. Tell the user it will start when that one finishes.`;
+        },
+        failed: (message) =>
+          `Launching "${label}" failed: ${message}. Nothing is running. Tell the user plainly.`,
+      });
       answer({
         status: "awaiting_confirmation",
         launched: false,
-        label: request.label,
+        label,
         instruction:
           "Nothing has been launched. Say out loud, in one sentence, what you are about to hand to Claude, then ask the user to answer yes or no. Do not call delegate again — their spoken answer is what decides.",
       });
-      return { outcome: "held", detail: request.label };
-    },
-
-    /**
-     * The user has spoken while a delegation is held. Only an unambiguous yes releases it; a no and
-     * anything unclear both decline, because a misheard sentence must never launch runaway work.
-     * Returns false when the utterance was not an answer at all (the request itself, transcribed
-     * late), leaving the gate held.
-     */
-    async resolve(text: string, itemId: string | null): Promise<boolean> {
-      const held = pending;
-      if (!held) return false;
-      if (itemId && itemId === held.askedAfterItemId) return false;
-      pending = null;
-
-      const verdict = classifyConfirmation(text);
-      // Recorded before anything acts on it: the gate's verdict, and the words it was read from,
-      // are the one thing a later reader most needs to check the agent against.
-      log.record({
-        type: "gate",
-        label: held.request.label,
-        verdict:
-          verdict === "negative" ? "declined" : verdict === "unclear" ? "unclear" : "confirmed",
-        heard: text,
-      });
-      if (verdict === "negative") {
-        opts.transport.sendAgentNote(
-          `The user declined "${held.request.label}". Nothing was launched. Acknowledge briefly and move on.`,
-        );
-        return true;
-      }
-      if (verdict === "unclear") {
-        opts.transport.sendAgentNote(
-          `That was not a clear yes, so "${held.request.label}" was NOT launched. Ask again for a plain yes or no.`,
-        );
-        return true;
-      }
-
-      const label = held.request.label;
-      try {
-        const outcome = await dispatch(held.request);
-        opts.transport.sendAgentNote(
-          outcome.launched
-            ? `Launched "${label}" in a Claude session (${outcome.session}). Tell the user it is running and that they can ask how it is going.`
-            : `"${label}" is queued behind "${outcome.queuedBehind}" — they touch the same repo, so they cannot run at once. Tell the user it will start when that one finishes.`,
-        );
-      } catch (err) {
-        opts.transport.sendAgentNote(
-          `Launching "${label}" failed: ${err instanceof Error ? err.message : String(err)}. Nothing is running. Tell the user plainly.`,
-        );
-      }
-      return true;
+      return { outcome: "held", detail: label };
     },
 
     /** Silent, and never gated — observing changes nothing, so nothing is confirmed. */
@@ -820,6 +952,361 @@ function createDelegations(opts: SummonsSessionOptions) {
 }
 
 /**
+ * Stamped on the ticket notes steering writes, so servant can find its own among the discussion —
+ * the same discipline as `CLAIM_MARKER`.
+ */
+export const STEER_TICKET_MARKER = "<!-- servant:steer -->";
+
+/** A session this Summons may address, once the registry and the hub have both allowed it. */
+interface SteerTarget {
+  name: string;
+  /** The ticket a Worker session carries; null for the conversation's own hands. */
+  ticket: number | null;
+}
+
+/**
+ * Steering: deciding which running session may be addressed, and relaying an instruction to it.
+ *
+ * The Claim check lives here rather than in the Hands session's prompt, which is a deliberate
+ * amendment to ADR 0010's reasoning. Routing delivery through the hands is what the ADR decided
+ * and what happens; but *which* session may be addressed is enforced deterministically, because a
+ * model that decides its own scoping has not been scoped — the same reason the confirm-gate is not
+ * left to the agent's instructions. The Hands prompt still carries the rule, as a backstop that is
+ * not load-bearing.
+ */
+function createSteering(opts: SummonsSessionOptions, gate: Gate, timers: TimerPort) {
+  const log = opts.callLog ?? NULL_CALL_LOG;
+
+  /** Everything the registry says is running here, workspace-scoped by construction (AC 5). */
+  async function candidates(): Promise<
+    { known: false } | { known: true; targets: SteerTarget[]; unaddressable: string[] }
+  > {
+    const report = await opts.sessions?.list();
+    if (!report || !report.known) return { known: false };
+    const targets: SteerTarget[] = [];
+    const unaddressable: string[] = [];
+    for (const session of report.sessions) {
+      if (session.kind === "worker" && session.ticket !== null) {
+        targets.push({ name: session.name, ticket: session.ticket });
+      } else if (session.kind === "hands") {
+        targets.push({ name: session.name, ticket: null });
+      } else {
+        // A session the user started by hand carries no ticket and so holds no Claim. Nameable,
+        // deliberately not addressable — the agent has to be able to say why (AC 4).
+        unaddressable.push(session.name);
+      }
+    }
+    return { known: true, targets, unaddressable };
+  }
+
+  /** How a person names a session out loud: its name, or the ticket it carries. */
+  function matches(target: SteerTarget, wanted: string): boolean {
+    const want = wanted.trim().toLowerCase().replace(/^#/, "");
+    if (target.name.toLowerCase() === want) return true;
+    if (
+      target.ticket !== null &&
+      (want === String(target.ticket) || want === `t${target.ticket}`)
+    ) {
+      return true;
+    }
+    return false;
+  }
+
+  type Resolved =
+    | { ok: true; target: SteerTarget }
+    | { ok: false; refusal: Record<string, unknown>; detail: string };
+
+  const refuse = (error: string): Resolved => ({ ok: false, refusal: { error }, detail: error });
+
+  /**
+   * Which session an instruction is for. Fails closed at every step: an unreadable registry, an
+   * unreachable hub and a ticket claimed by somebody else all refuse rather than guess, because
+   * the one thing steering must never do is put a spoken instruction into unrelated work.
+   */
+  async function resolveTarget(wanted: string | undefined): Promise<Resolved> {
+    const found = await candidates();
+    if (!found.known) {
+      return refuse(
+        "This machine's session registry could not be read, so you cannot tell which session that is. Say so — do not guess at a name.",
+      );
+    }
+    if (!wanted) {
+      // The hands are reachable but never the default: "tell it to rebase" means the work, not the
+      // conversation's own errand-runner.
+      const workers = found.targets.filter((t) => t.ticket !== null);
+      if (workers.length === 0) {
+        return refuse(
+          found.unaddressable.length > 0
+            ? `Nothing addressable is running. ${found.unaddressable.join(", ")} ${found.unaddressable.length === 1 ? "is" : "are"} running but ${found.unaddressable.length === 1 ? "carries" : "carry"} no ticket, so ${found.unaddressable.length === 1 ? "it holds" : "they hold"} no Claim and cannot be steered.`
+            : "No session is running that this workspace can steer.",
+        );
+      }
+      // AC 11: picking one would send the user's instruction into work they did not mean.
+      //
+      // Counted over sessions carrying a ticket, not over sessions whose Claim has been read —
+      // reading every Claim here would be one `gh` round trip per session while the user is
+      // mid-sentence. The cost is asking "which one?" in the rare case where several are running
+      // and only one is actually claimed; the Claim is still checked on whichever they name, so
+      // the scope never widens, only the question gets asked once more than it had to.
+      if (workers.length > 1) {
+        return {
+          ok: false,
+          refusal: {
+            needs_disambiguation: true,
+            sessions: workers.map((t) => ({ session: t.name, ticket: t.ticket })),
+            instruction:
+              "Several sessions are running. Ask the user which one they mean, and say what each is carrying. Do not guess, and do not send it to all of them.",
+          },
+          detail: "asked which session",
+        };
+      }
+      return { ok: true, target: workers[0] as SteerTarget };
+    }
+
+    const matched = found.targets.filter((t) => matches(t, wanted));
+    if (matched.length !== 1) {
+      const named = found.unaddressable.some((name) => name.toLowerCase() === wanted.toLowerCase());
+      return refuse(
+        named
+          ? `"${wanted}" is running here but carries no ticket, so it holds no Claim and cannot be steered. Say that, and offer to ask your hands instead.`
+          : `There is no session called "${wanted}" running in this workspace. Call list_sessions and use a name from it — you cannot reach sessions in other workspaces or other projects.`,
+      );
+    }
+    const target = matched[0] as SteerTarget;
+    if (target.ticket === null) return { ok: true, target };
+
+    // AC 4, and the reason `claim` degrades to unknown rather than to null: a hub we could not
+    // reach must refuse, not wave the instruction through.
+    const claim = await opts.tickets?.claim(target.ticket);
+    if (!claim || !claim.known) {
+      return refuse(
+        `The hub could not be reached to check who holds #${target.ticket}, so nothing was sent. Say that plainly rather than assuming it went.`,
+      );
+    }
+    if (claim.session !== target.name) {
+      return refuse(
+        claim.session
+          ? `#${target.ticket} is claimed by ${claim.session}, not ${target.name}, so ${target.name} was not steered.`
+          : `Nobody holds the Claim on #${target.ticket}, so ${target.name} cannot be steered. Only sessions carrying a claimed ticket can be.`,
+      );
+    }
+    return { ok: true, target };
+  }
+
+  /** One relayed instruction: recorded going out, recorded coming back, whatever happened. */
+  async function deliver(
+    target: SteerTarget,
+    instruction: string,
+    stop: boolean,
+  ): Promise<{ result: Record<string, unknown>; outcome: ToolOutcome }> {
+    const startedAt = timers.now();
+    const message = composeSteerMessage({ instruction, stop });
+    // Written before the round trip, not after it: a relay can run for a minute or two, and the
+    // Call log is the only place a headless session's work is visible while it is happening.
+    log.record({ type: "steer-sent", target: target.name, instruction });
+
+    const finish = (
+      status: "delivered" | "unconfirmed" | "failed",
+      detail: string | undefined,
+      result: Record<string, unknown>,
+    ) => {
+      log.record({
+        type: "steer",
+        target: target.name,
+        instruction,
+        status,
+        ...(detail ? { detail } : {}),
+        ...(stop ? { stop: true } : {}),
+        durationMs: timers.now() - startedAt,
+      });
+      return {
+        result,
+        outcome: { outcome: status === "delivered" ? "ok" : "error", detail } as ToolOutcome,
+      };
+    };
+
+    let reply: string;
+    try {
+      if (!opts.hands) throw new Error("This Summons has no hands to relay through.");
+      reply = await opts.hands.ask(composeSteerRequest({ target: target.name, message }));
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      return finish("failed", reason, {
+        status: "failed",
+        session: target.name,
+        reason,
+        instruction: `The instruction did NOT reach ${target.name}: ${reason}. Tell the user plainly that nothing was passed on.`,
+      });
+    }
+
+    const ack = parseSteerAck(reply);
+    if (ack.outcome === "delivered") {
+      return finish("delivered", undefined, {
+        status: "delivered",
+        session: target.name,
+        instruction: `The instruction is in ${target.name}'s inbox. Say it has been passed on, and that ${target.name} will take it up at its next safe point. Whether it has acted on it yet is something you do not know, so do not claim it has. If the user wants to know whether it took, check back in a minute.`,
+      });
+    }
+    if (ack.outcome === "failed") {
+      return finish("failed", ack.reason, {
+        status: "failed",
+        session: target.name,
+        reason: ack.reason,
+        instruction: `The instruction did NOT reach ${target.name}: ${ack.reason || "no reason given"}. Tell the user plainly that nothing was passed on.`,
+      });
+    }
+    // The honest middle, and the reason this is parsed at all: the relay answered without
+    // confirming it sent anything, so "delivered" would be an assumption (AC 3).
+    return finish("unconfirmed", "the relay did not confirm the send", {
+      status: "unconfirmed",
+      session: target.name,
+      instruction: `Your hands did not confirm the send, so you do not know whether the instruction reached ${target.name}. Say exactly that — do not say it was delivered. Offer to try again.`,
+    });
+  }
+
+  /** The ticket note an instruction earns only by changing what *done* means (AC 9 and 10). */
+  async function noteOnTicket(
+    target: SteerTarget,
+    instruction: string,
+    unconfirmed: boolean,
+  ): Promise<void> {
+    if (target.ticket === null || !opts.tickets) return;
+    // The caveat is on the note rather than a reason to withhold it: whoever reads this ticket
+    // later needs the changed criterion *and* the fact that the session may never have heard it.
+    const caveat = unconfirmed
+      ? "\n\nDelivery to that session was **not confirmed** — it may not have heard this."
+      : "";
+    try {
+      await opts.tickets.comment(
+        target.ticket,
+        `${STEER_TICKET_MARKER}\n**Steered by voice** — relayed to \`${target.name}\`:\n\n> ${instruction.trim().replace(/\n/g, "\n> ")}${caveat}`,
+      );
+    } catch (err) {
+      // A note that failed to write must not turn a delivered instruction into a reported failure
+      // — but it cannot vanish either, or the ticket silently misses what changed.
+      log.record({
+        type: "note",
+        level: "error",
+        text: `The steer reached ${target.name} but the ticket note on #${target.ticket} failed: ${err instanceof Error ? err.message : String(err)}`,
+      });
+    }
+  }
+
+  /**
+   * Not Guarded — unless the words say otherwise, in which case it goes to the gate anyway.
+   *
+   * `relayed` says whether the call got as far as the relay, and so whether it already wrote its
+   * own `steer` entries. Everything short of that — a refusal for scope, a gate already holding,
+   * an unreadable registry — leaves no record of its own and has to be logged as a tool call.
+   */
+  async function steer(
+    callId: string,
+    rawArgs: string,
+    lastUserItemId: string | null,
+  ): Promise<ToolOutcome & { relayed: boolean }> {
+    const answer = (payload: Record<string, unknown>) =>
+      opts.transport.sendToolResult(callId, JSON.stringify(payload));
+    let instruction: string;
+    let args: Record<string, unknown>;
+    try {
+      args = parseArgs(rawArgs, "steer_session");
+      instruction = requireString(args, "instruction", "steer_session");
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      answer({ error: detail });
+      return { outcome: "error", detail, relayed: false };
+    }
+    // A stop phrased as a redirect is still a stop. The separate tool is the signpost; this is
+    // what makes the gate hold regardless of which one the model reached for (ADR 0010, 8).
+    if (looksLikeStopInstruction(instruction)) {
+      return { ...(await stop(callId, rawArgs, lastUserItemId, instruction)), relayed: false };
+    }
+    // Asked even though steering holds nothing itself: a steer accepted while a stop waits makes
+    // the agent speak again, and the user's "yes" to *that* would release the stop.
+    const blocked = gate.blocked();
+    if (blocked) {
+      answer({ error: blocked });
+      return { outcome: "error", detail: blocked, relayed: false };
+    }
+    const resolved = await resolveTarget(optionalString(args, "session"));
+    if (!resolved.ok) {
+      answer(resolved.refusal);
+      return { outcome: "error", detail: resolved.detail, relayed: false };
+    }
+    // Written on `unconfirmed` too, and deliberately. The note is the part that outlives the
+    // session; dropping it because the relay went quiet rounds "we do not know" down to "it did not
+    // happen", which is the conflation this whole feature exists to avoid. Only an outright
+    // failure — where nothing was sent — leaves the ticket alone.
+    const { result, outcome } = await deliver(resolved.target, instruction, false);
+    if (args.changes_acceptance_criteria === true && result.status !== "failed") {
+      await noteOnTicket(resolved.target, instruction, result.status === "unconfirmed");
+    }
+    answer(result);
+    return { ...outcome, relayed: true };
+  }
+
+  /**
+   * Guarded, and through the same gate everything else Guarded goes through. The target is
+   * resolved before the gate rather than after it, so the user is asked about a session that
+   * actually exists and can actually be reached.
+   */
+  async function stop(
+    callId: string,
+    rawArgs: string,
+    lastUserItemId: string | null,
+    instructionOverride?: string,
+  ): Promise<ToolOutcome> {
+    const answer = (payload: Record<string, unknown>) =>
+      opts.transport.sendToolResult(callId, JSON.stringify(payload));
+    let args: Record<string, unknown>;
+    try {
+      args = parseArgs(rawArgs, "stop_session");
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      answer({ error: detail });
+      return { outcome: "error", detail };
+    }
+    const blocked = gate.blocked();
+    if (blocked) {
+      answer({ error: blocked });
+      return { outcome: "error", detail: blocked };
+    }
+    const resolved = await resolveTarget(optionalString(args, "session"));
+    if (!resolved.ok) {
+      answer(resolved.refusal);
+      return { outcome: "error", detail: resolved.detail };
+    }
+    const target = resolved.target;
+    const reason = optionalString(args, "reason");
+    const instruction =
+      instructionOverride ?? `Stop what you are doing and stand down.${reason ? ` ${reason}` : ""}`;
+    const label = `stop ${target.name}`;
+    gate.hold({
+      label,
+      askedAfterItemId: lastUserItemId,
+      nothingHappened: `${target.name} is still running and was not told anything.`,
+      async run() {
+        const { result } = await deliver(target, instruction, true);
+        return typeof result.instruction === "string"
+          ? result.instruction
+          : `Told ${target.name} to stop.`;
+      },
+      failed: (message) =>
+        `Telling ${target.name} to stop failed: ${message}. It is still running. Tell the user plainly.`,
+    });
+    answer({
+      status: "awaiting_confirmation",
+      session: target.name,
+      ...(target.ticket === null ? {} : { ticket: target.ticket }),
+      instruction: `Nothing has been sent. Say out loud that you are about to stop ${target.name}${target.ticket === null ? "" : ` on #${target.ticket}`} and that work it has already done may be lost, then ask for a plain yes or no and stop. Their spoken answer is what decides.`,
+    });
+    return { outcome: "held", detail: label };
+  }
+
+  return { steer, stop };
+}
+
+/**
  * The one thing about a tool call worth reading at a glance — the path, the pattern, the label.
  * Best-effort by design: an unparseable argument blob is a thing to record, not to fail on.
  */
@@ -841,7 +1328,11 @@ export function createSummonsSession(opts: SummonsSessionOptions): SummonsSessio
   const timers = opts.timers ?? realTimers;
   const idleTimeoutMs = opts.idleTimeoutMs ?? DEFAULT_SUMMONS_IDLE_TIMEOUT_MS;
   const log = opts.callLog ?? NULL_CALL_LOG;
-  const delegations = createDelegations(opts);
+  const gate = createGate(opts);
+  const delegations = createDelegations(opts, gate);
+  // Steering needs all three: a registry to resolve a name against, a hub to check the Claim on,
+  // and hands to relay through. Missing any one, the tools are not offered at all (below).
+  const steering = createSteering(opts, gate, timers);
   let idleHandle: unknown = null;
   let stopped = false;
   /** When the audio queued so far will have finished playing out of the speakers. */
@@ -948,6 +1439,19 @@ export function createSummonsSession(opts: SummonsSessionOptions): SummonsSessio
       recordCall(await delegations.research(call.callId, call.args));
       return;
     }
+    // Steering writes its own `steer` entries once it reaches the relay — what was sent and
+    // whether it landed is the record of the call, the same way `ask_hands` is. A call that never
+    // got that far leaves no `steer` entry, so it is recorded as a plain tool call instead:
+    // an instruction refused for scope is exactly what the user needs to see in the log.
+    if (call.name === "steer_session") {
+      const outcome = await steering.steer(call.callId, call.args, lastUserItemId);
+      if (!outcome.relayed) recordCall(outcome);
+      return;
+    }
+    if (call.name === "stop_session") {
+      recordCall(await steering.stop(call.callId, call.args, lastUserItemId));
+      return;
+    }
     let result: Record<string, unknown>;
     try {
       result =
@@ -1016,8 +1520,8 @@ export function createSummonsSession(opts: SummonsSessionOptions): SummonsSessio
         return;
       case "user_transcript":
         log.record({ type: "said", who: "user", text: event.text });
-        // The one place a spoken word decides something: releasing a held delegation.
-        await delegations.resolve(event.text, event.itemId ?? null);
+        // The one place a spoken word decides something: releasing whatever the gate is holding.
+        await gate.resolve(event.text, event.itemId ?? null);
         delegations.remember("user", event.text);
         return;
       case "assistant_transcript":
@@ -1043,6 +1547,7 @@ export function createSummonsSession(opts: SummonsSessionOptions): SummonsSessio
             ...(opts.actions ? DELEGATION_TOOLS : []),
             ...(opts.hands ? HANDS_TOOLS : []),
             ...(opts.sessions ? SESSIONS_TOOLS : []),
+            ...(opts.hands && opts.sessions && opts.tickets ? STEER_TOOLS : []),
           ],
         },
         handleInbound,

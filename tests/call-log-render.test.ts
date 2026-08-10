@@ -1,4 +1,6 @@
 import { describe, expect, test } from "bun:test";
+import type { CallLogEntry } from "../src/core/call-log/record.ts";
+import { CALL_LOG_TEMPLATE } from "../src/core/call-log/template.ts";
 import { buildCallLogViewData, renderCallLog } from "../src/core/call-log/render.ts";
 import type { CallLogContents, CallLogSummary } from "../src/core/call-log/store.ts";
 
@@ -16,6 +18,7 @@ const SUMMARY: CallLogSummary = {
   tools: 1,
   delegations: 1,
   handsCalls: 1,
+  steers: 0,
 };
 
 const CONTENTS: CallLogContents = {
@@ -138,6 +141,79 @@ describe("call log view data", () => {
     ).toEqual([]);
   });
 
+  test("drops the sending half of a steer the outcome already covers", () => {
+    const steered: CallLogContents = {
+      summary: SUMMARY,
+      records: [
+        {
+          type: "steer-sent",
+          at: "2026-08-09T10:46:56.000Z",
+          target: "demo-t23",
+          instruction: "rebase onto main first",
+        },
+        {
+          type: "steer",
+          at: "2026-08-09T10:47:00.000Z",
+          target: "demo-t23",
+          instruction: "rebase onto main first",
+          status: "delivered",
+          durationMs: 4000,
+        },
+      ],
+    };
+    const entries = buildCallLogViewData(steered).entries;
+    expect(entries.filter((e) => e.type === "steer-sent")).toEqual([]);
+    expect(entries.filter((e) => e.type === "steer")).toHaveLength(1);
+  });
+
+  // A Summons killed mid-relay is the case reading it back cannot otherwise show: the instruction
+  // went out and nothing here says whether it landed.
+  test("keeps a steer that never came back", () => {
+    const cutOff: CallLogContents = {
+      summary: SUMMARY,
+      records: [
+        {
+          type: "steer-sent",
+          at: "2026-08-09T10:46:56.000Z",
+          target: "demo-t23",
+          instruction: "rebase onto main first",
+        },
+      ],
+    };
+    expect(buildCallLogViewData(cutOff).entries).toHaveLength(1);
+  });
+
+  test("the same instruction to two sessions pairs each with its own outcome", () => {
+    const both: CallLogContents = {
+      summary: SUMMARY,
+      records: [
+        {
+          type: "steer-sent",
+          at: "2026-08-09T10:46:00.000Z",
+          target: "demo-t23",
+          instruction: "rebase first",
+        },
+        {
+          type: "steer-sent",
+          at: "2026-08-09T10:46:01.000Z",
+          target: "demo-t26",
+          instruction: "rebase first",
+        },
+        {
+          type: "steer",
+          at: "2026-08-09T10:47:00.000Z",
+          target: "demo-t26",
+          instruction: "rebase first",
+          status: "delivered",
+          durationMs: 1000,
+        },
+      ],
+    };
+    const left = buildCallLogViewData(both).entries.filter((e) => e.type === "steer-sent");
+    expect(left).toHaveLength(1);
+    expect((left[0] as { target: string }).target).toBe("demo-t23");
+  });
+
   test("keeps a request no answer ever followed — the one case only it can show", () => {
     const killed: CallLogContents = {
       summary: { ...SUMMARY, endedAt: null, endReason: null, handsCalls: 0 },
@@ -147,6 +223,42 @@ describe("call log view data", () => {
       ],
     };
     expect(buildCallLogViewData(killed).entries).toHaveLength(2);
+  });
+});
+
+/**
+ * The page's renderer is browser-only inline JS with `default: return null`, so an entry type it
+ * has no case for is dropped in silence — the record keeps it and the page just never shows it.
+ * There is no DOM harness in this repo to catch that, so this is the guard: the compiler forces
+ * the list to stay complete, and the test forces the template to keep up with it.
+ */
+describe("the page renders every kind of entry", () => {
+  // Adding a kind to `CallLogEntry` breaks this object until it is listed, which is the point:
+  // "row" means the timeline switch must have a case, "elsewhere" means the page renders it
+  // some other way (`ended` becomes the footer, via an early return before the switch).
+  const EVERY_ENTRY_TYPE: Record<CallLogEntry["type"], "row" | "elsewhere"> = {
+    said: "row",
+    tool: "row",
+    gate: "row",
+    delegation: "row",
+    "hands-asked": "row",
+    hands: "row",
+    "steer-sent": "row",
+    steer: "row",
+    note: "row",
+    ended: "elsewhere",
+  };
+
+  const rows = Object.entries(EVERY_ENTRY_TYPE)
+    .filter(([, how]) => how === "row")
+    .map(([type]) => type);
+
+  test.each(rows)("the timeline switch has a case for %p", (type) => {
+    expect(CALL_LOG_TEMPLATE).toContain(`case "${type}":`);
+  });
+
+  test("the kinds that skip the timeline are skipped on purpose, not by omission", () => {
+    expect(CALL_LOG_TEMPLATE).toContain('entry.type === "ended"');
   });
 });
 
