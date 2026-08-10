@@ -88,6 +88,17 @@ describe("ensureServantAssets", () => {
     expect(await readFile(extract, "utf8")).toContain("--reconcile");
   });
 
+  // A skill nobody can invoke has not shipped, so the asset-sync path is asserted per command
+  // rather than trusted — template changes are also inert until the binary is rebuilt.
+  test("ships the /servant:lead initiative report", async () => {
+    await ensureServantAssets();
+    const lead = await readFile(join(claudeCommandsDir(), "servant", "lead.md"), "utf8");
+    expect(lead).toContain("/servant:lead");
+    // The join it reports from, and the rule that keeps redirecting safe.
+    expect(lead).toContain("servant tasks --frontier");
+    expect(lead).toContain("safe point");
+  });
+
   test("ships the /servant:handoff continuation skill", async () => {
     await ensureServantAssets();
     const handoff = await readFile(join(claudeCommandsDir(), "servant", "handoff.md"), "utf8");
