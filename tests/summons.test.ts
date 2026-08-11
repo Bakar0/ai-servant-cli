@@ -120,6 +120,7 @@ async function audioSession(overrides: Partial<SummonsSessionOptions> = {}) {
     flush() {
       flushes.push(timers.now());
     },
+    endReply() {},
     async stop() {},
   };
   const session = createSummonsSession({
@@ -980,6 +981,7 @@ describe("summons audio", () => {
         state.played.push(pcm);
       },
       flush() {},
+      endReply() {},
       async stop() {
         state.stopped = true;
         state.capturing = false;
@@ -1108,6 +1110,7 @@ describe("summons idle hang-up", () => {
       },
       play() {},
       flush() {},
+      endReply() {},
       async stop() {},
     };
     const session = createSummonsSession({
@@ -1172,6 +1175,7 @@ describe("summons failures the user can hear about", () => {
         async startCapture() {},
         play() {},
         flush() {},
+        endReply() {},
         async stop() {
           audioStopped.push("stopped");
         },
@@ -1230,6 +1234,7 @@ describe("a session that dies while it is still starting", () => {
       },
       play() {},
       flush() {},
+      endReply() {},
       async stop() {
         events.push("mic-off");
       },
@@ -1307,6 +1312,7 @@ describe("the agent does not hear itself", () => {
       },
       play() {},
       flush() {},
+      endReply() {},
       async stop() {},
     };
     const session = createSummonsSession({

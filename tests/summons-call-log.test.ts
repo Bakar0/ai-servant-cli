@@ -426,6 +426,7 @@ describe("a Summons records the things a listener could not have inferred", () =
         async startCapture() {},
         play() {},
         flush() {},
+        endReply() {},
         async stop() {},
       },
     });

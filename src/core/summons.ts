@@ -462,6 +462,12 @@ export interface AudioPort {
    * for however long was already buffered.
    */
   flush(): void;
+  /**
+   * No more audio is coming for this reply. Distinct from `flush`, which throws away what is left:
+   * this says the opposite — play all of it, including the last syllable, which a speaker that
+   * cannot tell where a reply ends will otherwise hold back waiting for more.
+   */
+  endReply(): void;
   stop(): Promise<void>;
 }
 
@@ -1618,6 +1624,9 @@ function createMicGate(opts: SummonsSessionOptions, timers: TimerPort) {
 
     replyFinishedGenerating(): void {
       generating = false;
+      // Every byte of the reply is in, so the speaker is told where it ends — which is what lets it
+      // play the last syllable rather than holding it back waiting for audio that will never come.
+      opts.audio?.endReply();
     },
 
     /**
