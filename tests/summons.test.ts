@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   type AudioPort,
+  PLAYBACK_TAIL_MS,
   type DelegationReport,
   type DelegationRequest,
   type HandsPort,
@@ -9,6 +10,8 @@ import {
   type RealtimeTransport,
   type SessionsPort,
   type SummonsActions,
+  type SummonsSessionOptions,
+  type TicketFilingPort,
   type TicketsPort,
   type TimerPort,
   type WorkspaceReader,
@@ -24,6 +27,8 @@ function fakeTransport() {
     audioSent: [] as string[],
     toolResults: [] as { callId: string; output: string }[],
     notes: [] as string[],
+    cancelled: 0,
+    truncated: [] as { itemId: string; playedMs: number }[],
     closed: false,
   };
   const transport: RealtimeTransport = {
@@ -33,6 +38,12 @@ function fakeTransport() {
     },
     sendAudio(chunk) {
       state.audioSent.push(chunk);
+    },
+    cancelResponse() {
+      state.cancelled += 1;
+    },
+    truncateAudio(itemId, playedMs) {
+      state.truncated.push({ itemId, playedMs });
     },
     sendToolResult(callId, output) {
       state.toolResults.push({ callId, output });
@@ -70,6 +81,60 @@ function fakeReader(overrides: Partial<WorkspaceReader> = {}) {
 
 const outputFor = (results: { callId: string; output: string }[], callId: string) =>
   JSON.parse(results.find((r) => r.callId === callId)?.output ?? "null");
+
+/** A hand-driven clock, so playback and echo timing are asserted without waiting in real time. */
+function fakeClock(start = 1_000) {
+  let t = start;
+  const timers: TimerPort = {
+    now: () => t,
+    setTimeout: () => 0,
+    clearTimeout: () => {},
+  };
+  return { timers, advance: (ms: number) => (t += ms) };
+}
+
+/**
+ * A mic frame as the audio port delivers them: base64 PCM16 at 24 kHz, `ms` long, at a given
+ * amplitude. Alternating sign so it has the RMS of real audio rather than of a DC offset — the
+ * echo gate reads the level of these frames, so their loudness is part of the fixture.
+ */
+function micChunk(ms: number, amplitude = 0): string {
+  const samples = Math.round((24_000 * ms) / 1000);
+  const buffer = Buffer.alloc(samples * 2);
+  for (let i = 0; i < samples; i++)
+    buffer.writeInt16LE(i % 2 === 0 ? amplitude : -amplitude, i * 2);
+  return buffer.toString("base64");
+}
+
+/** A session with a mic and speaker, on a clock the test drives. */
+async function audioSession(overrides: Partial<SummonsSessionOptions> = {}) {
+  const { transport, state: sent, emit } = fakeTransport();
+  const { timers, advance } = fakeClock();
+  const flushes: number[] = [];
+  let pushMic: (chunk: string) => void = () => {};
+  const audio: AudioPort = {
+    async startCapture(onChunk) {
+      pushMic = onChunk;
+    },
+    play() {},
+    flush() {
+      flushes.push(timers.now());
+    },
+    endReply() {},
+    async stop() {},
+  };
+  const session = createSummonsSession({
+    transport,
+    reader: fakeReader().reader,
+    audio,
+    instructions: "hi",
+    idleTimeoutMs: 0,
+    timers,
+    ...overrides,
+  });
+  await session.start();
+  return { session, sent, emit, advance, flushes, mic: (chunk: string) => pushMic(chunk) };
+}
 
 describe("summons startup", () => {
   test("connects with the assembled instructions and the configured voice and model", async () => {
@@ -111,6 +176,57 @@ describe("summons startup", () => {
 
     const names = (state.spec?.tools ?? []).map((t) => t.name).toSorted();
     expect(names).toEqual(["glob", "grep", "read_file"]);
+  });
+
+  // The whole surface, with everything wired. Filing a ticket in the hub is the only thing here
+  // that writes anywhere, and nothing here touches the working tree (workspace ADR 0009).
+  test("with every port wired, the only tool that writes anything is the one that files a ticket", async () => {
+    const { transport, state } = fakeTransport();
+    await createSummonsSession({
+      transport,
+      reader: fakeReader().reader,
+      actions: {
+        async delegate(request) {
+          return { label: request.label, sessionName: "demo-t1" };
+        },
+        async observe() {
+          return { status: "running" as const, latest: null, turns: 0 };
+        },
+      },
+      hands: {
+        async ask() {
+          return "ok";
+        },
+        async end() {},
+      },
+      sessions: { list: async () => ({ known: true, sessions: [] }) },
+      tickets: {
+        async claim() {
+          return { known: true, session: null };
+        },
+        async comment() {},
+      },
+      filing: {
+        async file() {
+          return { number: 1, url: "https://example.invalid/issues/1" };
+        },
+      },
+      instructions: "hi",
+    }).start();
+
+    expect((state.spec?.tools ?? []).map((t) => t.name).toSorted()).toEqual([
+      "ask_hands",
+      "check_delegation",
+      "delegate",
+      "file_ticket",
+      "glob",
+      "grep",
+      "list_sessions",
+      "read_file",
+      "research",
+      "steer_session",
+      "stop_session",
+    ]);
   });
 });
 
@@ -864,6 +980,8 @@ describe("summons audio", () => {
       play(pcm) {
         state.played.push(pcm);
       },
+      flush() {},
+      endReply() {},
       async stop() {
         state.stopped = true;
         state.capturing = false;
@@ -991,6 +1109,8 @@ describe("summons idle hang-up", () => {
         pushMic = onChunk;
       },
       play() {},
+      flush() {},
+      endReply() {},
       async stop() {},
     };
     const session = createSummonsSession({
@@ -1054,6 +1174,8 @@ describe("summons failures the user can hear about", () => {
       audio: {
         async startCapture() {},
         play() {},
+        flush() {},
+        endReply() {},
         async stop() {
           audioStopped.push("stopped");
         },
@@ -1111,6 +1233,8 @@ describe("a session that dies while it is still starting", () => {
         await onStart?.();
       },
       play() {},
+      flush() {},
+      endReply() {},
       async stop() {
         events.push("mic-off");
       },
@@ -1124,6 +1248,8 @@ describe("a session that dies while it is still starting", () => {
         await onInbound({ type: "closed" });
       },
       sendAudio() {},
+      cancelResponse() {},
+      truncateAudio() {},
       sendToolResult() {},
       sendAgentNote() {},
       async close() {
@@ -1150,6 +1276,8 @@ describe("a session that dies while it is still starting", () => {
         die = () => onInbound({ type: "closed" });
       },
       sendAudio() {},
+      cancelResponse() {},
+      truncateAudio() {},
       sendToolResult() {},
       sendAgentNote() {},
       async close() {
@@ -1171,17 +1299,6 @@ describe("a session that dies while it is still starting", () => {
 });
 
 describe("the agent does not hear itself", () => {
-  /** A hand-driven clock, so playback timing is asserted without waiting in real time. */
-  function fakeClock() {
-    let t = 1_000;
-    const timers: TimerPort = {
-      now: () => t,
-      setTimeout: () => 0,
-      clearTimeout: () => {},
-    };
-    return { timers, advance: (ms: number) => (t += ms) };
-  }
-
   /** One second of 24 kHz mono PCM16 = 48000 bytes, base64-encoded. */
   const ONE_SECOND_OF_SPEECH = Buffer.alloc(48_000).toString("base64");
 
@@ -1194,6 +1311,8 @@ describe("the agent does not hear itself", () => {
         pushMic = onChunk;
       },
       play() {},
+      flush() {},
+      endReply() {},
       async stop() {},
     };
     const session = createSummonsSession({
@@ -1240,6 +1359,388 @@ describe("the agent does not hear itself", () => {
     advance(1_000); // 1.5s in, but 2s of speech was queued
 
     mic("c3RpbGwtcGxheWluZw==");
+
+    expect(sent.audioSent).toEqual([]);
+  });
+
+  test("the frame straddling the end of playback is held — all of it is echo", async () => {
+    const { sent, emit, advance, mic } = await speakingSession();
+
+    await emit({ type: "audio", pcm: ONE_SECOND_OF_SPEECH });
+    // A frame is ~200ms of *history*, so a frame that arrives 100ms after the window closes began
+    // 100ms before it did. Judging it on its arrival time admits a frame of the agent's own voice,
+    // which is all the model's voice detection needs to make it interrupt itself.
+    advance(1_000 + PLAYBACK_TAIL_MS + 100);
+    mic(micChunk(200));
+    expect(sent.audioSent).toEqual([]);
+
+    // The next frame begins after the window and is the user's turn.
+    advance(200);
+    mic(micChunk(200));
+    expect(sent.audioSent).toHaveLength(1);
+  });
+});
+
+describe("barging in on the agent", () => {
+  /** The agent's own voice returning through the speakers — what the gate has to ignore. */
+  const ECHO = 900;
+  /** Somebody in the room talking over it, well clear of the echo. */
+  const SPEECH = 6_000;
+
+  /** A session four seconds into a reply it is still playing out. */
+  async function agentTalking(overrides: Partial<SummonsSessionOptions> = {}) {
+    const session = await audioSession(overrides);
+    await session.emit({ type: "audio", pcm: micChunk(4_000), itemId: "item_1" });
+    return session;
+  }
+
+  /** Feed one 200ms frame, a frame's worth of clock later. */
+  function frame(s: Awaited<ReturnType<typeof agentTalking>>, amplitude: number, count = 1): void {
+    for (let i = 0; i < count; i++) {
+      s.advance(200);
+      s.mic(micChunk(200, amplitude));
+    }
+  }
+
+  test("speaking over the agent cancels the reply, flushes playback and reopens the mic", async () => {
+    const s = await agentTalking();
+
+    // Two frames of the agent's own voice coming back in: this is the echo floor, not a person.
+    frame(s, ECHO, 2);
+    expect(s.sent.cancelled).toBe(0);
+    expect(s.flushes).toEqual([]);
+
+    // Now somebody starts talking over it.
+    frame(s, SPEECH, 2);
+
+    expect(s.sent.cancelled).toBe(1);
+    expect(s.flushes).toHaveLength(1);
+    // 800ms of a four-second reply actually reached the room, and that is what the model is told
+    // it said — otherwise it refers back to sentences nobody heard.
+    expect(s.sent.truncated).toEqual([{ itemId: "item_1", playedMs: 800 }]);
+
+    // The mic is open again immediately: the rest of the sentence has to reach the model, and the
+    // audio it was being held back for no longer exists.
+    frame(s, SPEECH);
+    expect(s.sent.audioSent).toHaveLength(1);
+  });
+
+  test("the agent's own echo never interrupts it, however long the reply runs", async () => {
+    const s = await agentTalking();
+
+    frame(s, ECHO, 15);
+
+    expect(s.sent.cancelled).toBe(0);
+    expect(s.flushes).toEqual([]);
+    expect(s.sent.audioSent).toEqual([]);
+  });
+
+  // The live failure this closes. A frame is 200ms of history, so the first frame of the playback
+  // window was recorded *before* any sound left the speakers — it is silence. Seeding the echo floor
+  // from it put the floor at nearly zero, every real echo frame after it cleared the threshold, and
+  // the agent flushed and respawned its own speaker every 400ms for the length of the reply. On the
+  // speakers that is not speech, it is a growl; the log showed a perfectly ordinary reply.
+  test("the silence just before playback starts does not become the echo floor", async () => {
+    const s = await agentTalking();
+
+    // A frame arriving 100ms into the reply covers the 200ms before it — mostly the room from
+    // *before* the agent spoke, so it says nothing about how loud the echo is.
+    s.advance(100);
+    s.mic(micChunk(200, 0));
+
+    // Room echo at an ordinary speaker volume, far above any absolute idea of "loud enough to be a
+    // voice" — the only thing that can tell it from a person is a floor learned from real echo.
+    frame(s, 4_000, 12);
+
+    expect(s.sent.cancelled).toBe(0);
+    expect(s.flushes).toEqual([]);
+  });
+
+  test("the speakers turned up do not interrupt the agent — the threshold is relative to the room", async () => {
+    const s = await agentTalking();
+
+    // Echo well above any absolute idea of "loud enough to be speech": only a floor learned from
+    // this room at this volume can tell it apart from a person.
+    frame(s, 4_000, 4);
+    expect(s.sent.cancelled).toBe(0);
+
+    frame(s, 12_000, 2);
+    expect(s.sent.cancelled).toBe(1);
+  });
+
+  test("a loud frame with nothing playing is just the user talking, not a barge-in", async () => {
+    const s = await audioSession();
+
+    s.advance(200);
+    s.mic(micChunk(200, SPEECH));
+    s.advance(200);
+    s.mic(micChunk(200, SPEECH));
+
+    expect(s.sent.cancelled).toBe(0);
+    expect(s.flushes).toEqual([]);
+    expect(s.sent.audioSent).toHaveLength(2);
+  });
+
+  test("one loud frame is a door, not an interruption — it takes two to cut the agent off", async () => {
+    const s = await agentTalking();
+    frame(s, ECHO, 2);
+
+    frame(s, SPEECH);
+
+    expect(s.sent.cancelled).toBe(0);
+
+    // And a single spike does not leave the detector primed: the count starts over.
+    frame(s, ECHO, 2);
+    frame(s, SPEECH);
+    expect(s.sent.cancelled).toBe(0);
+  });
+
+  test("the server hearing the user mid-reply cuts it off, whatever the mic is doing", async () => {
+    const s = await agentTalking();
+
+    s.advance(300);
+    await s.emit({ type: "user_speaking", itemId: "utterance_9" });
+
+    expect(s.sent.cancelled).toBe(1);
+    expect(s.flushes).toHaveLength(1);
+    expect(s.sent.truncated).toEqual([{ itemId: "item_1", playedMs: 300 }]);
+  });
+
+  test("with headphones the mic is never gated, so the server does the hearing", async () => {
+    const s = await agentTalking({ headphones: true });
+
+    // No echo to protect against, so nothing is held back mid-reply — which is what lets the
+    // server's voice detection notice the interruption in the first place.
+    s.advance(300);
+    s.mic(micChunk(200, SPEECH));
+    expect(s.sent.audioSent).toHaveLength(1);
+
+    await s.emit({ type: "user_speaking", itemId: "utterance_9" });
+    expect(s.sent.cancelled).toBe(1);
+    expect(s.flushes).toHaveLength(1);
+  });
+
+  test("a reply that has finished generating is flushed, not cancelled", async () => {
+    const s = await agentTalking();
+
+    // The model produces audio faster than it plays, so by the time the user talks over the tail of
+    // a reply there is often nothing left to cancel. Asking anyway is an API error the user would
+    // hear about for no reason — the queued audio still has to go.
+    await s.emit({ type: "reply_done" });
+    s.advance(300);
+    await s.emit({ type: "user_speaking", itemId: "utterance_9" });
+
+    expect(s.sent.cancelled).toBe(0);
+    expect(s.flushes).toHaveLength(1);
+    expect(s.sent.truncated).toEqual([{ itemId: "item_1", playedMs: 300 }]);
+  });
+
+  test("taking your turn after the agent finished is not an interruption", async () => {
+    const s = await agentTalking();
+
+    // The reply played all the way out and the user answered normally, seconds later. Reading that
+    // as a barge-in would flush a speaker with nothing in it, truncate a message that was heard in
+    // full, and put an interruption in the Call log on every single turn.
+    await s.emit({ type: "reply_done" });
+    s.advance(30_000);
+    await s.emit({ type: "user_speaking", itemId: "utterance_9" });
+
+    expect(s.sent.cancelled).toBe(0);
+    expect(s.sent.truncated).toEqual([]);
+    expect(s.flushes).toEqual([]);
+  });
+
+  test("the user starting a turn with nothing playing cancels nothing", async () => {
+    const s = await audioSession();
+
+    await s.emit({ type: "user_speaking", itemId: "utterance_1" });
+
+    expect(s.sent.cancelled).toBe(0);
+    expect(s.sent.truncated).toEqual([]);
+    expect(s.flushes).toEqual([]);
+  });
+
+  test("a muted mic cannot barge in — that is the whole point of muting it", async () => {
+    const s = await agentTalking();
+    s.session.toggleMute();
+
+    frame(s, SPEECH, 6);
+
+    expect(s.sent.cancelled).toBe(0);
+    expect(s.flushes).toEqual([]);
+  });
+});
+
+describe("filing a hub ticket by voice is Guarded", () => {
+  function fakeFiling(overrides: Partial<TicketFilingPort> = {}) {
+    const filed: { title: string; body: string }[] = [];
+    const filing: TicketFilingPort = {
+      async file(request) {
+        filed.push(request);
+        return { number: 42, url: "https://github.com/acme/hub/issues/42" };
+      },
+      ...overrides,
+    };
+    return { filing, filed };
+  }
+
+  async function summoned(filing: TicketFilingPort) {
+    const { transport, state, emit } = fakeTransport();
+    await createSummonsSession({
+      transport,
+      reader: fakeReader().reader,
+      filing,
+      instructions: "hi",
+    }).start();
+    return { state, emit };
+  }
+
+  const propose = (
+    emit: (e: RealtimeInbound) => Promise<void>,
+    args: Record<string, unknown> = {
+      title: "Pin the transcription language",
+      body: "Utterances come back in the wrong script.",
+    },
+    callId = "f1",
+  ) => emit({ type: "tool_call", callId, name: "file_ticket", args: JSON.stringify(args) });
+
+  const said = (emit: (e: RealtimeInbound) => Promise<void>, text: string) =>
+    emit({ type: "user_transcript", text, itemId: "answer" });
+
+  test("asking for a ticket files nothing and sends the agent to ask out loud", async () => {
+    const { filing, filed } = fakeFiling();
+    const { state, emit } = await summoned(filing);
+
+    await propose(emit);
+
+    expect(filed).toEqual([]);
+    const answer = outputFor(state.toolResults, "f1");
+    expect(answer.status).toBe("awaiting_confirmation");
+    expect(answer.filed).toBe(false);
+    expect(answer.instruction).toMatch(/yes or no/i);
+  });
+
+  test("a spoken yes files it in the hub and the agent is given the number", async () => {
+    const { filing, filed } = fakeFiling();
+    const { state, emit } = await summoned(filing);
+
+    await propose(emit);
+    await said(emit, "yes");
+
+    expect(filed).toEqual([
+      {
+        title: "Pin the transcription language",
+        body: "Utterances come back in the wrong script.",
+      },
+    ]);
+    expect(state.notes.join(" ")).toContain("#42");
+  });
+
+  test("a no files nothing", async () => {
+    const { filing, filed } = fakeFiling();
+    const { state, emit } = await summoned(filing);
+
+    await propose(emit);
+    await said(emit, "no, leave it");
+
+    expect(filed).toEqual([]);
+    expect(state.notes.join(" ")).toMatch(/did NOT go ahead|declined/);
+  });
+
+  test("an answer that is not a plain yes files nothing", async () => {
+    const { filing, filed } = fakeFiling();
+    const { state, emit } = await summoned(filing);
+
+    await propose(emit);
+    await said(emit, "well, maybe file it later, I suppose");
+
+    expect(filed).toEqual([]);
+    expect(state.notes.join(" ")).toContain("not a clear yes");
+  });
+
+  test("a late transcript of the request itself is not the answer to it", async () => {
+    const { filing, filed } = fakeFiling();
+    const { emit } = await summoned(filing);
+
+    // Transcription lags: the utterance that *caused* the proposal can land after it.
+    await emit({ type: "user_speaking", itemId: "the-request" });
+    await propose(emit);
+    await emit({
+      type: "user_transcript",
+      text: "yes, file that as a ticket",
+      itemId: "the-request",
+    });
+
+    expect(filed).toEqual([]);
+    // Still held, so the real answer still lands.
+    await said(emit, "yes");
+    expect(filed).toHaveLength(1);
+  });
+
+  test("only one question is in the air at a time", async () => {
+    const { filing, filed } = fakeFiling();
+    const { state, emit } = await summoned(filing);
+
+    await propose(emit);
+    await propose(emit, { title: "Something else", body: "..." }, "f2");
+
+    expect(outputFor(state.toolResults, "f2").error).toMatch(/already waiting/);
+    // And the yes that follows releases the first one, not the second.
+    await said(emit, "yes");
+    expect(filed).toEqual([
+      {
+        title: "Pin the transcription language",
+        body: "Utterances come back in the wrong script.",
+      },
+    ]);
+  });
+
+  test("a hub that refuses the write is reported as nothing filed", async () => {
+    const { filing } = fakeFiling({
+      async file() {
+        throw new Error("gh: could not create issue");
+      },
+    });
+    const { state, emit } = await summoned(filing);
+
+    await propose(emit);
+    await said(emit, "yes");
+
+    expect(state.notes.join(" ")).toContain("Nothing was filed");
+  });
+
+  test("the tool is not offered at all when there is no hub to file to", async () => {
+    const { transport, state } = fakeTransport();
+    await createSummonsSession({
+      transport,
+      reader: fakeReader().reader,
+      instructions: "hi",
+    }).start();
+
+    expect((state.spec?.tools ?? []).map((t) => t.name)).not.toContain("file_ticket");
+  });
+});
+
+describe("muting the mic", () => {
+  test("a mute toggle suspends input, and unmuting resumes it", async () => {
+    const { session, sent, mic } = await audioSession();
+
+    expect(session.toggleMute()).toBe(true);
+    mic(micChunk(200, 8_000));
+    expect(sent.audioSent).toEqual([]);
+
+    expect(session.toggleMute()).toBe(false);
+    mic(micChunk(200, 8_000));
+    expect(sent.audioSent).toHaveLength(1);
+  });
+
+  test("a muted mic stays shut through a reply — unmuting is the only thing that opens it", async () => {
+    const { session, sent, emit, advance, mic } = await audioSession();
+    session.toggleMute();
+
+    await emit({ type: "audio", pcm: micChunk(1_000) });
+    advance(2_000); // well past the reply and its tail, so only the mute is holding the mic
+    mic(micChunk(200, 8_000));
 
     expect(sent.audioSent).toEqual([]);
   });

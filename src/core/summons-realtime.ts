@@ -19,7 +19,7 @@ export function toInbound(event: unknown): RealtimeInbound | null {
   const e = asRecord(event);
   switch (str(e.type)) {
     case "response.output_audio.delta":
-      return { type: "audio", pcm: str(e.delta) };
+      return { type: "audio", pcm: str(e.delta), itemId: str(e.item_id) || undefined };
     case "input_audio_buffer.speech_started":
       return { type: "user_speaking", itemId: str(e.item_id) || undefined };
     case "conversation.item.input_audio_transcription.completed":
@@ -37,6 +37,8 @@ export function toInbound(event: unknown): RealtimeInbound | null {
       };
     case "response.output_audio_transcript.done":
       return { type: "assistant_transcript", text: str(e.transcript) };
+    case "response.done":
+      return { type: "reply_done" };
     case "error":
       return { type: "error", message: str(asRecord(e.error).message) || "Realtime error" };
     default:
@@ -44,8 +46,8 @@ export function toInbound(event: unknown): RealtimeInbound | null {
   }
 }
 
-function sessionUpdate(spec: RealtimeSessionSpec): string {
-  return JSON.stringify({
+export function composeSessionUpdate(spec: RealtimeSessionSpec): unknown {
+  return {
     type: "session.update",
     session: {
       type: "realtime",
@@ -59,7 +61,13 @@ function sessionUpdate(spec: RealtimeSessionSpec): string {
         // for so the controller can read the spoken yes or no that releases a Guarded delegation.
         // Without it the confirm-gate would have nothing to judge but the model's own say-so.
         input: {
-          turn_detection: { type: "server_vad" },
+          turn_detection: {
+            type: "server_vad",
+            // The server must not cut off its own reply. On speakers the mic is gated against
+            // echo, so the server cannot see the interruption at all — and it is the client that
+            // holds the queued audio which has to be flushed.
+            interrupt_response: false,
+          },
           transcription: { model: "gpt-4o-mini-transcribe" },
         },
         output: { voice: spec.voice },
@@ -67,7 +75,7 @@ function sessionUpdate(spec: RealtimeSessionSpec): string {
       tools: spec.tools.map((tool) => ({ type: "function", ...tool })),
       tool_choice: "auto",
     },
-  });
+  };
 }
 
 export interface RealtimeTransportOptions {
@@ -93,7 +101,7 @@ export function createOpenAiRealtimeTransport(
         socket = ws;
 
         ws.addEventListener("open", () => {
-          ws.send(sessionUpdate(spec));
+          ws.send(JSON.stringify(composeSessionUpdate(spec)));
           resolve();
         });
         ws.addEventListener("error", () =>
@@ -120,6 +128,22 @@ export function createOpenAiRealtimeTransport(
 
     sendAudio(pcm) {
       send({ type: "input_audio_buffer.append", audio: pcm });
+    },
+
+    cancelResponse() {
+      send({ type: "response.cancel" });
+    },
+
+    // `output_audio_buffer.clear` is the other half of this in the API, and it is WebRTC and SIP
+    // only — on a WebSocket the queued audio is ours, so the audio port flushes it and this event
+    // exists to stop the server believing it said what nobody heard.
+    truncateAudio(itemId, playedMs) {
+      send({
+        type: "conversation.item.truncate",
+        item_id: itemId,
+        content_index: 0,
+        audio_end_ms: playedMs,
+      });
     },
 
     sendToolResult(callId, output) {

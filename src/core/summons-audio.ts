@@ -1,6 +1,3 @@
-import { open, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { requireAudioTool } from "./summons-preflight.ts";
 import type { AudioPort } from "./summons.ts";
 
@@ -27,16 +24,19 @@ const RAW_PCM_ARGS = [
 const CHUNK_BYTES = (SAMPLE_RATE / 5) * 2;
 
 /**
- * How much of the FIFO sox swallows before it plays any of it. The default is 8192 bytes — at this
- * sample rate, 170 ms of speech held back waiting for a buffer that only fills when the *next*
- * reply arrives, seconds later. That is heard as the end of every sentence being clipped off.
+ * How much of a reply to have in hand before starting the speaker.
  *
- * It also breaks the half-duplex mic gate, which reopens the mic on how long the reply *should*
- * have taken to play: audio still coming out of the speakers after that estimate gets heard,
- * trips the model's voice detection, and makes it interrupt itself mid-sentence. Reading the FIFO
- * in small bites keeps real playback within a frame or two of the estimate, so both stop.
+ * A `sox` started before there is anything to play opens the output device and then starves it,
+ * and the device does not recover cleanly when audio finally arrives: the first second or so comes
+ * out as a growl and then clears up. Heard live as "growling, fox jumping something, one two three
+ * four five" — mangled at the start, perfect by the end — and on a short reply that is the whole of
+ * it. Handing sox a cushion at the moment it opens the device is what makes the first syllable sound
+ * like the last one.
+ *
+ * It costs almost no latency: deltas arrive far faster than real time, so this much audio is in hand
+ * within a frame or two of the reply starting.
  */
-const SPEAKER_INPUT_BUFFER_BYTES = 1024;
+const SPEAKER_PRIME_BYTES = (SAMPLE_RATE / 1000) * 600 * 2;
 
 export interface SoxAudioOptions {
   /** Called when a `sox` process dies on its own — the session is deaf or mute from then on. */
@@ -47,56 +47,75 @@ export interface SoxAudioOptions {
 export function createSoxAudio(opts: SoxAudioOptions = {}): AudioPort {
   const sox = requireAudioTool((command) => Bun.which(command));
   let recorder: Bun.Subprocess<"ignore", "pipe", "pipe"> | null = null;
-  let speaker: Bun.Subprocess<"ignore", "ignore", "pipe"> | null = null;
+  let speaker: Bun.Subprocess<"pipe", "ignore", "pipe"> | null = null;
+  /**
+   * Every speaker not yet reaped, including ones left draining the end of a reply. Tracked because
+   * `stop()` has to end their stdin and wait for them: an open FileSink and an unreaped child both
+   * keep the process alive, and a `servant summon` that will not exit is worse than a silent one.
+   */
+  const alive = new Set<Bun.Subprocess<"pipe", "ignore", "pipe">>();
   let pump: Promise<void> | null = null;
   let stopping = false;
-
-  const fifoPath = join(tmpdir(), `servant-summons-${process.pid}.pcm`);
-  let fifo: Awaited<ReturnType<typeof open>> | null = null;
-  let speakerReady: Promise<void> | null = null;
-  let writes: Promise<unknown> = Promise.resolve();
+  /** The head of the current reply, held back only until there is enough of it to open with. */
+  const priming: Buffer[] = [];
+  let primingBytes = 0;
 
   /**
-   * Watch a `sox` we did not kill ourselves. Silence here is what makes this layer's failures
-   * invisible: the mic dying mid-conversation looks exactly like the user having gone quiet.
+   * Watch a `sox` we did not kill or retire ourselves. Silence here is what makes this layer's
+   * failures invisible: the mic dying mid-conversation looks exactly like the user having gone quiet.
    */
-  function watch(role: string, proc: Bun.Subprocess<never, never, "pipe">): void {
+  function watch(
+    role: string,
+    proc: Bun.Subprocess<never, never, "pipe">,
+    retired: () => boolean = () => false,
+  ): void {
     void (async () => {
       const [code, stderr] = await Promise.all([proc.exited, new Response(proc.stderr).text()]);
-      if (stopping) return;
+      if (stopping || retired()) return;
       const detail = stderr.trim() || `exit code ${code}`;
       opts.onFailure?.(`the ${role} (sox) stopped: ${detail}`);
     })();
   }
 
   /**
-   * Play through a FIFO rather than sox's stdin. Feeding sox from a pipe looks like it should work
-   * and does — until the pipe drains, at which point sox decides the stream ended and exits 0. A
-   * reply always arrives faster than it plays and the gaps between replies are seconds long, so
-   * that killed the speaker the first time the agent spoke. A FIFO opened O_RDWR never reports EOF
-   * (we hold a reader ourselves) and never blocks on open, so silence is just an empty pipe.
+   * Start a speaker for a reply, handing it everything gathered so far.
+   *
+   * One sox per reply, fed on stdin. The obvious shape — one long-lived sox reading a FIFO — is what
+   * this replaces, and it was wrong in three ways that sounded like three different bugs. Its input
+   * buffer had to be tiny (1024 bytes, 21ms) so playback would keep pace with the controller's
+   * estimate of it; that left 21ms of read-ahead, so every gap between the 200ms bursts arriving off
+   * the socket starved the output device, and dozens of dropouts a second is a growl rather than
+   * speech. Writes went into a 64KB pipe, so a long reply applied backpressure to the socket. And
+   * because a FIFO needs a reader held open to avoid EOF, *we* held one — so a speaker that died left
+   * our writes blocking on a pipe nobody would ever read again, and the Summons went mute reporting
+   * nothing.
+   *
+   * Bun's FileSink buffers in user space, so a whole reply is accepted immediately and sox is fed as
+   * fast as it can read: it cannot starve, and the socket never waits for the speaker. Closing stdin
+   * at the end of a reply makes sox drain and exit, which is also what plays the last syllable that
+   * the old input buffer used to hold back.
    */
-  async function startSpeaker(): Promise<void> {
-    await rm(fifoPath, { force: true });
-    const made = Bun.spawn(["mkfifo", fifoPath], { stderr: "pipe" });
-    if ((await made.exited) !== 0) {
-      throw new Error((await new Response(made.stderr).text()).trim() || "mkfifo failed");
-    }
-    fifo = await open(fifoPath, "r+");
-    speaker = Bun.spawn(
-      [
-        sox,
-        "-q",
-        "--input-buffer",
-        String(SPEAKER_INPUT_BUFFER_BYTES),
-        ...RAW_PCM_ARGS,
-        fifoPath,
-        "-d",
-      ],
-      { stdin: "ignore", stdout: "ignore", stderr: "pipe" },
+  function startSpeaker(primed: Buffer): Bun.Subprocess<"pipe", "ignore", "pipe"> {
+    const proc = Bun.spawn([sox, "-q", ...RAW_PCM_ARGS, "-", "-d"], {
+      stdin: "pipe",
+      stdout: "ignore",
+      stderr: "pipe",
+    });
+    speaker = proc;
+    alive.add(proc);
+    void proc.exited.then(() => alive.delete(proc));
+    // Written before anything else can be: the device opens with a cushion behind it, which is the
+    // whole point of priming.
+    void proc.stdin.write(primed);
+    opts.onDebug?.(`speaker: started with ${(primed.length / 2 / SAMPLE_RATE).toFixed(2)}s primed`);
+    // Exiting once its stdin is closed is the design, not a failure — so a speaker that is no
+    // longer the current one is retired, and its exit is expected.
+    watch(
+      "speaker",
+      proc as unknown as Bun.Subprocess<never, never, "pipe">,
+      () => speaker !== proc,
     );
-    opts.onDebug?.("speaker: playback started");
-    watch("speaker", speaker as unknown as Bun.Subprocess<never, never, "pipe">);
+    return proc;
   }
 
   /** Re-chunk sox's arbitrary-sized reads into the frame size the API wants. */
@@ -119,6 +138,25 @@ export function createSoxAudio(opts: SoxAudioOptions = {}): AudioPort {
     opts.onDebug?.(`mic: input stream ended after ${frames} frames`);
   }
 
+  /** Everything gathered for a reply whose speaker has not started yet. */
+  function takePriming(): Buffer {
+    const gathered = Buffer.concat(priming);
+    priming.length = 0;
+    primingBytes = 0;
+    return gathered;
+  }
+
+  /** Retire the current speaker, either letting it finish or cutting it off. */
+  function release(mode: "drain" | "cut"): void {
+    const retiring = speaker;
+    if (!retiring) return;
+    speaker = null;
+    // Ended in both cases: an unended FileSink holds a file descriptor open, and enough of those
+    // is a Summons that has hung up but will not exit.
+    void retiring.stdin.end();
+    if (mode === "cut") retiring.kill();
+  }
+
   return {
     startCapture(onChunk) {
       // `-d` records from the default input device. The mic stays open for the life of the session
@@ -137,31 +175,48 @@ export function createSoxAudio(opts: SoxAudioOptions = {}): AudioPort {
     },
 
     play(pcm) {
-      speakerReady ??= startSpeaker();
       const bytes = Buffer.from(pcm, "base64");
-      // Serialized and never awaited here: a reply longer than the pipe buffer applies real
-      // backpressure, and blocking on it would stall the socket that is still receiving it.
-      writes = writes
-        .then(() => speakerReady)
-        .then(() => fifo?.write(bytes))
-        .catch((err: unknown) => {
-          if (!stopping) opts.onFailure?.(`playback failed: ${String(err)}`);
-        });
+      // Never awaited: the FileSink takes the whole reply into user space, so this cannot block the
+      // socket that is still receiving it.
+      if (speaker) {
+        void speaker.stdin.write(bytes);
+        return;
+      }
+      priming.push(bytes);
+      primingBytes += bytes.length;
+      if (primingBytes < SPEAKER_PRIME_BYTES) return;
+      startSpeaker(takePriming());
+    },
+
+    endReply() {
+      // A reply shorter than the priming cushion has to be played anyway, not held for audio that
+      // is never coming.
+      if (!speaker && primingBytes > 0) startSpeaker(takePriming());
+      release("drain");
+    },
+
+    flush() {
+      release("cut");
+      takePriming();
+      opts.onDebug?.("speaker: queued playback flushed");
     },
 
     async stop() {
       stopping = true;
       recorder?.kill();
-      speaker?.kill();
       recorder = null;
       speaker = null;
+      // Every speaker, not just the current one — a reply left draining is still a live child, and
+      // an unreaped child keeps the whole process alive.
+      const dying = [...alive];
+      alive.clear();
+      for (const proc of dying) {
+        void proc.stdin.end();
+        proc.kill();
+      }
+      await Promise.all(dying.map((proc) => proc.exited));
       await pump;
       pump = null;
-      await writes.catch(() => {});
-      await fifo?.close().catch(() => {});
-      fifo = null;
-      speakerReady = null;
-      await rm(fifoPath, { force: true });
     },
   };
 }

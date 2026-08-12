@@ -246,6 +246,43 @@ export interface TicketsPort {
 }
 
 /**
+ * Filing a hub ticket — the only write a Summons performs anywhere, and it goes to the hub rather
+ * than into the working tree (ADR 0009). Kept as its own narrow port precisely so that claim is
+ * checkable: this is the one seam through which a Summons can create anything.
+ */
+export interface TicketFilingPort {
+  file(request: { title: string; body: string }): Promise<{ number: number; url: string }>;
+}
+
+/**
+ * Turning the conversation into a ticket. Guarded, and through the same gate as everything else
+ * Guarded — the agent proposes a title and a body, and the user's spoken yes is what files it.
+ */
+export const TICKET_TOOLS: readonly SummonsTool[] = [
+  {
+    name: "file_ticket",
+    description:
+      "Turn what you have been discussing into a ticket in this workspace's hub — 'summarize that into a ticket', 'open an issue for that'. Calling this files NOTHING: it asks the user to confirm out loud first. Say out loud the title you are about to file and ask for a plain yes or no, then stop — their spoken answer is what decides. This is the only thing you can write anywhere, so get the title and body right before you propose them.",
+    parameters: {
+      type: "object",
+      properties: {
+        title: {
+          type: "string",
+          description:
+            "One line naming the piece of work, as a person scanning a backlog would need to read it.",
+        },
+        body: {
+          type: "string",
+          description:
+            "The ticket, written out for someone who was not in this conversation: what needs doing, why it came up, and what would count as done. Full sentences — nothing here is inferable from the conversation, because they cannot hear it.",
+        },
+      },
+      required: ["title", "body"],
+    },
+  },
+];
+
+/**
  * Redirecting work that is already running. Neither tool addresses a session itself: the Summons
  * agent is not a Claude session, so both go out through the Hands session, which is (ADR 0010
  * decision 6). Which session may be addressed is decided here and not there — see `resolveTarget`.
@@ -362,7 +399,11 @@ export interface RealtimeSessionSpec {
 
 /** The subset of Realtime server events the controller acts on. */
 export type RealtimeInbound =
-  | { type: "audio"; pcm: string }
+  /**
+   * A slice of the reply, to play. `itemId` names the assistant message it belongs to, which is
+   * what an interruption needs: the server has to be told how much of *that message* was heard.
+   */
+  | { type: "audio"; pcm: string; itemId?: string | undefined }
   /** The server's voice-activity detection heard the user start talking. */
   | { type: "user_speaking"; itemId?: string | undefined }
   /**
@@ -371,6 +412,12 @@ export type RealtimeInbound =
    * transcribed *after* the reply it provoked, and the gate must not read it as an answer.
    */
   | { type: "user_transcript"; text: string; itemId?: string | undefined }
+  /**
+   * The model has finished generating a reply — there may still be minutes of it queued to play.
+   * Worth knowing only so an interruption does not ask to cancel a reply that is already over,
+   * which the API answers with an error the user would then hear about for nothing.
+   */
+  | { type: "reply_done" }
   /** The socket went away — the session cannot continue. */
   | { type: "closed" }
   | { type: "tool_call"; callId: string; name: string; args: string }
@@ -385,6 +432,14 @@ export interface RealtimeTransport {
   /** Append captured mic audio (base64 PCM16) to the model's input buffer. */
   sendAudio(pcm: string): void;
   sendToolResult(callId: string, output: string): void;
+  /** Stop generating the reply that is in flight — the user has started talking over it. */
+  cancelResponse(): void;
+  /**
+   * Say how much of an assistant message actually reached the room. The server produces audio
+   * faster than it plays, so without this the model believes it said everything it generated and
+   * refers back to sentences nobody heard.
+   */
+  truncateAudio(itemId: string, playedMs: number): void;
   /**
    * Put a note from the controller into the conversation, for things the agent must say that no
    * tool call is waiting on — above all the verdict of the confirm-gate, which the controller
@@ -401,6 +456,18 @@ export interface RealtimeTransport {
 export interface AudioPort {
   startCapture(onChunk: (pcm: string) => void): Promise<void>;
   play(pcm: string): void;
+  /**
+   * Drop everything queued but not yet played. What makes a barge-in feel like an interruption
+   * rather than a pause: without it the reply the user talked over keeps coming out of the speakers
+   * for however long was already buffered.
+   */
+  flush(): void;
+  /**
+   * No more audio is coming for this reply. Distinct from `flush`, which throws away what is left:
+   * this says the opposite — play all of it, including the last syllable, which a speaker that
+   * cannot tell where a reply ends will otherwise hold back waiting for more.
+   */
+  endReply(): void;
   stop(): Promise<void>;
 }
 
@@ -424,7 +491,7 @@ const realTimers: TimerPort = {
  * therefore half-duplex: the mic is held back until the queued reply has finished playing.
  * Headphones make this moot, but it cannot be a requirement.
  */
-const PLAYBACK_TAIL_MS = 400;
+export const PLAYBACK_TAIL_MS = 400;
 const PCM16_BYTES_PER_MS = (24_000 * 2) / 1000;
 
 /** How long a base64 PCM16 chunk takes to play, in milliseconds. */
@@ -432,6 +499,53 @@ function playbackDurationMs(base64Pcm: string): number {
   const padding = base64Pcm.endsWith("==") ? 2 : base64Pcm.endsWith("=") ? 1 : 0;
   const bytes = Math.max(0, (base64Pcm.length / 4) * 3 - padding);
   return bytes / PCM16_BYTES_PER_MS;
+}
+
+/**
+ * How much louder than the settled echo a frame must be to be a person rather than the agent. A
+ * ratio and not a fixed level, because it has to hold at any speaker volume.
+ */
+const BARGE_IN_RATIO = 2;
+/**
+ * ...and this loud outright. With the volume very low the echo floor sits near zero, and twice
+ * almost-nothing is still almost-nothing — without a floor of its own a chair scraping would cut
+ * the agent off.
+ */
+const BARGE_IN_MIN_LEVEL = 1_200;
+/** Consecutive frames it takes: one is a door closing, two is somebody talking. */
+const BARGE_IN_FRAMES = 2;
+/** How fast the echo floor follows the room. Slow, so a voice cannot drag the floor up after it. */
+const ECHO_FLOOR_WEIGHT = 0.3;
+/** Frames spent learning how loud the room is before an interruption can be heard at all. */
+const ECHO_WARMUP_FRAMES = 1;
+/**
+ * The least time between two interruptions the level detector may cause. The detector is a
+ * heuristic, so what this bounds is the cost of it being wrong: a mistake should sound like one
+ * clipped word, never like a reply being shredded frame by frame.
+ */
+const BARGE_IN_COOLDOWN_MS = 1_500;
+/** 20ms — short enough that a syllable starting late in a frame still stands out in it. */
+const LEVEL_WINDOW_SAMPLES = 24_000 / 50;
+
+/**
+ * The loudest 20ms of a mic frame, as RMS. Peak rather than average over the whole frame: a frame
+ * is ~200ms, and a word that starts two thirds of the way through one would average away to
+ * nothing.
+ */
+function peakLevel(base64Pcm: string): number {
+  const bytes = Buffer.from(base64Pcm, "base64");
+  const samples = Math.floor(bytes.length / 2);
+  let peak = 0;
+  for (let start = 0; start < samples; start += LEVEL_WINDOW_SAMPLES) {
+    const end = Math.min(start + LEVEL_WINDOW_SAMPLES, samples);
+    let sum = 0;
+    for (let i = start; i < end; i++) {
+      const sample = bytes.readInt16LE(i * 2);
+      sum += sample * sample;
+    }
+    if (end > start) peak = Math.max(peak, Math.sqrt(sum / (end - start)));
+  }
+  return peak;
 }
 
 /** Default silence window before a Summons hangs itself up, so a forgotten mic stops billing. */
@@ -455,7 +569,16 @@ export interface SummonsSessionOptions {
   sessions?: SessionsPort | undefined;
   /** Omitted, the agent cannot steer: it has no way to check who is claimed to what. */
   tickets?: TicketsPort | undefined;
+  /** Omitted, the agent cannot file a ticket, and so writes nothing anywhere at all. */
+  filing?: TicketFilingPort | undefined;
   audio?: AudioPort | undefined;
+  /**
+   * The user has declared they are on headphones, so nothing the agent says reaches the mic. The
+   * echo gate comes off and the mic stays open through the reply, which is what lets the model's
+   * own voice detection hear an interruption the instant it starts. On speakers this cannot be the
+   * default: an open mic there hears the agent and the conversation dies chewing on its own echo.
+   */
+  headphones?: boolean | undefined;
   instructions: string;
   model?: string | undefined;
   voice?: string | undefined;
@@ -471,11 +594,23 @@ export interface SummonsSessionOptions {
   onStopped?: (() => void) | undefined;
   /** Called with anything the API reports going wrong, so the user isn't left talking to silence. */
   onError?: ((message: string) => void) | undefined;
+  /**
+   * Traces the decisions no other output can explain — above all what the echo detector heard and
+   * what it made of it. Those thresholds are a heuristic against a real room, so tuning them needs
+   * the numbers, and the numbers only exist during a live conversation.
+   */
+  onDebug?: ((message: string) => void) | undefined;
 }
 
 export interface SummonsSession {
   start(): Promise<void>;
   stop(): Promise<void>;
+  /**
+   * Suspend or resume mic input, returning the state it is now in. For a side conversation in the
+   * room that must not be read as instructions — the socket stays open, so the idle window keeps
+   * running and a session muted and forgotten still hangs itself up.
+   */
+  toggleMute(): boolean;
 }
 
 function requireString(args: Record<string, unknown>, key: string, tool: string): string {
@@ -952,6 +1087,69 @@ function createDelegations(opts: SummonsSessionOptions, gate: Gate) {
 }
 
 /**
+ * Filing: the second Guarded action, held at the same gate as the first. Nothing here does any I/O
+ * until the user has said yes — the tool call only ever writes the proposal down.
+ */
+function createFiling(opts: SummonsSessionOptions, gate: Gate) {
+  const log = opts.callLog ?? NULL_CALL_LOG;
+
+  return {
+    propose(callId: string, rawArgs: string, lastUserItemId: string | null): ToolOutcome {
+      const answer = (payload: Record<string, unknown>) =>
+        opts.transport.sendToolResult(callId, JSON.stringify(payload));
+      const filing = opts.filing;
+      if (!filing) {
+        const error = "This Summons cannot file tickets — it was started without a hub to file to.";
+        answer({ error });
+        return { outcome: "error", detail: error };
+      }
+      const blocked = gate.blocked();
+      if (blocked) {
+        answer({ error: blocked });
+        return { outcome: "error", detail: blocked };
+      }
+      let title: string;
+      let body: string;
+      try {
+        const args = parseArgs(rawArgs, "file_ticket");
+        title = requireString(args, "title", "file_ticket");
+        body = requireString(args, "body", "file_ticket");
+      } catch (err) {
+        const detail = err instanceof Error ? err.message : String(err);
+        answer({ error: detail });
+        return { outcome: "error", detail };
+      }
+      gate.hold({
+        label: `file "${title}"`,
+        askedAfterItemId: lastUserItemId,
+        nothingHappened: "Nothing was filed.",
+        async run() {
+          const issue = await filing.file({ title, body });
+          // The one write a Summons makes, so it goes in the record with somewhere to go and read
+          // it — the gate entry above already says what was heard to authorise it.
+          log.record({
+            type: "note",
+            level: "info",
+            text: `Filed #${issue.number} in the hub — ${title} (${issue.url})`,
+          });
+          return `Filed it as #${issue.number}: "${title}" (${issue.url}). Tell the user the number.`;
+        },
+        failed: (message) =>
+          `Filing "${title}" failed: ${message}. Nothing was filed. Tell the user plainly.`,
+      });
+      answer({
+        status: "awaiting_confirmation",
+        filed: false,
+        title,
+        instruction:
+          "Nothing has been filed. Say the title out loud, in one sentence, then ask the user to answer yes or no. Do not call file_ticket again — their spoken answer is what decides.",
+      });
+      return { outcome: "held", detail: title };
+    },
+  };
+}
+
+/**
  * Stamped on the ticket notes steering writes, so servant can find its own among the discussion —
  * the same discipline as `CLAIM_MARKER`.
  */
@@ -1306,6 +1504,198 @@ function createSteering(opts: SummonsSessionOptions, gate: Gate, timers: TimerPo
   return { steer, stop };
 }
 
+/** Which half of the subsystem noticed the interruption, as the Call log reports it. */
+type BargeInHeardBy = "over the speakers" | "the model's voice detection";
+
+/**
+ * The half-duplex subsystem: what reaches the model's ears, and what happens when the user talks
+ * over the reply.
+ *
+ * One object because it is one policy. Barge-in and echo protection pull in opposite directions —
+ * barge-in needs the mic open while the agent speaks, echo protection needs it shut — and the state
+ * they argue over is the same handful of facts: how long the queued reply has left to play, how loud
+ * the room is, and whether the user has shut the mic themselves. Split across the controller they
+ * drifted: the flush cleared the speaker while the window it was gating on stood, and the mic stayed
+ * shut through the sentence the user had just interrupted with.
+ */
+function createMicGate(opts: SummonsSessionOptions, timers: TimerPort) {
+  const log = opts.callLog ?? NULL_CALL_LOG;
+  /** When the audio queued so far will have finished playing out of the speakers. */
+  let speakingUntil = 0;
+  /** The reply currently coming out of the speakers, as an interruption needs to describe it. */
+  let playing: { itemId: string | null; startedAt: number; queuedMs: number } | null = null;
+  /** True while the model is still producing the reply, so there is something left to cancel. */
+  let generating = false;
+  /** The level the agent's own echo settles at, learned from the frames the echo gate holds back. */
+  let echoFloor: number | null = null;
+  /** Frames of echo seen so far. Until there are enough, the room is not yet characterised. */
+  let framesObserved = 0;
+  let loudFrames = 0;
+  let lastInterruptAt = Number.NEGATIVE_INFINITY;
+  let muted = false;
+
+  /**
+   * Forget a reply that has finished playing. Nothing pushes this — playback ends by a clock running
+   * out, not by an event — so it is asked at the two moments its answer matters. Without it every
+   * ordinary turn after a reply reads as an interruption: a speaker flushed with nothing in it, a
+   * message truncated that was heard in full, and a barge-in in the Call log that never happened.
+   */
+  function settle(): void {
+    if (!playing || timers.now() < speakingUntil) return;
+    playing = null;
+    generating = false;
+    loudFrames = 0;
+  }
+
+  /**
+   * Barge-in without echo cancellation, which a WebSocket Realtime session does not have.
+   *
+   * These are the frames the echo gate is throwing away, so the model will never see them — but
+   * their *level* is still worth reading. The echo settles at a floor this tracks; a person talking
+   * over it arrives well above that floor. The detector only has to be a hair trigger: once it
+   * fires, playback is flushed, the echo stops, and the server's own voice detection does the real
+   * work on the rest of the sentence.
+   *
+   * The frames that triggered it are deliberately not forwarded — they are the user's voice with the
+   * agent's mixed under it, and feeding that to transcription buys a garbled turn in exchange for
+   * 400ms of opening words. So a one-word "stop" reaches the model as nothing at all, which is the
+   * right outcome: what it asked for was silence.
+   */
+  function detect(pcm: string): void {
+    if (!playing) return;
+    /**
+     * A frame that *began* before this reply reached the speakers holds no echo — it is the room
+     * from before the agent spoke, and it is silence. Reading it as evidence of how loud the echo is
+     * put the floor near zero; every real echo frame after that looked like a voice, and since a
+     * candidate frame deliberately does not move the floor, it never recovered. Live that was the
+     * agent flushing and respawning its own speaker every 400ms for the whole of every reply — a
+     * growl out of the speakers, and a perfectly ordinary-looking reply in the log.
+     *
+     * Frames are ~200ms of history, so at the start of every reply there is exactly one of these.
+     * It is not evidence either way: not a floor sample, and not a candidate.
+     */
+    if (timers.now() - playbackDurationMs(pcm) < playing.startedAt) return;
+    const level = peakLevel(pcm);
+    if (framesObserved < ECHO_WARMUP_FRAMES) {
+      framesObserved += 1;
+      echoFloor = Math.max(echoFloor ?? 0, level);
+      opts.onDebug?.(
+        `echo: learning the room — level ${Math.round(level)}, floor ${Math.round(echoFloor)}`,
+      );
+      return;
+    }
+    const floor = echoFloor ?? level;
+    if (level > floor * BARGE_IN_RATIO && level > BARGE_IN_MIN_LEVEL) {
+      loudFrames += 1;
+      opts.onDebug?.(
+        `echo: candidate ${loudFrames}/${BARGE_IN_FRAMES} — level ${Math.round(level)} over floor ${Math.round(floor)}`,
+      );
+      if (loudFrames < BARGE_IN_FRAMES) return;
+      if (timers.now() - lastInterruptAt < BARGE_IN_COOLDOWN_MS) {
+        opts.onDebug?.("echo: within the cooldown, so not treated as an interruption");
+        return;
+      }
+      gate.interrupt("over the speakers");
+      return;
+    }
+    // Only frames that are *not* candidates move the floor, or a voice would pull the threshold up
+    // behind itself and the second frame would never clear it.
+    echoFloor =
+      echoFloor === null ? level : echoFloor * (1 - ECHO_FLOOR_WEIGHT) + level * ECHO_FLOOR_WEIGHT;
+    loudFrames = 0;
+  }
+
+  const gate = {
+    /** A slice of the reply to play, and the clock that decides when the mic may open again. */
+    queuePlayback(pcm: string, itemId: string | null): void {
+      // Deltas arrive faster than they play, so this slice starts when whatever is already queued
+      // runs out — which is also the moment the reply it belongs to began reaching the room.
+      const startsAt = Math.max(speakingUntil, timers.now());
+      const duration = playbackDurationMs(pcm);
+      if (playing && playing.itemId === itemId) {
+        playing.queuedMs += duration;
+      } else {
+        playing = { itemId, startedAt: startsAt, queuedMs: duration };
+      }
+      speakingUntil = startsAt + duration;
+      generating = true;
+      opts.audio?.play(pcm);
+    },
+
+    replyFinishedGenerating(): void {
+      generating = false;
+      // Every byte of the reply is in, so the speaker is told where it ends — which is what lets it
+      // play the last syllable rather than holding it back waiting for audio that will never come.
+      opts.audio?.endReply();
+    },
+
+    /**
+     * Whether a mic frame reaches the model. Every reason to hold it back is decided here together:
+     * the user muted it, or the agent is still audible in the room.
+     */
+    admit(pcm: string): void {
+      if (muted) return;
+      settle();
+      // Judged on when the frame *began*, not when it arrived. A frame is ~200ms of history, so the
+      // first frame admitted after the window closed still opens inside it — and one frame of the
+      // agent's own voice is all the model's voice detection needs to make it interrupt itself.
+      if (
+        !opts.headphones &&
+        timers.now() - playbackDurationMs(pcm) < speakingUntil + PLAYBACK_TAIL_MS
+      ) {
+        detect(pcm);
+        return;
+      }
+      loudFrames = 0;
+      opts.transport.sendAudio(pcm);
+    },
+
+    /** The user is talking over the agent — one path, whichever detector noticed. */
+    interrupt(heardBy: BargeInHeardBy): void {
+      settle();
+      if (!playing) return;
+      // A reply the model has finished generating has nothing left to cancel, and asking anyway is
+      // an API error the user would be told about for no reason. The queued audio still has to go.
+      if (generating) opts.transport.cancelResponse();
+      if (playing.itemId) {
+        const heard = Math.min(Math.max(0, timers.now() - playing.startedAt), playing.queuedMs);
+        opts.transport.truncateAudio(playing.itemId, Math.round(heard));
+      }
+      opts.audio?.flush();
+      // Cleared together with the flush, which is the coupling this whole object exists to hold in
+      // one place: the queued audio the mic was being held back for no longer exists, so a window
+      // left standing would swallow the sentence the user interrupted with.
+      speakingUntil = 0;
+      playing = null;
+      generating = false;
+      loudFrames = 0;
+      lastInterruptAt = timers.now();
+      opts.onDebug?.(`echo: cut the reply off (${heardBy})`);
+      log.record({
+        type: "note",
+        level: "info",
+        text: `The user talked over the reply and it was cut off (${heardBy}).`,
+      });
+    },
+
+    toggleMute(): boolean {
+      muted = !muted;
+      // Recorded, because a stretch where the user said nothing and a stretch where the mic was shut
+      // are indistinguishable in the log otherwise.
+      log.record({
+        type: "note",
+        level: "info",
+        text: muted
+          ? "The mic was muted. Input is suspended until it is unmuted; the idle window keeps running."
+          : "The mic was unmuted.",
+      });
+      return muted;
+    },
+  };
+
+  return gate;
+}
+
 /**
  * The one thing about a tool call worth reading at a glance — the path, the pattern, the label.
  * Best-effort by design: an unparseable argument blob is a thing to record, not to fail on.
@@ -1333,10 +1723,10 @@ export function createSummonsSession(opts: SummonsSessionOptions): SummonsSessio
   // Steering needs all three: a registry to resolve a name against, a hub to check the Claim on,
   // and hands to relay through. Missing any one, the tools are not offered at all (below).
   const steering = createSteering(opts, gate, timers);
+  const filing = createFiling(opts, gate);
+  const mic = createMicGate(opts, timers);
   let idleHandle: unknown = null;
   let stopped = false;
-  /** When the audio queued so far will have finished playing out of the speakers. */
-  let speakingUntil = 0;
   /** The utterance the server is currently hearing — the gate's evidence of what came from where. */
   let lastUserItemId: string | null = null;
 
@@ -1452,6 +1842,10 @@ export function createSummonsSession(opts: SummonsSessionOptions): SummonsSessio
       recordCall(await steering.stop(call.callId, call.args, lastUserItemId));
       return;
     }
+    if (call.name === "file_ticket") {
+      recordCall(filing.propose(call.callId, call.args, lastUserItemId));
+      return;
+    }
     let result: Record<string, unknown>;
     try {
       result =
@@ -1505,8 +1899,10 @@ export function createSummonsSession(opts: SummonsSessionOptions): SummonsSessio
         await handleToolCall(event);
         return;
       case "audio":
-        speakingUntil = Math.max(speakingUntil, timers.now()) + playbackDurationMs(event.pcm);
-        opts.audio?.play(event.pcm);
+        mic.queuePlayback(event.pcm, event.itemId ?? null);
+        return;
+      case "reply_done":
+        mic.replyFinishedGenerating();
         return;
       case "error":
         log.record({ type: "note", level: "error", text: event.message });
@@ -1517,6 +1913,9 @@ export function createSummonsSession(opts: SummonsSessionOptions): SummonsSessio
         return;
       case "user_speaking":
         lastUserItemId = event.itemId ?? null;
+        // In headphone mode this is the only detector there is; with speakers the mic is gated, so
+        // it fires for a frame admitted just before playback began. Either way it is the same answer.
+        mic.interrupt("the model's voice detection");
         return;
       case "user_transcript":
         log.record({ type: "said", who: "user", text: event.text });
@@ -1548,6 +1947,7 @@ export function createSummonsSession(opts: SummonsSessionOptions): SummonsSessio
             ...(opts.hands ? HANDS_TOOLS : []),
             ...(opts.sessions ? SESSIONS_TOOLS : []),
             ...(opts.hands && opts.sessions && opts.tickets ? STEER_TOOLS : []),
+            ...(opts.filing ? TICKET_TOOLS : []),
           ],
         },
         handleInbound,
@@ -1559,16 +1959,16 @@ export function createSummonsSession(opts: SummonsSessionOptions): SummonsSessio
       // Deliberately no markActive() in the capture callback: an open mic streams PCM frames
       // through silence too, so counting them as activity would mean the idle hang-up never fires.
       // Only what the server reports — speech, a reply, a tool call — proves the conversation lives.
-      await opts.audio?.startCapture((pcm) => {
-        if (timers.now() < speakingUntil + PLAYBACK_TAIL_MS) return;
-        opts.transport.sendAudio(pcm);
-      });
+      await opts.audio?.startCapture((pcm) => mic.admit(pcm));
       if (stopped) {
         await opts.audio?.stop();
         return;
       }
       markActive();
     },
+
+    toggleMute: () => mic.toggleMute(),
+
     // Only the controller knows why a session ended, and the record wants that — so the reason is
     // internal, and everyone outside is hanging up.
     stop: () => stop("hung up"),
