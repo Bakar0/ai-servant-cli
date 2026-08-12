@@ -23,6 +23,21 @@ const RAW_PCM_ARGS = [
 /** ~200 ms of audio — the chunk size the Realtime API is happiest receiving. */
 const CHUNK_BYTES = (SAMPLE_RATE / 5) * 2;
 
+/**
+ * How much of a reply to have in hand before starting the speaker.
+ *
+ * A `sox` started before there is anything to play opens the output device and then starves it,
+ * and the device does not recover cleanly when audio finally arrives: the first second or so comes
+ * out as a growl and then clears up. Heard live as "growling, fox jumping something, one two three
+ * four five" — mangled at the start, perfect by the end — and on a short reply that is the whole of
+ * it. Handing sox a cushion at the moment it opens the device is what makes the first syllable sound
+ * like the last one.
+ *
+ * It costs almost no latency: deltas arrive far faster than real time, so this much audio is in hand
+ * within a frame or two of the reply starting.
+ */
+const SPEAKER_PRIME_BYTES = (SAMPLE_RATE / 1000) * 600 * 2;
+
 export interface SoxAudioOptions {
   /** Called when a `sox` process dies on its own — the session is deaf or mute from then on. */
   onFailure?: ((message: string) => void) | undefined;
@@ -41,6 +56,9 @@ export function createSoxAudio(opts: SoxAudioOptions = {}): AudioPort {
   const alive = new Set<Bun.Subprocess<"pipe", "ignore", "pipe">>();
   let pump: Promise<void> | null = null;
   let stopping = false;
+  /** The head of the current reply, held back only until there is enough of it to open with. */
+  const priming: Buffer[] = [];
+  let primingBytes = 0;
 
   /**
    * Watch a `sox` we did not kill or retire ourselves. Silence here is what makes this layer's
@@ -60,25 +78,24 @@ export function createSoxAudio(opts: SoxAudioOptions = {}): AudioPort {
   }
 
   /**
-   * Play by writing to sox's stdin, one process per reply.
+   * Start a speaker for a reply, handing it everything gathered so far.
    *
-   * The obvious shape — one long-lived sox reading a FIFO — is what this replaces, and it was wrong
-   * in three ways that all sounded like different bugs. Its input buffer had to be tiny (1024 bytes,
-   * 21ms) so that playback would keep pace with the controller's estimate of it; that left sox with
-   * 21ms of read-ahead, so every gap between the 200ms bursts arriving off the socket starved the
-   * output device, and dozens of dropouts a second is not speech, it is a growl. Writes went into a
-   * 64KB pipe, so a reply longer than that applied backpressure to the socket. And because a FIFO
-   * needs a reader held open to avoid EOF, *we* held one — which meant a speaker that died left our
-   * writes blocking on a pipe nobody would ever read again, and the Summons went mute reporting
+   * One sox per reply, fed on stdin. The obvious shape — one long-lived sox reading a FIFO — is what
+   * this replaces, and it was wrong in three ways that sounded like three different bugs. Its input
+   * buffer had to be tiny (1024 bytes, 21ms) so playback would keep pace with the controller's
+   * estimate of it; that left 21ms of read-ahead, so every gap between the 200ms bursts arriving off
+   * the socket starved the output device, and dozens of dropouts a second is a growl rather than
+   * speech. Writes went into a 64KB pipe, so a long reply applied backpressure to the socket. And
+   * because a FIFO needs a reader held open to avoid EOF, *we* held one — so a speaker that died left
+   * our writes blocking on a pipe nobody would ever read again, and the Summons went mute reporting
    * nothing.
    *
-   * Writing to stdin fixes all three at once. Bun's FileSink buffers in user space, so a whole reply
-   * is accepted immediately and sox is fed as fast as it can read: it cannot starve, and the socket
-   * is never made to wait. Closing stdin at the end of a reply makes sox drain what it has and exit,
-   * which is also what finally plays the last syllable of a sentence instead of holding it back.
+   * Bun's FileSink buffers in user space, so a whole reply is accepted immediately and sox is fed as
+   * fast as it can read: it cannot starve, and the socket never waits for the speaker. Closing stdin
+   * at the end of a reply makes sox drain and exit, which is also what plays the last syllable that
+   * the old input buffer used to hold back.
    */
-  function ensureSpeaker(): Bun.Subprocess<"pipe", "ignore", "pipe"> {
-    if (speaker) return speaker;
+  function startSpeaker(primed: Buffer): Bun.Subprocess<"pipe", "ignore", "pipe"> {
     const proc = Bun.spawn([sox, "-q", ...RAW_PCM_ARGS, "-", "-d"], {
       stdin: "pipe",
       stdout: "ignore",
@@ -87,7 +104,10 @@ export function createSoxAudio(opts: SoxAudioOptions = {}): AudioPort {
     speaker = proc;
     alive.add(proc);
     void proc.exited.then(() => alive.delete(proc));
-    opts.onDebug?.("speaker: ready");
+    // Written before anything else can be: the device opens with a cushion behind it, which is the
+    // whole point of priming.
+    void proc.stdin.write(primed);
+    opts.onDebug?.(`speaker: started with ${(primed.length / 2 / SAMPLE_RATE).toFixed(2)}s primed`);
     // Exiting once its stdin is closed is the design, not a failure — so a speaker that is no
     // longer the current one is retired, and its exit is expected.
     watch(
@@ -118,6 +138,14 @@ export function createSoxAudio(opts: SoxAudioOptions = {}): AudioPort {
     opts.onDebug?.(`mic: input stream ended after ${frames} frames`);
   }
 
+  /** Everything gathered for a reply whose speaker has not started yet. */
+  function takePriming(): Buffer {
+    const gathered = Buffer.concat(priming);
+    priming.length = 0;
+    primingBytes = 0;
+    return gathered;
+  }
+
   /** Retire the current speaker, either letting it finish or cutting it off. */
   function release(mode: "drain" | "cut"): void {
     const retiring = speaker;
@@ -143,28 +171,33 @@ export function createSoxAudio(opts: SoxAudioOptions = {}): AudioPort {
       pump = drainMic(recorder.stdout, onChunk).catch((err: unknown) => {
         if (!stopping) opts.onFailure?.(`the microphone stream failed: ${String(err)}`);
       });
-      // Warmed here rather than on the first delta: spawning sox takes a couple of hundred
-      // milliseconds, and the controller starts its half-duplex clock the moment audio arrives, so a
-      // speaker spawned late means real playback runs behind the controller's estimate of it.
-      ensureSpeaker();
       return Promise.resolve();
     },
 
     play(pcm) {
+      const bytes = Buffer.from(pcm, "base64");
       // Never awaited: the FileSink takes the whole reply into user space, so this cannot block the
       // socket that is still receiving it.
-      void ensureSpeaker().stdin.write(Buffer.from(pcm, "base64"));
+      if (speaker) {
+        void speaker.stdin.write(bytes);
+        return;
+      }
+      priming.push(bytes);
+      primingBytes += bytes.length;
+      if (primingBytes < SPEAKER_PRIME_BYTES) return;
+      startSpeaker(takePriming());
     },
 
     endReply() {
+      // A reply shorter than the priming cushion has to be played anyway, not held for audio that
+      // is never coming.
+      if (!speaker && primingBytes > 0) startSpeaker(takePriming());
       release("drain");
-      // Replaced immediately so the next reply does not pay for a spawn.
-      ensureSpeaker();
     },
 
     flush() {
       release("cut");
-      ensureSpeaker();
+      takePriming();
       opts.onDebug?.("speaker: queued playback flushed");
     },
 
