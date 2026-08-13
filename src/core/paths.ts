@@ -43,18 +43,6 @@ export function workspacePath(name: string): string {
   return join(workspacesRoot(), name);
 }
 
-/** The workspace's declarative architecture source — the single file feeding the dashboard's
- * architecture diagram and component map (human-maintained). */
-export function workspaceArchitecturePath(name: string): string {
-  return join(workspacePath(name), "context", "architecture.yaml");
-}
-
-/** The workspace's declarative delivery-roadmap source — the agent-maintained phase timeline
- * feeding the dashboard's "where we are" panel. */
-export function workspaceRoadmapPath(name: string): string {
-  return join(workspacePath(name), "context", "roadmap.yaml");
-}
-
 export function configPath(): string {
   return join(aiServantRoot(), "config.json");
 }
@@ -89,11 +77,7 @@ export function fineTuneAspectPath(id: string): string {
   return join(fineTuneDir(), `${id}.md`);
 }
 
-/**
- * The servant hub: a clone of the majordomo repo (issue tracker on GitHub +
- * `knowledge/` notes on disk). The git repo lives here, at the hub root — knowledge/
- * is just a tracked subdirectory of it.
- */
+/** The servant hub: a clone of the majordomo repo, whose issues are the task tracker. */
 export function hubRoot(): string {
   return join(aiServantRoot(), "majordomo");
 }
@@ -106,9 +90,13 @@ export function hubRemoteUrl(slug: string = DEFAULT_HUB_REPO): string {
   return `https://github.com/${slug}.git`;
 }
 
-/** Durable, git-tracked knowledge store — a subdirectory of the hub clone. */
+/**
+ * Durable, git-tracked knowledge store: its own local repository at the servant root, with no
+ * remote. Notes are the servant's own memory, not a shared artifact — keeping them local means
+ * capture and recall never touch the network or an account.
+ */
 export function knowledgeRoot(): string {
-  return join(hubRoot(), "knowledge");
+  return join(aiServantRoot(), "knowledge");
 }
 
 export function knowledgeIndexPath(): string {
@@ -165,20 +153,6 @@ export function insightsIndexPath(): string {
  */
 export function insightsDashboardPath(): string {
   return join(insightsRoot(), "dashboard.html");
-}
-
-/**
- * Regenerated per-workspace HTML dashboards live here — a git-ignored sibling area inside the
- * insights store, consistent with where `insights --deep` writes its dashboard. Overwritten on
- * every `servant dashboard` run, so it is an artifact, not a data record.
- */
-export function workspaceDashboardsDir(): string {
-  return join(insightsRoot(), "dashboards");
-}
-
-/** The rendered dashboard for one workspace (`<name>.html`). */
-export function workspaceDashboardPath(name: string): string {
-  return join(workspaceDashboardsDir(), `${name}.html`);
 }
 
 /**

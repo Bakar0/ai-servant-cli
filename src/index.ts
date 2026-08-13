@@ -2,7 +2,6 @@
 import { defineCommand, runMain } from "citty";
 import { callLogCommand } from "./commands/call-log.ts";
 import { claimCommand } from "./commands/claim.ts";
-import { dashboardCommand } from "./commands/dashboard.ts";
 import { extractMemoriesCommand } from "./commands/extract-memories.ts";
 import { fineTuneCommand } from "./commands/fine-tune.ts";
 import { initCommand } from "./commands/init.ts";
@@ -33,7 +32,6 @@ const main = defineCommand({
     repo: repoCommand,
     resume: resumeCommand,
     sessions: sessionsCommand,
-    dashboard: dashboardCommand,
     recall: recallCommand,
     memories: memoriesCommand,
     tasks: tasksCommand,

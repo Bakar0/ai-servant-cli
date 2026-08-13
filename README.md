@@ -13,7 +13,7 @@
 
 ---
 
-`servant` puts coding agents to work in the engineer's service. Every task gets its own workspace: a dedicated folder, git worktrees of the repos you're working in, and a coding agent (Claude Code or Codex) launched in a fresh terminal tab. Work is shaped and tracked with [mattpocock/skills](https://github.com/mattpocock/skills) against a shared GitHub **hub** repo (tasks = Issues, plus a git-tracked knowledge base), so sessions are resumable, agents get smarter, and the backlog stays navigable across every workspace - the agent does the heavy lifting while you stay the architect. Like the compiler before it, servant raises the level you work at without taking your hands off the wheel.
+`servant` puts coding agents to work in the engineer's service. Every task gets its own workspace: a dedicated folder, git worktrees of the repos you're working in, and a coding agent (Claude Code or Codex) launched in a fresh terminal tab. Work is shaped and tracked with [mattpocock/skills](https://github.com/mattpocock/skills) against a shared GitHub **hub** repo (tasks = Issues), so sessions are resumable, agents get smarter, and the backlog stays navigable across every workspace - the agent does the heavy lifting while you stay the architect. Like the compiler before it, servant raises the level you work at without taking your hands off the wheel.
 
 ```bash
 servant spawn -w add-rate-limiter -r    # -w names the workspace; -r picks repos + adds worktrees
@@ -110,8 +110,8 @@ Everything servant manages lives under a single root, `~/.ai_servant/`:
 ~/.ai_servant/
 ├── config.json                  # repo search roots, scan depth, hubRepo
 ├── .cache/                      # repo discovery, offline tasks snapshot
-├── majordomo/                   # clone of the hub repo — Issues = tasks; knowledge/ = notes
-│   └── knowledge/               # captured memories (git-tracked, pushed to the hub)
+├── majordomo/                   # clone of the hub repo — Issues = tasks
+├── knowledge/                   # captured memories (local git repo, no remote)
 ├── insights/                    # metrics store
 └── workspaces/<workspace>/
     ├── CLAUDE.md · AGENTS.md    # synced conventions (Claude @-imports · Codex inlined)
@@ -135,13 +135,12 @@ Everything servant manages lives under a single root, `~/.ai_servant/`:
 
 servant embraces [mattpocock/skills](https://github.com/mattpocock/skills) for the engineering
 flow, and points them at one shared **hub** repo (`config.hubRepo`, default `Barak-Zen/majordomo`)
-cloned to `~/.ai_servant/majordomo/`. The hub is two things at once:
+cloned to `~/.ai_servant/majordomo/`. The hub is the **issue tracker**: every workspace's tasks,
+specs, and tickets are GitHub Issues labeled `ws:<workspace>`, so the whole backlog is navigable in
+one place (`servant tasks`, the label, or a Project board).
 
-- **The issue tracker** — every workspace's tasks, specs, and tickets are GitHub Issues labeled
-  `ws:<workspace>`, so the whole backlog is navigable in one place (`servant tasks`, the label, or
-  a Project board).
-- **The knowledge base** — durable notes captured at `SessionEnd` live in `majordomo/knowledge/`
-  and are searched with `servant recall`.
+The knowledge base is separate and deliberately local — see
+[Knowledge base](#knowledge-base--recall--memories).
 
 The idea → ship flow (skills you reach for by name in a session):
 
@@ -241,7 +240,7 @@ servant tasks --frontier --ws foo    # ready (blockers closed) vs blocked — wh
 
 ### Knowledge base — `recall` & `memories`
 
-servant captures durable knowledge from your sessions into `~/.ai_servant/majordomo/knowledge/` (wired via a Claude Code `SessionEnd` hook; committed and pushed to the hub). Query it anytime:
+servant captures durable knowledge from your sessions into `~/.ai_servant/knowledge/` (wired via a Claude Code `SessionEnd` hook; committed to a local git repo with no remote, so capture and recall never touch the network). Query it anytime:
 
 ```bash
 servant recall "auth flow" -n 5    # search by tag + content, print top notes inline
@@ -320,7 +319,7 @@ Alongside these, every workspace has the **[mattpocock/skills](https://github.co
 {
   "version": 1,
   "repoSearchRoots": ["~"],            // where `repo add` looks for local git clones
-  "hubRepo": "Barak-Zen/majordomo"     // the shared hub repo (issue tracker + knowledge)
+  "hubRepo": "Barak-Zen/majordomo"     // the shared hub repo (the issue tracker)
 }
 ```
 

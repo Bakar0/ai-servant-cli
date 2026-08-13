@@ -10,7 +10,7 @@ export type Config = {
   scanMaxDepth: number;
   /** Show the rotating servant tip in the status line. Set false to hide it. */
   showTips: boolean;
-  /** Hub repo slug (owner/name) — issue tracker + knowledge/ notes. */
+  /** Hub repo slug (owner/name) — the issue tracker. */
   hubRepo: string;
 };
 
