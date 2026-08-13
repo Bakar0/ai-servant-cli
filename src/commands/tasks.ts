@@ -1,44 +1,42 @@
 import { defineCommand } from "citty";
-import { loadConfig } from "../core/config.ts";
+import type { Ticket, TicketState } from "../core/board/store.ts";
 import { applyRootOverride } from "../core/paths.ts";
 import { readLiveSessionNames } from "../core/session-registry.ts";
 import {
   type ClaimLiveness,
-  type HubIssue,
-  type IssueState,
+  blockerLabel,
   computeFrontier,
-  defaultNativeBlockersRunner,
-  fetchHubTasks,
   groupByWorkspace,
+  readTasks,
+  refreshSessionProjection,
 } from "../core/tasks.ts";
 
-function isIssueState(v: string): v is IssueState {
+function isTicketState(v: string): v is TicketState {
   return v === "open" || v === "closed" || v === "all";
 }
 
-function renderIssue(issue: HubIssue): string {
-  const extra = issue.labels.filter((l) => !l.startsWith("ws:"));
-  const tags = extra.length > 0 ? `  [${extra.join(", ")}]` : "";
-  return `    #${issue.number}  ${issue.title}${tags}\n        ${issue.url}`;
+function renderTicket(ticket: Ticket): string {
+  const tags = ticket.labels.length > 0 ? `  [${ticket.labels.join(", ")}]` : "";
+  return `    #${ticket.seq}  ${ticket.title}${tags}\n        ${ticket.url}`;
 }
 
 export const tasksCommand = defineCommand({
   meta: {
     name: "tasks",
     description:
-      "List the servant hub's tasks (GitHub Issues) grouped by workspace. Falls back to a cached snapshot when offline.",
+      "List the board's tickets grouped by workspace. Reads the local SQLite board — no network, no GitHub login, and it works whether or not the viewer is running.",
   },
   args: {
     ws: {
       type: "string",
       required: false,
-      description: "Only show tasks for this workspace (matches the ws:<name> label).",
+      description: "Only show tickets on this workspace's board.",
     },
     state: {
       type: "string",
       required: false,
       default: "open",
-      description: "Issue state: open (default), closed, or all.",
+      description: "Ticket state: open (default), closed, or all.",
     },
     frontier: {
       type: "boolean",
@@ -61,93 +59,89 @@ export const tasksCommand = defineCommand({
   },
   async run({ args }) {
     applyRootOverride(args.root);
-    const state: IssueState = isIssueState(String(args.state))
-      ? (args.state as IssueState)
+    const state: TicketState = isTicketState(String(args.state))
+      ? (args.state as TicketState)
       : "open";
-    const { hubRepo } = await loadConfig();
+    // Any command that runs refreshes the board's last-seen projection; this is what makes
+    // staleness self-heal without a daemon (ADR-0011 decision 3).
+    await refreshSessionProjection();
 
-    // Dependencies cost extra API calls, so they are only read for --frontier, which is the one
-    // caller whose answer is wrong without them (majordomo#23).
-    const { issues, fromCache, cachedAt } = await fetchHubTasks(
-      hubRepo,
-      state,
-      args.frontier ? { nativeRunner: defaultNativeBlockersRunner } : {},
-    );
-    const filtered = args.ws ? issues.filter((i) => i.workspace === args.ws) : issues;
-
-    // --frontier: what is dispatchable, from every blocking form and every Claim — the backstop
-    // /servant:handoff reads before it spawns anything.
+    // --frontier: what is dispatchable — the backstop /servant:handoff reads before it spawns
+    // anything. Every ticket is read, not just this workspace's: a blocker on another board is
+    // still a blocker.
     if (args.frontier) {
+      const all = readTasks();
+      const byId = new Map(all.map((t) => [t.id, t]));
       // A directory scan, never a question put to a session (workspace ADR 0010, decision 3).
-      // It degrades to unknown rather than to a short list of names — see `liveSessionNames`.
       const live = await readLiveSessionNames();
       const liveness: ClaimLiveness = live.known
         ? { known: true, liveSessions: live.names }
         : { known: false };
-      const { ready, stale, inFlight, blocked } = computeFrontier(filtered, liveness);
+      const { ready, stale, inFlight, blocked } = computeFrontier(all, liveness, {
+        workspace: args.ws,
+      });
+      const blockerRefs = (b: { ticket: Ticket; openBlockers: number[] }) =>
+        b.openBlockers.map((id) => byId.get(id)).filter((t): t is Ticket => t !== undefined);
       if (args.json) {
+        const brief = (t: Ticket) => ({
+          number: t.seq,
+          workspace: t.workspace,
+          id: t.id,
+          title: t.title,
+          url: t.url,
+          labels: t.labels,
+        });
         console.log(
           JSON.stringify({
-            hubRepo,
             workspace: args.ws ?? null,
-            fromCache,
             /** Liveness reported as-is, so a consumer can tell "nobody is on it" from "cannot tell". */
             livenessKnown: liveness.known,
-            ready: ready.map((i) => ({
-              number: i.number,
-              title: i.title,
-              url: i.url,
-              labels: i.labels,
-            })),
+            ready: ready.map(brief),
             // Dispatchable too, but only after its dead Claim is reclaimed — which is cleanup, not
             // a decision, so /servant:handoff does it without asking.
             stale: stale.map((c) => ({
-              number: c.issue.number,
-              title: c.issue.title,
-              url: c.issue.url,
-              labels: c.issue.labels,
+              ...brief(c.ticket),
               claim: { session: c.claim.session, since: c.claim.at },
             })),
             inFlight: inFlight.map((c) => ({
-              number: c.issue.number,
-              title: c.issue.title,
-              url: c.issue.url,
+              ...brief(c.ticket),
               claim: { session: c.claim.session, since: c.claim.at },
               liveness: c.liveness,
             })),
             blocked: blocked.map((b) => ({
-              number: b.issue.number,
-              title: b.issue.title,
-              url: b.issue.url,
-              blockedBy: b.openBlockers,
+              ...brief(b.ticket),
+              blockedBy: blockerRefs(b).map((t) => t.seq),
+              // Qualified, because a bare number is ambiguous once an edge crosses boards.
+              blockers: blockerRefs(b).map((t) => ({ workspace: t.workspace, seq: t.seq })),
             })),
           }),
         );
         return;
       }
       console.log(
-        `servant: frontier for ${args.ws ? `"${args.ws}"` : "all workspaces"} in ${hubRepo}${
-          fromCache ? "  (offline cache)" : ""
-        }${live.known ? "" : "  (session liveness unknown — claimed tickets shown as in-flight)"}\n`,
+        `servant: frontier for ${args.ws ? `"${args.ws}"` : "all workspaces"}${
+          live.known ? "" : "  (session liveness unknown — claimed tickets shown as in-flight)"
+        }\n`,
       );
       const section = (title: string, lines: string[]) => {
         console.log(`  ${title} (${lines.length}):`);
         console.log(lines.length ? lines.join("\n") : "    none");
         console.log("");
       };
+      const at = (t: Ticket) => (args.ws ? `#${t.seq}` : `${t.workspace}#${t.seq}`);
       section(
         "ready — dispatchable now",
-        ready.map((i) => `    #${i.number}  ${i.title}`),
+        ready.map((t) => `    ${at(t)}  ${t.title}`),
       );
       section(
         "stale — claim held by a session that is gone, reclaimable",
-        stale.map((c) => `    #${c.issue.number}  ${c.issue.title}   ← ${c.claim.session} (gone)`),
+        stale.map((c) => `    ${at(c.ticket)}  ${c.ticket.title}   ← ${c.claim.session} (gone)`),
       );
       section(
         "in-flight — someone is on it",
         inFlight.map(
           (c) =>
-            `    #${c.issue.number}  ${c.issue.title}   ← ${c.claim.session}${
+            `    ${at(c.ticket)}  ${c.ticket.title}   ← ${c.claim.session}${
               c.liveness === "unknown" ? " (liveness unknown)" : ""
             }`,
         ),
@@ -156,36 +150,26 @@ export const tasksCommand = defineCommand({
         "blocked",
         blocked.map(
           (b) =>
-            `    #${b.issue.number}  ${b.issue.title}   ← blocked-by ${b.openBlockers
-              .map((n) => `#${n}`)
+            `    ${at(b.ticket)}  ${b.ticket.title}   ← blocked-by ${blockerRefs(b)
+              .map((t) => blockerLabel(t, b.ticket))
               .join(", ")}`,
         ),
       );
       return;
     }
 
+    const tickets = readTasks({ workspace: args.ws, state });
     const scope = args.ws ? `workspace "${args.ws}"` : "all workspaces";
-    const staleness = fromCache
-      ? `  (offline — cached snapshot${cachedAt ? ` from ${new Date(cachedAt).toISOString()}` : ""})`
-      : "";
-    console.log(
-      `servant: ${filtered.length} ${state} task(s) in ${hubRepo} · ${scope}${staleness}\n`,
-    );
+    console.log(`servant: ${tickets.length} ${state} ticket(s) on the board · ${scope}\n`);
 
-    if (filtered.length === 0) {
-      console.log(
-        fromCache
-          ? "  (no cached tasks — connect and re-run to populate)"
-          : "  none — file one with /to-tickets or `gh issue create`.",
-      );
+    if (tickets.length === 0) {
+      console.log("  none — file one with /to-tickets or `servant ticket new`.");
       return;
     }
 
-    for (const [workspace, group] of groupByWorkspace(filtered)) {
+    for (const [workspace, group] of groupByWorkspace(tickets)) {
       console.log(`  ${workspace}  (${group.length})`);
-      for (const issue of group.toSorted((a, b) => a.number - b.number)) {
-        console.log(renderIssue(issue));
-      }
+      for (const ticket of group) console.log(renderTicket(ticket));
       console.log("");
     }
   },

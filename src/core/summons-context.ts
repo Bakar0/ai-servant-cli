@@ -5,10 +5,9 @@
 import { existsSync } from "node:fs";
 import { readdir } from "node:fs/promises";
 import { join } from "node:path";
-import { loadConfig } from "./config.ts";
 import { workspacePath } from "./paths.ts";
 import { walkScopeFiles } from "./summons-files.ts";
-import { type GhRunner, fetchHubTasks } from "./tasks.ts";
+import { readTasks } from "./tasks.ts";
 import { parseWorktreeDirName, reposRoot } from "./worktree-naming.ts";
 
 // The startup tree is orientation, not an inventory — deep enough to show the shape of the
@@ -31,12 +30,10 @@ export interface WorkspaceSnapshot {
   goal: string;
   /** CONTEXT.md, verbatim — the workspace's shared language. */
   glossary: string;
-  /** This workspace's open hub tickets. */
+  /** This workspace's open tickets, from its board. */
   tickets: SnapshotTicket[];
   /** Paths under the session's scope, relative to its root. */
   tree: string[];
-  /** True when the hub was unreachable and `tickets` came from the offline snapshot. */
-  ticketsFromCache: boolean;
 }
 
 const PERSONA = `You are the servant — the spoken voice of a servant workspace. You are talking with
@@ -125,12 +122,8 @@ function section(title: string, body: string): string {
 }
 
 function renderTickets(snapshot: WorkspaceSnapshot): string {
-  // The agent must never present a cached list as current — say so and let it caveat out loud.
-  const caveat = snapshot.ticketsFromCache
-    ? "The hub could not be reached, so this list is a cached snapshot and may be out of date. Say so if the user asks about tickets.\n\n"
-    : "";
-  if (snapshot.tickets.length === 0) return `${caveat}No open tickets for this workspace.`;
-  return caveat + snapshot.tickets.map((t) => `- #${t.number} ${t.title} (${t.url})`).join("\n");
+  if (snapshot.tickets.length === 0) return "No open tickets on this workspace's board.";
+  return snapshot.tickets.map((t) => `- #${t.number} ${t.title} (${t.url})`).join("\n");
 }
 
 function renderTree(tree: readonly string[]): string {
@@ -212,21 +205,16 @@ async function readFileOr(path: string, fallback: string): Promise<string> {
 }
 
 /**
- * Read the workspace's current state from disk and the hub. Called on every launch — nothing here
- * is cached, so a Summons cannot open on a stale goal, ticket list or tree. The goal and
- * glossary always come from the workspace itself, even when the session is scoped to one repo.
+ * Read the workspace's current state from disk and from its board. Called on every launch —
+ * nothing here is cached, so a Summons cannot open on a stale goal, ticket list or tree. The goal
+ * and glossary always come from the workspace itself, even when the session is scoped to one repo.
  */
-export async function readWorkspaceSnapshot(
-  scope: SummonsScope,
-  opts: { ghRunner?: GhRunner | undefined } = {},
-): Promise<WorkspaceSnapshot> {
+export async function readWorkspaceSnapshot(scope: SummonsScope): Promise<WorkspaceSnapshot> {
   const workspaceRoot = workspacePath(scope.workspace);
-  const { hubRepo } = await loadConfig();
-  const [goal, glossary, tree, hub] = await Promise.all([
+  const [goal, glossary, tree] = await Promise.all([
     readFileOr(join(workspaceRoot, "GOAL.md"), ""),
     readFileOr(join(workspaceRoot, "CONTEXT.md"), ""),
     walkScopeFiles(scope.root, { maxDepth: TREE_MAX_DEPTH, maxEntries: TREE_MAX_ENTRIES }),
-    fetchHubTasks(hubRepo, "open", { ghRunner: opts.ghRunner }),
   ]);
   return {
     workspace: scope.workspace,
@@ -234,9 +222,13 @@ export async function readWorkspaceSnapshot(
     goal,
     glossary,
     tree,
-    ticketsFromCache: hub.fromCache,
-    tickets: hub.issues
-      .filter((issue) => issue.workspace === scope.workspace)
-      .map(({ number, title, url }) => ({ number, title, url })),
+    // Read straight from the board — a local file, so there is no unreachable case to caveat.
+    tickets: readTasks({ workspace: scope.workspace, state: "open" }).map(
+      ({ seq, title, url }) => ({
+        number: seq,
+        title,
+        url,
+      }),
+    ),
   };
 }

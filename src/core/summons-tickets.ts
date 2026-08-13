@@ -1,17 +1,16 @@
-// The outside of the tickets seam: the hub reads and writes steering needs, behind `gh`.
+// The outside of the tickets seam: the board reads and writes a Summons performs.
 //
 // It exists so the controller can enforce Claim scoping deterministically (workspace ADR 0010,
-// decision 9 as amended) without the controller knowing anything about `gh` — the same shape as
-// the delegation and hands seams.
+// decision 9 as amended) without the controller knowing anything about the store — the same shape
+// as the delegation and hands seams. There is no runner to inject any more: the board is a local
+// file, and the test seam is the servant-root override (ADR-0011).
 
-import { $ } from "bun";
-import { type ClaimGhRunner, readClaimResult } from "./claims.ts";
-import { WS_LABEL_PREFIX } from "./tasks.ts";
+import { addComment, createTicket, requireTicket } from "./board/store.ts";
+import { readClaimResult } from "./claims.ts";
 import type { TicketFilingPort, TicketsPort } from "./summons.ts";
 
 export interface SummonsTicketsDeps {
-  hubRepo: string;
-  /** Which workspace's backlog a filed ticket joins — the `ws:` label `servant tasks` groups on. */
+  /** Which workspace's board a filed ticket joins. Membership is structural now, not a label. */
   workspace: string;
   /**
    * The Call log this Summons is writing, named in the body of anything it files. A ticket that
@@ -19,8 +18,6 @@ export interface SummonsTicketsDeps {
    * carries the way back to the conversation instead.
    */
   callLogId?: string | undefined;
-  /** Injected in tests, so nothing here shells out to a real `gh`. */
-  ghRunner?: ClaimGhRunner | undefined;
 }
 
 /** Stamped on a ticket a Summons filed, so servant can tell its own writes apart from a human's. */
@@ -34,53 +31,24 @@ function composeBody(deps: SummonsTicketsDeps, body: string): string {
 }
 
 export function createSummonsTickets(deps: SummonsTicketsDeps): TicketsPort & TicketFilingPort {
-  const opts = deps.ghRunner ? { ghRunner: deps.ghRunner } : {};
   return {
     async file({ title, body }) {
-      const runner = deps.ghRunner ?? defaultTicketRunner;
-      const out = await runner([
-        "issue",
-        "create",
-        "--repo",
-        deps.hubRepo,
-        "--label",
-        `${WS_LABEL_PREFIX}${deps.workspace}`,
-        "--title",
+      const ticket = createTicket({
+        workspace: deps.workspace,
         title,
-        "--body",
-        composeBody(deps, body),
-      ]);
-      // `gh` answers with the new issue's URL. No URL means no number the agent could say out loud,
-      // and a spoken "filed it" pointing at nothing is worse than an outright failure.
-      const match = /(https?:\/\/\S*?\/issues\/(\d+))/.exec(out);
-      if (!match) {
-        throw new Error(`could not tell from gh whether the ticket was filed: ${out.trim()}`);
-      }
-      return { number: Number(match[2]), url: match[1] as string };
+        body: composeBody(deps, body),
+      });
+      return { number: ticket.seq, url: ticket.url };
     },
 
     async claim(ticket) {
-      const result = await readClaimResult(deps.hubRepo, ticket, opts);
+      const result = await readClaimResult(deps.workspace, ticket);
       if (!result.known) return { known: false };
-      // A released Claim is a ticket nobody is carrying, not a ticket whose last carrier is still
-      // reachable — so it reports as unclaimed and steering refuses.
-      return {
-        known: true,
-        session: result.claim?.kind === "held" ? result.claim.session : null,
-      };
+      return { known: true, session: result.claim?.session ?? null };
     },
 
     async comment(ticket, body) {
-      const runner = deps.ghRunner ?? defaultTicketRunner;
-      await runner(["issue", "comment", String(ticket), "--repo", deps.hubRepo, "--body", body]);
+      addComment(requireTicket(deps.workspace, ticket).id, body);
     },
   };
 }
-
-const defaultTicketRunner: ClaimGhRunner = async (args) => {
-  const res = await $`gh ${args}`.nothrow().quiet();
-  if (res.exitCode !== 0) {
-    throw new Error(res.stderr.toString().trim() || `gh ${args.join(" ")} failed`);
-  }
-  return res.stdout.toString();
-};

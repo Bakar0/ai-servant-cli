@@ -12,13 +12,13 @@ You are running inside a **servant workspace** at `~/.ai_servant/workspaces/<nam
     adr/
       NNNN-<slug>.md      # architecture decision records
     agents/               # per-workspace config the engineering skills read (auto-generated)
-      issue-tracker.md    # how/where issues are filed — pinned to the shared hub
+      issue-tracker.md    # how/where tickets are filed — this workspace's board
       domain.md           # domain-doc consumer rules (CONTEXT.md + docs/adr/)
       triage-labels.md    # triage label vocabulary
   repos/                  # mounted repo worktrees (one per `servant repo add` / `spawn -r`)
 ```
 
-- **Tasks and plans are GitHub Issues in the shared hub** — not files in the workspace. See "The task tracker" below.
+- **Tasks and plans are tickets on the workspace's board** — not files in the workspace. See "The task tracker" below.
 - **`GOAL.md`** holds the workspace's intent — what it's ultimately for. See "The workspace goal" below.
 - **`CONTEXT.md`** holds the workspace's shared language: domain terms the ADRs, specs, and tickets reference.
 - **`docs/adr/`** holds architecture decision records. **`docs/agents/`** holds the engineering-skills config (auto-generated; you rarely edit it by hand).
@@ -29,8 +29,8 @@ This workspace uses the **mattpocock engineering skills** (installed as the `mat
 
 ```
 /grill-me       align on the task before building — resolve ambiguity first
-/to-spec        turn the conversation into a spec issue in the hub
-/to-tickets     break a spec/plan into tracer-bullet tickets (issues with blocking edges)
+/to-spec        turn the conversation into a spec ticket on the board
+/to-tickets     break a spec/plan into tracer-bullet tickets (with blocking edges)
 /implement      build a ticket end-to-end
 /tdd            tight red-green loop while implementing
 /code-review    two-axis review (standards + spec) of the diff
@@ -39,21 +39,22 @@ This workspace uses the **mattpocock engineering skills** (installed as the `mat
 /wait-what      stop and get unstuck when something doesn't add up
 ```
 
-Specs and tickets are **published to the hub as issues**, not written as files here. Domain terms and decisions live in `CONTEXT.md` + `docs/adr/` (created lazily by `/domain-modeling`).
+Specs and tickets are **published to the board**, not written as files here. Domain terms and decisions live in `CONTEXT.md` + `docs/adr/` (created lazily by `/domain-modeling`).
 
-## The task tracker (the hub)
+## The task tracker (the board)
 
-Every workspace's tasks, specs, and tickets live as **GitHub Issues in one shared hub repo**, labeled `ws:<workspace>`. This makes the whole backlog navigable in one place, across workspaces:
+Every workspace's tasks, specs, and tickets live on **servant's own board** — a local SQLite database at the servant root. Each workspace is a board of its own, so ticket numbers stay small; cross-workspace views union the boards. There is no GitHub, no `gh`, no account and no network, and every command works whether or not the viewer is open:
 
 ```
-servant tasks                # every workspace's open issues, grouped
+servant tasks                # every board's open tickets, grouped
 servant tasks --ws <name>    # just this workspace
-gh issue list --repo <hub> --label ws:<name>
+servant ticket new --title …  # file one
+servant ticket show <n>      # read one, with its blockers and comments
 ```
 
-The concrete hub repo + label for this workspace are in the `## Agent skills` block (per workspace) and `docs/agents/issue-tracker.md`. **Do not** create per-workspace `briefs/` or `plans/` files — file issues instead.
+Every operation — labels, comments, closing, blocking, claiming — is in `docs/agents/issue-tracker.md`, including all of the `/wayfinder` ones. **Do not** create per-workspace `briefs/` or `plans/` files, and **do not** write blocking into a ticket body as prose: `servant ticket block <n> --on <m>` is the only representation, and a cycle is rejected as you add it.
 
-To see where the whole initiative stands rather than one ticket — what is in flight and under which session, what is ready, what is blocked, and which Claims have gone stale — run **`/servant:lead`**. It joins the hub, the Claims, the session registry and the transcripts into one report, and can redirect a running session from there. It is a skill, not a session type: any session runs it and leads for that turn.
+To see where the whole initiative stands rather than one ticket — what is in flight and under which session, what is ready, what is blocked, and which Claims have gone stale — run **`/servant:lead`**. It joins the board, the Claims, the session registry and the transcripts into one report, and can redirect a running session from there. It is a skill, not a session type: any session runs it and leads for that turn.
 
 ## The workspace goal
 
@@ -73,11 +74,11 @@ guide scope and priority decisions; if a request conflicts with it, surface that
 
 ## Where artifacts go
 
-Cross-session reasoning lives with the workspace or the hub — never inside the repo you are editing. The repo holds code.
+Cross-session reasoning lives with the workspace or on the board — never inside the repo you are editing. The repo holds code.
 
-- **Tasks / specs / tickets** → GitHub Issues in the hub (`/to-spec`, `/to-tickets`, or `gh issue create`), labeled `ws:<workspace>`.
+- **Tasks / specs / tickets** → tickets on this workspace's board (`/to-spec`, `/to-tickets`, or `servant ticket new`).
 - **Architecture decisions** → `<workspace>/docs/adr/NNNN-<slug>.md`.
-- **DO NOT** write plans/specs/tickets to `<repo>/docs/`, `<repo>/.scratch/`, `<repo>/PLAN.md`, or any path inside the repo. If a planning skill defaults to writing inside the repo, override it — file an issue in the hub instead.
+- **DO NOT** write plans/specs/tickets to `<repo>/docs/`, `<repo>/.scratch/`, `<repo>/PLAN.md`, or any path inside the repo. If a planning skill defaults to writing inside the repo, override it — file a ticket instead.
 
 ## Spawning & handoff
 
@@ -93,8 +94,10 @@ There are two ways to move work to another agent — pick by layer:
 ## servant commands you'll reach for
 
 ```
-servant tasks [--ws <name>]     # cross-workspace issue view (grouped, deep-linked)
+servant tasks [--ws <name>]     # cross-workspace ticket view (grouped, deep-linked)
 servant tasks --frontier --ws … # ready / stale / in-flight / blocked; feeds /servant:handoff
+servant ticket <new|show|…>      # file, read and edit tickets on the board
+servant claim <n> --session …    # who is carrying a ticket
 servant recall <query>          # search accumulated knowledge notes
 servant spawn -w <name> [-r]    # new workspace / tab; -r mounts repo worktrees
 servant resume                  # re-attach to an earlier session

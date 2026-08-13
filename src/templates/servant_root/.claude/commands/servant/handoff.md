@@ -17,8 +17,8 @@ after `/grill-me`, after `/to-tickets`, when context is filling mid-`/implement`
 ## 1. Orient
 
 - **Workspace**: infer from cwd (`~/.ai_servant/workspaces/<name>/…`).
-- **Hub + label**: read `docs/agents/issue-tracker.md` (the tracker is the shared hub; this
-  workspace's issues carry `ws:<name>`).
+- **The tracker**: read `docs/agents/issue-tracker.md` (the tracker is this workspace's own board —
+  a local database, so ticket numbers are board-scoped and small).
 - If `$ARGUMENTS` is present, treat it as what the next session should focus on.
 
 ## 2. Write the handoff doc
@@ -48,7 +48,7 @@ Read the flow state and pick the continuation. When unsure which skill fits, rea
 
 ## 4. Dispatch mode — fan out the ready tickets
 
-1. Get the frontier (deterministic — don't eyeball `gh`):
+1. Get the frontier (deterministic — don't eyeball the board):
 
    ```
    servant tasks --frontier --ws <name> --json
@@ -61,7 +61,7 @@ Read the flow state and pick the continuation. When unsure which skill fits, rea
    | `ready[]` | unblocked, nobody holds the Claim | **yes** |
    | `stale[]` | unblocked, but the session holding the Claim is **gone** | **yes — reclaim first** |
    | `inFlight[]` | a session is on it (or its liveness is unknown) | **no** — see below |
-   | `blocked[]` | an open blocker, in any of the three forms | **never** |
+   | `blocked[]` | an open blocker on the board | **never** |
 
    **Refuse to spawn onto a live Claim.** For anything in `inFlight[]`, do not spawn. Say which
    session holds it and since when — the entry carries `claim.session` and `claim.since`:
@@ -110,7 +110,7 @@ Show the plan and get a go:
 On confirmation, spawn one session per dispatchable ticket:
 
 ```
-servant spawn -w <name> --prompt "Read <handoff-doc>. Run /implement #<N> for the <repo> ticket in the hub (ws:<name>); follow its acceptance criteria, drive /tdd at the seams, and close with /code-review before committing."
+servant spawn -w <name> --prompt "Read <handoff-doc>. Run /implement #<N> for the <repo> ticket on the <name> board; follow its acceptance criteria, drive /tdd at the seams, and close with /code-review before committing."
 ```
 
 `servant spawn` auto-detects the workspace and opens a new tab per call — that's the fan-out.

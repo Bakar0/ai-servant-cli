@@ -7,7 +7,7 @@ argument-hint: "[optional: a question about the initiative, or an instruction to
 
 Answer "where is this whole thing up to?" in one view, and act on the answer without changing tools.
 
-The information already exists and is scattered across four places: the hub knows the tickets and
+The information already exists and is scattered across four places: the board knows the tickets and
 how they block each other, the **Claims** know who is carrying what, the session registry knows who
 is still alive, and the transcripts know what each session has been doing. Reading them separately
 means holding four things in your head; this joins them.
@@ -20,7 +20,7 @@ unnoticed until somebody asks. This is the asking.
 ## 1. Orient
 
 - **Workspace**: infer from cwd (`~/.ai_servant/workspaces/<name>/…`).
-- **Hub + label**: `docs/agents/issue-tracker.md`.
+- **The tracker**: `docs/agents/issue-tracker.md`.
 - If `$ARGUMENTS` is a question, answer it from the join below rather than reporting everything.
   If it is an instruction for a running session, report first, then go to step 4.
 
@@ -31,7 +31,7 @@ servant tasks --frontier --ws <name> --json
 servant sessions --json
 ```
 
-The first is the join itself — tickets, blocking edges in all three forms, Claims, and liveness.
+The first is the join itself — tickets, blocking edges, Claims, and liveness — read from the board.
 The second says what is running that carries no ticket (your hands, anything started by hand) and
 whether each session is idle or busy.
 
@@ -47,8 +47,8 @@ then reported as in flight, because a ticket you cannot prove is free is not fre
 could not check** — do not report "nothing is stale" as though you had looked. And note what it
 costs you in step 4: a session you cannot prove is alive is one you must not redirect either.
 
-`fromCache: true` means the hub was unreachable and this is a snapshot. Report from it, say so, and
-do not redirect off it — the Claims in it may be hours stale.
+The board is a local file, so there is no unreachable-tracker case to caveat: what the join reports
+is current as of the moment you ran it. `livenessKnown` is the only thing that can be unknown.
 
 Both commands read files and exit. Never ask a session what it is doing to fill this in: that costs
 it a whole turn and is billed like a typed prompt, and the answer is already on disk
@@ -86,9 +86,8 @@ session, so you can message another one directly — under exactly the rules voi
   the exact `claim.session` name the join reports, not one you inferred. A session holding no Claim
   on this workspace's tickets is not addressable, and a session in another workspace or another
   project is not reachable at all. Do not work around this by name.
-- **If you could not verify, do not send.** `livenessKnown: false` or `fromCache: true` means you
-  cannot tell who is really carrying what, and an instruction sent on that basis can land in work
-  nobody meant. Say you could not check and stop. This is the one place where "in flight" being a
+- **If you could not verify, do not send.** `livenessKnown: false` means you cannot tell who is
+  really carrying what, and an instruction sent on that basis can land in work nobody meant. Say you could not check and stop. This is the one place where "in flight" being a
   fail-closed *report* does not make it a licence to act.
 - **If it is ambiguous which session the user means, ask.** Never guess, and never send it to all
   of them.

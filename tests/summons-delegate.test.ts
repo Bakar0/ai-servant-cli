@@ -14,7 +14,6 @@ function fakeWorld(launchFails = false) {
   const launches: LaunchWorkspaceSessionOptions[] = [];
   const actions = createSummonsActions({
     workspace: "ai_servant",
-    hubRepo: "acme/hub",
     async claim(_hub, ticket, session) {
       order.push(`claim #${ticket} for ${session}`);
       return { transferredFrom: null, alreadyHeld: false };
@@ -56,7 +55,6 @@ describe("what the delegated session wakes up to", () => {
   const prompt = (overrides = {}) =>
     composeDelegationPrompt({
       workspace: "ai_servant",
-      hubRepo: "acme/hub",
       sessionName: "ai-servant-t17",
       request: {
         task: "port the parser to the new tokenizer",
@@ -88,7 +86,6 @@ describe("what the delegated session wakes up to", () => {
   test("ad-hoc work carries no claim instruction, having no ticket", () => {
     const adhoc = composeDelegationPrompt({
       workspace: "ai_servant",
-      hubRepo: "acme/hub",
       sessionName: "ai-servant-research",
       request: { task: "research X", label: "research", readOnly: false },
     });
@@ -179,7 +176,6 @@ describe("read-only delegation cannot write, which is why it needs no confirmati
   test("a research prompt says it is read-only, so the session reports instead of proposing edits", () => {
     const prompt = composeDelegationPrompt({
       workspace: "ai_servant",
-      hubRepo: "acme/hub",
       sessionName: "ai-servant-parser-q",
       request: { task: "how does the parser work", label: "parser q", readOnly: true },
     });
@@ -214,7 +210,6 @@ describe("watching a delegated session", () => {
   const watching = (opts: { sessions: ClaudeSessionMeta[]; live: SessionLiveness }) =>
     createSummonsActions({
       workspace: "ai_servant",
-      hubRepo: "acme/hub",
       async listSessions() {
         return opts.sessions;
       },

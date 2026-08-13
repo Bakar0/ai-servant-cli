@@ -291,14 +291,15 @@ describe("ensureWorkspaceDir", () => {
     const contextMd = await readFile(join(dir, "CONTEXT.md"), "utf8");
     expect(contextMd).toContain("# Context");
 
-    // Tasks/plans are GitHub Issues in the hub now — no briefs/ or plans/ dirs.
+    // Tasks/plans are tickets on the board now — no briefs/ or plans/ dirs.
     expect(existsSync(join(dir, "briefs"))).toBe(false);
     expect(existsSync(join(dir, "plans"))).toBe(false);
 
-    // mattpocock skills config, hub-pinned to this workspace's label.
+    // mattpocock skills config, pointed at this workspace's own board rather than at `gh`.
     const tracker = await readFile(join(dir, "docs", "agents", "issue-tracker.md"), "utf8");
-    expect(tracker).toContain(`ws:${name}`);
-    expect(tracker).toContain("--repo");
+    expect(tracker).toContain("servant ticket new");
+    expect(tracker).toContain(`--ws ${name}`);
+    expect(tracker).not.toContain("gh issue");
     const domain = await readFile(join(dir, "docs", "agents", "domain.md"), "utf8");
     expect(domain).toContain("docs/adr/");
     await readFile(join(dir, "docs", "agents", "triage-labels.md"), "utf8");
@@ -306,17 +307,58 @@ describe("ensureWorkspaceDir", () => {
     expect(existsSync(join(dir, "docs", "adr"))).toBe(true);
   });
 
-  test("does not overwrite scaffold files that the user has edited", async () => {
+  test("does not overwrite the workspace's own prose", async () => {
     const name = `scaffold-preserve-${process.pid}-${Date.now()}`;
     const dir = await ensureWorkspaceDir(name);
 
-    const domain = join(dir, "docs", "agents", "domain.md");
-    await writeFile(domain, "# Domain\n\n- existing entry\n");
+    const context = join(dir, "CONTEXT.md");
+    await writeFile(context, "# Context\n\n- existing entry\n");
 
     await ensureWorkspaceDir(name);
 
-    const body = await readFile(domain, "utf8");
-    expect(body).toBe("# Domain\n\n- existing entry\n");
+    expect(await readFile(context, "utf8")).toBe("# Context\n\n- existing entry\n");
+  });
+
+  test("re-scaffolding leaves an up-to-date generated agent doc byte-identical", async () => {
+    const name = `scaffold-stable-${process.pid}-${Date.now()}`;
+    const dir = await ensureWorkspaceDir(name);
+    const tracker = join(dir, "docs", "agents", "issue-tracker.md");
+    const first = await readFile(tracker, "utf8");
+
+    await ensureWorkspaceDir(name);
+
+    expect(await readFile(tracker, "utf8")).toBe(first);
+    expect(first.startsWith("<!-- servant:agent-doc v=")).toBe(true);
+  });
+
+  // The case that matters: every workspace that existed before the tracker moved has an unstamped
+  // issue-tracker.md telling agents to run `gh issue create`, and it must not survive a spawn.
+  test("an agent doc written before stamping existed is rewritten", async () => {
+    const name = `scaffold-legacy-${process.pid}-${Date.now()}`;
+    const dir = await ensureWorkspaceDir(name);
+    const tracker = join(dir, "docs", "agents", "issue-tracker.md");
+    await writeFile(
+      tracker,
+      "# Issue tracker: GitHub (servant hub)\n\ngh issue create --repo acme/hub\n",
+    );
+
+    await ensureWorkspaceDir(name);
+
+    const body = await readFile(tracker, "utf8");
+    expect(body).toContain("servant ticket new");
+    expect(body).not.toContain("gh issue create");
+  });
+
+  test("a stamped agent doc is rewritten when the generated content moves", async () => {
+    const name = `scaffold-restamp-${process.pid}-${Date.now()}`;
+    const dir = await ensureWorkspaceDir(name);
+    const tracker = join(dir, "docs", "agents", "issue-tracker.md");
+    // A stamp from some earlier generation of the prose, with content to match.
+    await writeFile(tracker, "<!-- servant:agent-doc v=000000000000 -->\nold prose\n");
+
+    await ensureWorkspaceDir(name);
+
+    expect(await readFile(tracker, "utf8")).toContain("servant ticket new");
   });
 });
 

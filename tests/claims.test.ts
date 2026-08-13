@@ -1,169 +1,133 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { closeBoard, createTicket, requireTicket, ticketActions } from "../src/core/board/store.ts";
 import {
-  type ClaimGhRunner,
+  claimHistory,
   claimTicket,
-  parseClaim,
   readClaim,
   readClaimResult,
   releaseTicketClaim,
 } from "../src/core/claims.ts";
+import { setRootOverride } from "../src/core/paths.ts";
 
-const AT = "2026-08-08T09:00:00.000Z";
+let tmpRoot: string;
 
-/** A fake `gh`: records every invocation, answers `issue view` from the comments it is seeded with. */
-function fakeGh(comments: { body: string }[] = []) {
-  const calls: string[][] = [];
-  const runner: ClaimGhRunner = async (args) => {
-    calls.push([...args]);
-    if (args[0] === "issue" && args[1] === "view") return JSON.stringify({ comments });
-    if (args[0] === "issue" && args[1] === "comment") {
-      comments.push({ body: args[args.indexOf("--body") + 1] ?? "" });
-    }
-    return "";
-  };
-  return { runner, calls, comments };
-}
-
-const bodies = (calls: string[][]) =>
-  calls.filter((c) => c[1] === "comment").map((c) => c[c.indexOf("--body") + 1] ?? "");
-
-describe("reading a ticket's Claim", () => {
-  test("a ticket nobody has claimed has no Claim", () => {
-    expect(parseClaim([{ body: "looks good to me" }])).toBeNull();
-  });
-
-  test("the latest claim comment is the one that counts", () => {
-    const claim = parseClaim([
-      { body: "<!-- servant:claim -->\n**Claim:** `ws-t7` — since 2026-08-01T00:00:00Z" },
-      { body: "unrelated discussion" },
-      { body: "<!-- servant:claim -->\n**Claim:** `ws-t7-redo` — since 2026-08-05T00:00:00Z" },
-    ]);
-    expect(claim).toEqual({ kind: "held", session: "ws-t7-redo", at: "2026-08-05T00:00:00Z" });
-  });
-
-  test("a transfer names the session taking it over, not the one letting go", () => {
-    const claim = parseClaim([
-      {
-        body: "<!-- servant:claim -->\n**Claim transferred:** `old-session` → `new-session` — since 2026-08-06T00:00:00Z",
-      },
-    ]);
-    expect(claim?.session).toBe("new-session");
-  });
-
-  test("a released ticket reads as released, not as held", () => {
-    const claim = parseClaim([
-      { body: "<!-- servant:claim -->\n**Claim:** `ws-t7` — since 2026-08-01T00:00:00Z" },
-      { body: "<!-- servant:claim -->\n**Claim released:** `ws-t7` — at 2026-08-02T00:00:00Z" },
-    ]);
-    expect(claim?.kind).toBe("released");
-  });
-
-  test("an unreadable ticket is 'no claim known' rather than a failure", async () => {
-    const claim = await readClaim("acme/hub", 7, {
-      ghRunner: async () => {
-        throw new Error("gh: not authenticated");
-      },
-    });
-    expect(claim).toBeNull();
-  });
+beforeEach(async () => {
+  tmpRoot = await mkdtemp(join(tmpdir(), "servant-claims-"));
+  setRootOverride(tmpRoot);
 });
 
-// Steering is scoped to sessions holding a Claim, so it has to fail closed — and it cannot, if a
-// hub it could not reach is indistinguishable from a ticket nobody has claimed (ADR 0010).
-describe("telling an unreadable ticket from an unclaimed one", () => {
-  test("a ticket that read fine and has no Claim is known", async () => {
-    const { runner } = fakeGh([{ body: "looks good to me" }]);
+afterEach(async () => {
+  closeBoard();
+  setRootOverride(null);
+  await rm(tmpRoot, { recursive: true, force: true });
+});
 
-    expect(await readClaimResult("acme/hub", 7, { ghRunner: runner })).toEqual({
-      known: true,
-      claim: null,
-    });
+const AT = "2026-06-16T12:00:00.000Z";
+const LATER = "2026-06-16T13:00:00.000Z";
+const LATEST = "2026-06-16T14:00:00.000Z";
+
+function ticket(seq = 17): number {
+  return createTicket({ workspace: "ai-servant", title: "a ticket", seq, now: AT }).seq;
+}
+
+describe("reading a Claim", () => {
+  test("an unclaimed ticket reads as known-and-nobody, not as unknown", async () => {
+    ticket();
+    expect(await readClaimResult("ai-servant", 17)).toEqual({ known: true, claim: null });
   });
 
-  test("a ticket that read fine reports the Claim it carries", async () => {
-    const { runner } = fakeGh([
-      { body: "<!-- servant:claim -->\n**Claim:** `ws-t7` — since 2026-08-01T00:00:00Z" },
-    ]);
-
-    expect(await readClaimResult("acme/hub", 7, { ghRunner: runner })).toEqual({
-      known: true,
-      claim: { kind: "held", session: "ws-t7", at: "2026-08-01T00:00:00Z" },
-    });
+  test("a ticket that is not on the board reads as unknown", async () => {
+    // Fail-closed: steering is scoped to Claim holders, and a ticket we cannot find is not the
+    // same answer as a ticket nobody holds (ADR-0010 decision 9, kept by ADR-0011).
+    expect(await readClaimResult("ai-servant", 99)).toEqual({ known: false });
+    expect(await readClaimResult("no-such-workspace", 1)).toEqual({ known: false });
   });
 
-  test("a hub that could not be reached is unknown, never 'nobody has claimed it'", async () => {
-    const result = await readClaimResult("acme/hub", 7, {
-      ghRunner: async () => {
-        throw new Error("gh: not authenticated");
-      },
-    });
-
-    expect(result).toEqual({ known: false });
-  });
-
-  test("an answer that is not JSON is unknown too — the shape moved, so nothing is known", async () => {
-    const result = await readClaimResult("acme/hub", 7, { ghRunner: async () => "not json" });
-
-    expect(result).toEqual({ known: false });
+  test("readClaim flattens unknown to no-claim, never to a hard stop", async () => {
+    expect(await readClaim("ai-servant", 99)).toBeNull();
   });
 });
 
 describe("taking a Claim", () => {
-  test("names the session and the time, and marks the ticket claimed", async () => {
-    const { runner, calls } = fakeGh();
-
-    await claimTicket("acme/hub", 17, "ai-servant-t17", { ghRunner: runner, now: AT });
-
-    expect(bodies(calls)[0]).toContain("`ai-servant-t17`");
-    expect(bodies(calls)[0]).toContain(AT);
-    expect(calls.some((c) => c.includes("--add-assignee"))).toBe(true);
+  test("claiming records the session and the time", async () => {
+    ticket();
+    const result = await claimTicket("ai-servant", 17, "ai-servant-t17", { now: AT });
+    expect(result).toEqual({ transferredFrom: null, alreadyHeld: false });
+    expect(await readClaim("ai-servant", 17)).toEqual({ session: "ai-servant-t17", at: AT });
   });
 
-  test("re-delegating transfers the Claim rather than adding a second one", async () => {
-    const { runner, calls, comments } = fakeGh([
-      { body: "<!-- servant:claim -->\n**Claim:** `ai-servant-t17` — since 2026-08-01T00:00:00Z" },
-    ]);
+  test("re-claiming a ticket this session already holds is a no-op", async () => {
+    ticket();
+    await claimTicket("ai-servant", 17, "ai-servant-t17", { now: AT });
+    const again = await claimTicket("ai-servant", 17, "ai-servant-t17", { now: LATER });
+    expect(again).toEqual({ transferredFrom: null, alreadyHeld: true });
+    // Neither the "since" nor the history moved — a retried spawn leaves no trace.
+    expect(await readClaim("ai-servant", 17)).toEqual({ session: "ai-servant-t17", at: AT });
+    expect(await claimHistory("ai-servant", 17)).toHaveLength(1);
+  });
 
-    const result = await claimTicket("acme/hub", 17, "ai-servant-t17-redo", {
-      ghRunner: runner,
-      now: AT,
-    });
-
-    expect(result.transferredFrom).toBe("ai-servant-t17");
-    expect(bodies(calls)[0]).toContain("transferred");
-    // Reading the ticket back finds one live Claim, and it is the new session's.
-    expect(parseClaim(comments)).toEqual({
-      kind: "held",
+  test("claiming a ticket someone else holds is an explicit, recorded transfer", async () => {
+    ticket();
+    await claimTicket("ai-servant", 17, "ai-servant-t17", { now: AT });
+    const result = await claimTicket("ai-servant", 17, "ai-servant-t17-redo", { now: LATER });
+    expect(result).toEqual({ transferredFrom: "ai-servant-t17", alreadyHeld: false });
+    expect(await readClaim("ai-servant", 17)).toEqual({
       session: "ai-servant-t17-redo",
-      at: AT,
+      at: LATER,
     });
+    expect(await claimHistory("ai-servant", 17)).toEqual([
+      { kind: "claimed", session: "ai-servant-t17", at: AT, from: null },
+      { kind: "transferred", session: "ai-servant-t17-redo", at: LATER, from: "ai-servant-t17" },
+    ]);
   });
 
-  test("claiming what this session already holds changes nothing", async () => {
-    const { runner, calls } = fakeGh([
-      { body: "<!-- servant:claim -->\n**Claim:** `ai-servant-t17` — since 2026-08-01T00:00:00Z" },
-    ]);
-
-    const result = await claimTicket("acme/hub", 17, "ai-servant-t17", {
-      ghRunner: runner,
-      now: AT,
-    });
-
-    expect(result.alreadyHeld).toBe(true);
-    expect(bodies(calls)).toEqual([]);
+  test("claiming a ticket that is not on the board fails loudly", async () => {
+    expect(claimTicket("ai-servant", 99, "ai-servant-t99")).rejects.toThrow(/No ticket #99/);
   });
 });
 
 describe("releasing a Claim", () => {
-  test("records who released it and unassigns the ticket", async () => {
-    const { runner, calls, comments } = fakeGh([
-      { body: "<!-- servant:claim -->\n**Claim:** `ai-servant-t17` — since 2026-08-01T00:00:00Z" },
+  test("release supersedes the hold, and the ticket reads as nobody's", async () => {
+    ticket();
+    await claimTicket("ai-servant", 17, "ai-servant-t17", { now: AT });
+    await releaseTicketClaim("ai-servant", 17, "ai-servant-t17", { now: LATER });
+    expect(await readClaim("ai-servant", 17)).toBeNull();
+    expect(await readClaimResult("ai-servant", 17)).toEqual({ known: true, claim: null });
+  });
+
+  test("the most recent record wins across a release and a re-claim", async () => {
+    ticket();
+    await claimTicket("ai-servant", 17, "ai-servant-t17", { now: AT });
+    await releaseTicketClaim("ai-servant", 17, "ai-servant-t17", { now: LATER });
+    await claimTicket("ai-servant", 17, "ai-servant-t17-again", { now: LATEST });
+    expect(await readClaim("ai-servant", 17)).toEqual({
+      session: "ai-servant-t17-again",
+      at: LATEST,
+    });
+    // A re-claim after a release is not a transfer: nobody was holding it.
+    expect((await claimHistory("ai-servant", 17)).map((r) => r.kind)).toEqual([
+      "claimed",
+      "released",
+      "claimed",
     ]);
+  });
 
-    await releaseTicketClaim("acme/hub", 17, "ai-servant-t17", { ghRunner: runner, now: AT });
+  test("releasing an unheld ticket is quiet, and still recorded", async () => {
+    ticket();
+    await releaseTicketClaim("ai-servant", 17, "ai-servant-t17", { now: AT });
+    expect(await readClaim("ai-servant", 17)).toBeNull();
+    expect((await claimHistory("ai-servant", 17)).map((r) => r.kind)).toEqual(["released"]);
+  });
 
-    expect(bodies(calls)[0]).toContain("released");
-    expect(calls.some((c) => c.includes("--remove-assignee"))).toBe(true);
-    expect(parseClaim(comments)?.kind).toBe("released");
+  test("history survives on the ticket's own append-only log", async () => {
+    const seq = ticket();
+    await claimTicket("ai-servant", seq, "ai-servant-t17", { now: AT });
+    await releaseTicketClaim("ai-servant", seq, "ai-servant-t17", { now: LATER });
+    // Keyed on the global id, as every stored thing is.
+    const kinds = ticketActions(requireTicket("ai-servant", seq).id).map((a) => a.kind);
+    expect(kinds).toEqual(["created", "claimed", "released"]);
   });
 });

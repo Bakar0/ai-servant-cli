@@ -53,7 +53,6 @@ function marker(sessionName: string): string {
 
 export interface DelegationPromptContext {
   workspace: string;
-  hubRepo: string;
   sessionName: string;
   request: DelegationRequest;
 }
@@ -64,7 +63,7 @@ export interface DelegationPromptContext {
  * since nothing watches the session to release it on its behalf.
  */
 export function composeDelegationPrompt(ctx: DelegationPromptContext): string {
-  const { request, sessionName, hubRepo } = ctx;
+  const { request, sessionName } = ctx;
   const parts = [
     marker(sessionName),
     `You were handed this ${request.readOnly ? "question" : "task"} out loud, during a spoken Summons of the "${ctx.workspace}" workspace. The user is away from the keyboard, so work it end to end and leave your conclusion as your final message — that message is what gets read back to them, out loud, so make it answer the question on its own.`,
@@ -79,7 +78,7 @@ export function composeDelegationPrompt(ctx: DelegationPromptContext): string {
   }
   if (request.ticket) {
     parts.push(
-      `## Ticket\n\nThis carries issue #${request.ticket} in ${hubRepo}, and this session holds the Claim on it. When the work is finished, release it:\n\n\`\`\`\nservant claim ${request.ticket} --release --session ${sessionName}\n\`\`\``,
+      `## Ticket\n\nThis carries ticket #${request.ticket} on the "${ctx.workspace}" board, and this session holds the Claim on it. When the work is finished, release it:\n\n\`\`\`\nservant claim ${request.ticket} --release --session ${sessionName}\n\`\`\``,
     );
   }
   if (request.conversation) {
@@ -104,7 +103,6 @@ function statusOf(live: SessionLiveness, assistantTurns: number): DelegationStat
 
 export interface SummonsActionsDeps {
   workspace: string;
-  hubRepo: string;
   terminal?: string | undefined;
   /** Injected in tests; default to the real spawn, `gh` and transcript/registry readers. */
   launch?: typeof launchWorkspaceSession;
@@ -127,13 +125,12 @@ export function createSummonsActions(deps: SummonsActionsDeps): SummonsActions {
       const ticket = request.ticket;
       // Claimed first, deliberately: the window this closes is a session running unclaimed, which
       // is exactly when a second one gets dispatched onto the same ticket and the same worktree.
-      if (ticket) await claim(deps.hubRepo, ticket, sessionName, {});
+      if (ticket) await claim(deps.workspace, ticket, sessionName, {});
       try {
         await launch({
           workspace: deps.workspace,
           prompt: composeDelegationPrompt({
             workspace: deps.workspace,
-            hubRepo: deps.hubRepo,
             sessionName,
             request,
           }),
@@ -143,7 +140,7 @@ export function createSummonsActions(deps: SummonsActionsDeps): SummonsActions {
         });
       } catch (err) {
         // A Claim with no session behind it would read as in-flight work forever.
-        if (ticket) await release(deps.hubRepo, ticket, sessionName, {}).catch(() => {});
+        if (ticket) await release(deps.workspace, ticket, sessionName, {}).catch(() => {});
         throw err;
       }
       return { label: request.label, sessionName, ticket, repo: request.repo };
