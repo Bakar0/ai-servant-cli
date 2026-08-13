@@ -1,7 +1,6 @@
 import { existsSync } from "node:fs";
 import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { dirname, join, relative, resolve, sep } from "node:path";
-import { loadConfig } from "./config.ts";
 import { ensureProjectIndex, renderWorkspaceKnowledgeSection } from "./knowledge.ts";
 import { aiServantRoot, workspacePath, workspacesRoot } from "./paths.ts";
 import {
@@ -96,21 +95,20 @@ _Anything explicitly NOT part of this workspace._
 `;
 
 // Static scaffold files seeded once when a workspace is created. Only written if missing so user
-// edits are never clobbered. Tasks/plans no longer live as files — they are GitHub Issues in the
-// hub (see docs/agents/issue-tracker.md, generated per workspace below). ADRs live in docs/adr/.
+// edits are never clobbered. Tasks/plans no longer live as files — they are tickets on the
+// workspace's board (see docs/agents/issue-tracker.md, generated per workspace below). ADRs live in
+// docs/adr/.
 const SCAFFOLD_FILES: ReadonlyArray<readonly [string, string]> = [
   ["GOAL.md", GOAL_PLACEHOLDER],
   ["CONTEXT.md", "# Context\n\nShared language / domain glossary for this workspace.\n"],
 ];
 
-// Per-workspace mattpocock-skills config (docs/agents/*). Parameterized by workspace name + hub
-// repo, so generated in ensureWorkspaceDir rather than listed statically. Written if missing.
-function skillsConfigFiles(
-  workspace: string,
-  hubRepo: string,
-): ReadonlyArray<readonly [string, string]> {
+// Per-workspace mattpocock-skills config (docs/agents/*). Parameterized by workspace name, so
+// generated in ensureWorkspaceDir rather than listed statically. Rewritten when their content
+// stamp moves — see writeStamped.
+function skillsConfigFiles(workspace: string): ReadonlyArray<readonly [string, string]> {
   return [
-    ["docs/agents/issue-tracker.md", renderIssueTrackerDoc(workspace, hubRepo)],
+    ["docs/agents/issue-tracker.md", renderIssueTrackerDoc(workspace)],
     ["docs/agents/domain.md", renderDomainDoc()],
     ["docs/agents/triage-labels.md", renderTriageLabelsDoc()],
   ];
@@ -124,6 +122,21 @@ async function writeIfMissing(path: string, body: string): Promise<void> {
     // missing, will write
   }
   await writeFile(path, body);
+}
+
+/**
+ * Write a generated agent doc, refreshing it whenever its content has moved.
+ *
+ * These are the *only* scaffold files that are not write-if-missing, and the exception is
+ * deliberate (ADR-0011): they describe how to operate the tracker, so a workspace created before a
+ * tracker change would otherwise keep instructing agents to use the old one forever. The stamped
+ * first line means an unstamped doc — every workspace predating this — never compares equal, and so
+ * is always replaced.
+ */
+async function writeStamped(path: string, desired: string): Promise<void> {
+  const existing = await readFileOr(path, "");
+  if (existing === desired) return;
+  await writeFile(path, desired);
 }
 
 const VALID_NAME = /^[A-Za-z0-9][A-Za-z0-9_.-]*$/;
@@ -147,12 +160,15 @@ export async function ensureWorkspaceDir(name: string): Promise<string> {
   assertValidWorkspaceName(name);
   const dir = workspacePath(name);
   await mkdir(dir, { recursive: true });
-  const { hubRepo } = await loadConfig();
-  const scaffold = [...SCAFFOLD_FILES, ...skillsConfigFiles(name, hubRepo)];
-  for (const [rel, body] of scaffold) {
+  for (const [rel, body] of SCAFFOLD_FILES) {
     const full = join(dir, rel);
     await mkdir(dirname(full), { recursive: true });
     await writeIfMissing(full, body);
+  }
+  for (const [rel, body] of skillsConfigFiles(name)) {
+    const full = join(dir, rel);
+    await mkdir(dirname(full), { recursive: true });
+    await writeStamped(full, body);
   }
   // ADRs live here (created lazily by /domain-modeling); seed the dir so the layout is visible.
   await mkdir(join(dir, "docs", "adr"), { recursive: true });
@@ -234,10 +250,9 @@ export async function mountedRepoSubdirs(workspace: string): Promise<string[]> {
 async function buildWorkspaceClaudeMd(
   workspace: string,
   repoSubdirs: readonly string[],
-  hubRepo: string,
 ): Promise<string> {
   const header = `${WORKSPACE_CLAUDE_MD_BASE.join("\n")}\n`;
-  const agentSkills = renderAgentSkillsBlock(workspace, hubRepo);
+  const agentSkills = renderAgentSkillsBlock(workspace);
   const knowledge = await renderWorkspaceKnowledgeSection(repoSubdirs);
   return `${header}\n${agentSkills}\n${knowledge}`;
 }
@@ -252,9 +267,8 @@ async function buildWorkspaceClaudeMd(
 export async function syncWorkspaceClaudeMd(workspace: string): Promise<void> {
   const repoSubdirs = await mountedRepoSubdirs(workspace);
   for (const repo of repoSubdirs) await ensureProjectIndex(repo);
-  const { hubRepo } = await loadConfig();
   const claudeMdPath = join(workspacePath(workspace), "CLAUDE.md");
-  const desired = await buildWorkspaceClaudeMd(workspace, repoSubdirs, hubRepo);
+  const desired = await buildWorkspaceClaudeMd(workspace, repoSubdirs);
   let existing: string | null = null;
   try {
     existing = await readFile(claudeMdPath, "utf8");
@@ -282,14 +296,13 @@ async function readFileOr(path: string, fallback: string): Promise<string> {
 async function buildWorkspaceAgentsMd(
   workspace: string,
   repoSubdirs: readonly string[],
-  hubRepo: string,
 ): Promise<string> {
   // Codex has no @-imports, so inline what CLAUDE.md would import: the servant-root conventions
   // doc and the workspace GOAL.md, the per-workspace Agent skills block (hub pin), plus the same
   // inlined knowledge index.
   const rootConventions = (await readFileOr(join(aiServantRoot(), "CLAUDE.md"), "")).trim();
   const goal = (await readFileOr(join(workspacePath(workspace), "GOAL.md"), "")).trim();
-  const agentSkills = renderAgentSkillsBlock(workspace, hubRepo).trim();
+  const agentSkills = renderAgentSkillsBlock(workspace).trim();
   const knowledge = await renderWorkspaceKnowledgeSection(repoSubdirs);
   const sections = [WORKSPACE_AGENTS_MD_HEADER];
   if (rootConventions) sections.push(rootConventions);
@@ -307,9 +320,8 @@ async function buildWorkspaceAgentsMd(
 export async function syncWorkspaceAgentsMd(workspace: string): Promise<void> {
   const repoSubdirs = await mountedRepoSubdirs(workspace);
   for (const repo of repoSubdirs) await ensureProjectIndex(repo);
-  const { hubRepo } = await loadConfig();
   const agentsMdPath = join(workspacePath(workspace), "AGENTS.md");
-  const desired = await buildWorkspaceAgentsMd(workspace, repoSubdirs, hubRepo);
+  const desired = await buildWorkspaceAgentsMd(workspace, repoSubdirs);
   const existing = await readFileOr(agentsMdPath, " missing");
   if (existing !== desired) await writeFile(agentsMdPath, desired);
 }

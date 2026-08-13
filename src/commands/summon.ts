@@ -116,7 +116,7 @@ export const summonCommand = defineCommand({
   },
   async run({ args }) {
     applyRootOverride(args.root);
-    const { hubRepo } = await requireInit();
+    await requireInit();
 
     const idleMs = parseIdleTimeoutMs(args["idle-timeout"]);
 
@@ -158,10 +158,10 @@ export const summonCommand = defineCommand({
       write: (line) => process.stdout.write(`${line}\n`),
     });
 
-    // One adapter over the hub, handed to the controller as two narrow ports: the Claims steering
+    // One adapter over the board, handed to the controller as two narrow ports: the Claims steering
     // reads, and the one write a Summons can make. The Call log id goes with it so anything filed
     // by voice can be traced back to the conversation that produced it.
-    const hub = createSummonsTickets({ hubRepo, workspace, callLogId: callLog.id });
+    const hub = createSummonsTickets({ workspace, callLogId: callLog.id });
 
     let ended: () => void = () => {};
     const finished = new Promise<void>((resolve) => {
@@ -172,7 +172,7 @@ export const summonCommand = defineCommand({
       reader: createWorkspaceReader(scope.root),
       // Delegated sessions open on the workspace, not the Summons' scope: `--repo` narrows what
       // the agent may read out loud, never what Claude is allowed to work on.
-      actions: createSummonsActions({ workspace, hubRepo, terminal: args.terminal }),
+      actions: createSummonsActions({ workspace, terminal: args.terminal }),
       // Constructed, not started: the session behind this is spawned by the first request that
       // needs it, and a Summons where nothing ever needs hands costs nothing.
       hands,

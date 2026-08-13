@@ -20,7 +20,6 @@ const SNAPSHOT: WorkspaceSnapshot = {
     { number: 17, title: "delegate to Claude", url: "https://hub/17" },
   ],
   tree: ["GOAL.md", "docs/adr/0009-talk.md"],
-  ticketsFromCache: false,
 };
 
 describe("composeSummonsInstructions", () => {
@@ -56,13 +55,6 @@ describe("composeSummonsInstructions", () => {
     );
   });
 
-  test("says so when the ticket list could not be refreshed, rather than passing it off as current", () => {
-    const stale = composeSummonsInstructions({ ...SNAPSHOT, ticketsFromCache: true });
-
-    expect(stale).toMatch(/could not|stale|out of date/i);
-    expect(composeSummonsInstructions(SNAPSHOT)).not.toMatch(/could not|stale|out of date/i);
-  });
-
   test("tells the agent it delegates heavy work rather than doing it", () => {
     const instructions = composeSummonsInstructions(SNAPSHOT);
 
@@ -77,7 +69,6 @@ describe("composeSummonsInstructions", () => {
       glossary: "",
       tickets: [],
       tree: [],
-      ticketsFromCache: false,
     });
 
     expect(instructions).toContain("fresh");
@@ -115,31 +106,19 @@ describe("summons scope and snapshot", () => {
       join(ws, "repos", "alpha__summonws-1234", "node_modules", "junk", "index.js"),
       "1\n",
     );
+    // The board, seeded as the real thing rather than faked: this workspace's open ticket, plus
+    // one on another workspace's board that must not leak into the snapshot.
+    const { createTicket } = await import("../src/core/board/store.ts");
+    createTicket({ workspace: WS, title: "servant summon", seq: 15 });
+    createTicket({ workspace: "other", title: "someone else's ticket", seq: 99 });
   });
 
   afterAll(async () => {
+    const { closeBoard } = await import("../src/core/board/store.ts");
+    closeBoard();
     setRootOverride(null);
     await rm(scratch, { recursive: true, force: true });
   });
-
-  const HUB_ISSUES = JSON.stringify([
-    {
-      number: 15,
-      title: "servant summon",
-      state: "OPEN",
-      url: "https://hub/15",
-      labels: [{ name: `ws:${WS}` }],
-      body: "",
-    },
-    {
-      number: 99,
-      title: "someone else's ticket",
-      state: "OPEN",
-      url: "https://hub/99",
-      labels: [{ name: "ws:other" }],
-      body: "",
-    },
-  ]);
 
   test("defaults to the whole workspace", async () => {
     const scope = await resolveSummonsScope(WS, undefined);
@@ -159,34 +138,32 @@ describe("summons scope and snapshot", () => {
     await expect(resolveSummonsScope(WS, "beta")).rejects.toThrow(/alpha/);
   });
 
-  test("the snapshot carries the goal, glossary, this workspace's tickets and the tree", async () => {
+  test("the snapshot carries the goal, glossary, this workspace's board and the tree", async () => {
     const scope = await resolveSummonsScope(WS, undefined);
-    const snapshot = await readWorkspaceSnapshot(scope, { ghRunner: async () => HUB_ISSUES });
+    const snapshot = await readWorkspaceSnapshot(scope);
 
     expect(snapshot.goal).toContain("Ship the talking servant.");
     expect(snapshot.glossary).toContain("A spoken conversation.");
+    // Only this workspace's board — another workspace's ticket #99 is on a different board.
     expect(snapshot.tickets.map((t) => t.number)).toEqual([15]);
+    expect(snapshot.tickets[0]?.title).toBe("servant summon");
     expect(snapshot.tree).toContain("docs/adr/0009-talk.md");
-    expect(snapshot.ticketsFromCache).toBe(false);
   });
 
-  test("an unreachable hub is reported, not silently served from cache as if current", async () => {
+  test("closed tickets are left off the list the agent opens with", async () => {
+    const { createTicket, requireTicket, updateTicket } = await import(
+      "../src/core/board/store.ts"
+    );
+    createTicket({ workspace: WS, title: "already shipped", seq: 3 });
+    updateTicket(requireTicket(WS, 3).id, { status: "done" });
     const scope = await resolveSummonsScope(WS, undefined);
-    // Prime the cache from a good fetch, then fail — fetchHubTasks falls back to the snapshot.
-    await readWorkspaceSnapshot(scope, { ghRunner: async () => HUB_ISSUES });
-    const offline = await readWorkspaceSnapshot(scope, {
-      ghRunner: async () => {
-        throw new Error("gh: network unreachable");
-      },
-    });
 
-    expect(offline.tickets.map((t) => t.number)).toEqual([15]);
-    expect(offline.ticketsFromCache).toBe(true);
+    expect((await readWorkspaceSnapshot(scope)).tickets.map((t) => t.number)).toEqual([15]);
   });
 
   test("the tree skips version-control and dependency noise", async () => {
     const scope = await resolveSummonsScope(WS, "alpha");
-    const snapshot = await readWorkspaceSnapshot(scope, { ghRunner: async () => HUB_ISSUES });
+    const snapshot = await readWorkspaceSnapshot(scope);
 
     expect(snapshot.tree).toContain("README.md");
     expect(snapshot.tree.some((p) => p.includes(".git/"))).toBe(false);
@@ -195,11 +172,11 @@ describe("summons scope and snapshot", () => {
 
   test("the goal is re-read on every launch, never cached from a previous one", async () => {
     const scope = await resolveSummonsScope(WS, undefined);
-    const before = await readWorkspaceSnapshot(scope, { ghRunner: async () => HUB_ISSUES });
+    const before = await readWorkspaceSnapshot(scope);
     expect(before.goal).toContain("Ship the talking servant.");
 
     await writeFile(join(scratch, "workspaces", WS, "GOAL.md"), "# Goal\n\nShip something else.\n");
-    const after = await readWorkspaceSnapshot(scope, { ghRunner: async () => HUB_ISSUES });
+    const after = await readWorkspaceSnapshot(scope);
 
     expect(after.goal).toContain("Ship something else.");
   });

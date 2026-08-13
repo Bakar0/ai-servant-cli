@@ -63,9 +63,21 @@ export function discoveryCachePath(): string {
   return join(cacheDir(), "repo-discovery.json");
 }
 
-/** Offline snapshot of the hub's issues, so `servant tasks` still renders without network. */
-export function tasksCachePath(): string {
-  return join(cacheDir(), "tasks.json");
+/**
+ * The board: servant's task tracker, and the contract every command reads and writes directly
+ * (ADR-0011). One file at the servant root — no cache tier, because there is no network to be
+ * offline from.
+ */
+export function boardDbPath(): string {
+  return join(aiServantRoot(), "board.sqlite");
+}
+
+/** Loopback port the board viewer binds, and the host part of a ticket's canonical link. */
+export const BOARD_VIEWER_PORT = 7787;
+
+/** A ticket's address in the viewer. Deep-linkable, and never reachable off this machine. */
+export function ticketUrl(workspace: string, seq: number): string {
+  return `http://127.0.0.1:${BOARD_VIEWER_PORT}/w/${encodeURIComponent(workspace)}/t/${seq}`;
 }
 
 /** User-owned fine-tune overlays (one file per tunable aspect), sibling to workspaces/. */

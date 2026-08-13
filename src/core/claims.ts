@@ -1,173 +1,125 @@
-// A Claim: the record on a hub ticket saying which session is carrying it, and since when
-// (workspace ADR 0010). It lives on the ticket rather than in a local file because the ticket is
-// what a human reads when asking "is anyone on this?" — a local file would be invisible in exactly
-// the moment it matters.
+// A Claim: the record saying which session is carrying a ticket, and since when.
 //
-// The session identity cannot live in the assignee field: the hub has one assignable user, so
-// assignee is a boolean. The name goes in a comment, which is append-only and so gives an audit
-// trail without racing whoever else is editing the body.
+// It lives on the board (ADR-0011 decision 2, superseding ADR-0010 decision 2) as an assignment
+// field plus an append-only action row. ADR-0010 argued a Claim must be on the ticket because "a
+// local file would be invisible in exactly the moment it matters" — that objection is about
+// visibility, not locality, and a live board is more visible than an issue comment.
+//
+// The semantics carry over from ADR-0010 unchanged: the most recent record wins, a release
+// supersedes a hold, re-claiming a ticket you already hold is a no-op, and a transfer is explicit.
+// The action row is kept for a *different* reason than ADR-0010 gave: the assignment field can hold
+// the session name directly now, so the log exists for transfer history and audit.
 
-import { $ } from "bun";
+import {
+  type Claim,
+  findTicket,
+  recordAction,
+  requireTicket,
+  ticketActions,
+  updateClaim,
+} from "./board/store.ts";
 
-/** HTML comment stamped on every claim comment, so servant can find its own among the discussion. */
-export const CLAIM_MARKER = "<!-- servant:claim -->";
-
-export type ClaimKind = "held" | "released";
-
-export interface Claim {
-  kind: ClaimKind;
-  /** Session name carrying the ticket — the address other sessions reach it by. */
-  session: string;
-  /** ISO timestamp the claim comment recorded. */
-  at: string;
-}
-
-/** Injectable `gh` runner (argv after the binary → stdout). Real impl shells out. */
-export type ClaimGhRunner = (args: readonly string[]) => Promise<string>;
-
-const defaultRunner: ClaimGhRunner = async (args) => {
-  const res = await $`gh ${args}`.nothrow().quiet();
-  if (res.exitCode !== 0) {
-    throw new Error(res.stderr.toString().trim() || `gh ${args.join(" ")} failed`);
-  }
-  return res.stdout.toString();
-};
+export type { Claim } from "./board/store.ts";
 
 export interface ClaimOptions {
-  ghRunner?: ClaimGhRunner | undefined;
-  /** ISO timestamp to stamp the comment with; injected so tests don't depend on the clock. */
+  /** ISO timestamp to stamp the record with; injected so tests don't depend on the clock. */
   now?: string | undefined;
 }
 
-function claimBody(session: string, at: string, previous: string | null): string {
-  const line =
-    previous && previous !== session
-      ? `**Claim transferred:** \`${previous}\` → \`${session}\``
-      : `**Claim:** \`${session}\``;
-  return `${CLAIM_MARKER}\n${line} — since ${at}`;
-}
-
-function releaseBody(session: string, at: string): string {
-  return `${CLAIM_MARKER}\n**Claim released:** \`${session}\` — at ${at}`;
-}
-
-const HELD_RE = /\*\*Claim(?: transferred)?:\*\*.*?`([^`]+)`\s*—\s*since\s*(\S+)/s;
-const RELEASED_RE = /\*\*Claim released:\*\*\s*`([^`]+)`\s*—\s*at\s*(\S+)/;
-
-/**
- * The ticket's current Claim: the *last* servant claim comment wins, which is what makes a Claim
- * transfer rather than duplicate — re-handing a ticket appends a new comment and the old one
- * becomes history. Comments must be in chronological order, as `gh` returns them.
- */
-export function parseClaim(comments: readonly { body?: string }[]): Claim | null {
-  let latest: Claim | null = null;
-  for (const comment of comments) {
-    const body = comment.body ?? "";
-    if (!body.includes(CLAIM_MARKER)) continue;
-    const released = RELEASED_RE.exec(body);
-    if (released?.[1] && released[2]) {
-      latest = { kind: "released", session: released[1], at: released[2] };
-      continue;
-    }
-    // Checked second: a transfer comment names two sessions, and the held pattern picks the last
-    // backticked one — the session taking it over.
-    const held = HELD_RE.exec(body);
-    if (held?.[1] && held[2]) latest = { kind: "held", session: held[1], at: held[2] };
-  }
-  return latest;
-}
+// These stay `async` over a synchronous store because they are a *seam*: `summons-delegate` injects
+// them (`typeof claimTicket`) and composes the release with `.catch()`, so the Promise-returning
+// shape is what the delegation path is written against.
 
 /**
  * A ticket's Claim, keeping "we could not look" apart from "nobody holds it".
  *
- * Most callers do not need the difference — a spawn that cannot read the hub claims anyway. Steering
- * does: it is scoped to sessions holding a Claim, and a scope that reads an unreachable hub as an
- * unclaimed ticket is not a scope at all (ADR 0010 decision 9).
+ * Most callers do not need the difference — a spawn that cannot read the board claims anyway.
+ * Steering does: it is scoped to sessions holding a Claim, and a scope that reads a ticket it
+ * cannot find as an unclaimed ticket is not a scope at all (ADR-0010 decision 9). A local database
+ * answers far more often than a remote hub did, which makes this distinction *easier* to forget —
+ * ADR-0011 keeps it deliberately.
  */
 export type ClaimResult = { known: false } | { known: true; claim: Claim | null };
 
-export async function readClaimResult(
-  hubRepo: string,
-  ticket: number,
-  opts: ClaimOptions = {},
-): Promise<ClaimResult> {
-  const runner = opts.ghRunner ?? defaultRunner;
+/**
+ * `known: false` covers both ways this can fail to answer — the board could not be opened, and there
+ * is no such ticket on that board. They are one answer here because the question is "who is carrying
+ * *this ticket*", and neither case has one: reporting a mistyped number as an unclaimed ticket would
+ * hand a caller a Claim decision about work that does not exist.
+ */
+export async function readClaimResult(workspace: string, seq: number): Promise<ClaimResult> {
   try {
-    const raw = await runner([
-      "issue",
-      "view",
-      String(ticket),
-      "--repo",
-      hubRepo,
-      "--json",
-      "comments",
-    ]);
-    const parsed = JSON.parse(raw) as { comments?: { body?: string }[] };
-    return { known: true, claim: parseClaim(parsed.comments ?? []) };
+    const ticket = findTicket(workspace, seq);
+    if (!ticket) return { known: false };
+    return { known: true, claim: ticket.claim };
   } catch {
-    // Unreachable and unparseable land together on purpose: an answer whose shape has moved tells
-    // us as little as no answer did.
     return { known: false };
   }
 }
 
 /** The Claim, with an unreadable ticket flattened to "no claim known" — never a hard stop. */
-export async function readClaim(
-  hubRepo: string,
-  ticket: number,
-  opts: ClaimOptions = {},
-): Promise<Claim | null> {
-  const result = await readClaimResult(hubRepo, ticket, opts);
+export async function readClaim(workspace: string, seq: number): Promise<Claim | null> {
+  const result = await readClaimResult(workspace, seq);
   return result.known ? result.claim : null;
 }
 
 /**
  * Take (or transfer) the Claim on a ticket. Idempotent: a ticket already held by this same session
- * is left alone, so a retried spawn does not litter the ticket with identical comments.
+ * is left alone, so a retried spawn neither restamps the hold nor litters the history.
  */
 export async function claimTicket(
-  hubRepo: string,
-  ticket: number,
+  workspace: string,
+  seq: number,
   session: string,
   opts: ClaimOptions = {},
 ): Promise<{ transferredFrom: string | null; alreadyHeld: boolean }> {
-  const runner = opts.ghRunner ?? defaultRunner;
+  const ticket = requireTicket(workspace, seq);
   const at = opts.now ?? new Date().toISOString();
-  const current = await readClaim(hubRepo, ticket, opts);
-  if (current?.kind === "held" && current.session === session) {
-    return { transferredFrom: null, alreadyHeld: true };
-  }
-  const previous = current?.kind === "held" ? current.session : null;
-  await runner([
-    "issue",
-    "comment",
-    String(ticket),
-    "--repo",
-    hubRepo,
-    "--body",
-    claimBody(session, at, previous),
-  ]);
-  await runner(["issue", "edit", String(ticket), "--repo", hubRepo, "--add-assignee", "@me"]);
+  if (ticket.claim?.session === session) return { transferredFrom: null, alreadyHeld: true };
+  const previous = ticket.claim?.session ?? null;
+  updateClaim(ticket.id, { session, at });
+  recordAction(ticket.id, {
+    kind: previous ? "transferred" : "claimed",
+    session,
+    body: previous ?? "",
+    at,
+  });
   return { transferredFrom: previous, alreadyHeld: false };
 }
 
 /** Release the Claim, so `servant tasks --frontier` stops reporting the ticket as in flight. */
 export async function releaseTicketClaim(
-  hubRepo: string,
-  ticket: number,
+  workspace: string,
+  seq: number,
   session: string,
   opts: ClaimOptions = {},
 ): Promise<void> {
-  const runner = opts.ghRunner ?? defaultRunner;
+  const ticket = requireTicket(workspace, seq);
   const at = opts.now ?? new Date().toISOString();
-  await runner([
-    "issue",
-    "comment",
-    String(ticket),
-    "--repo",
-    hubRepo,
-    "--body",
-    releaseBody(session, at),
-  ]);
-  await runner(["issue", "edit", String(ticket), "--repo", hubRepo, "--remove-assignee", "@me"]);
+  updateClaim(ticket.id, null);
+  recordAction(ticket.id, { kind: "released", session, at });
+}
+
+export interface ClaimRecord {
+  kind: "claimed" | "transferred" | "released";
+  session: string;
+  at: string;
+  /** The session a transfer took it from, when that is what happened. */
+  from: string | null;
+}
+
+const CLAIM_KINDS = new Set(["claimed", "transferred", "released"]);
+
+/** The full claim history — who held it, when, and what happened to it. */
+export async function claimHistory(workspace: string, seq: number): Promise<ClaimRecord[]> {
+  const ticket = findTicket(workspace, seq);
+  if (!ticket) return [];
+  return ticketActions(ticket.id)
+    .filter((action) => CLAIM_KINDS.has(action.kind))
+    .map((action) => ({
+      kind: action.kind as ClaimRecord["kind"],
+      session: action.session ?? "",
+      at: action.at,
+      from: action.kind === "transferred" ? action.body || null : null,
+    }));
 }
