@@ -1,0 +1,605 @@
+<!doctype html>
+<!--
+  PROTOTYPE — THROWAWAY. Do not fold this file into main.
+
+  Question (2nd pass): how do the dependency tree and the kanban board relate?
+  Feedback that produced this pass:
+    · connectors didn't group — dependency groups must read at a glance
+    · no sense of work migrating, the way a real board gives you
+    · proposal: horizontal ordered dependency tree + a real kanban board,
+      with each tree node showing which board column it sits in
+
+  Four variants, switchable via ?variant=:
+    A — Lanes    tree full-width, kanban strip beneath it
+    B — Split    tree left, board as a rail on the right, linked highlight
+    C — Grid     one canvas: x = dependency depth, y = board column (cards migrate down)
+    D — Briefing no canvas; the map as a readable document (kept from pass 1)
+
+  Shared across A/B/C — the two things asked for:
+    · edges are coloured BY THE BLOCKER THEY LEAVE, but only for blockers that
+      fan out to 2+ tickets. Single edges stay grey, so colour always means
+      "this is a group".
+    · cards in a depth column are ordered by their primary blocker's position
+      (barycentre), so a fan's children sit together and lines stop crossing.
+    · hover any card to light its full ancestor + descendant chain and dim the rest.
+    · every card carries its board column as a chip.
+
+  Theme is NOT under test. Data is a fixture (spec majordomo#72 as plausible
+  tickets). Depth, fans, ordering and blocked-state are all COMPUTED.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>PROTOTYPE — map view, pass 2</title>
+<style>
+  :root {
+    --bg:#12131a; --panel:#191b24; --panel2:#1f2230; --line:#2c3040;
+    --ink:#e6e8f0; --dim:#9096ab; --faint:#5c6278; --fog:#3a3f52;
+    --c-blocked:#b05c5c; --c-ready:#5f8dd6; --c-prog:#d9a047; --c-review:#a878d8; --c-done:#4ba3a0;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);padding-bottom:86px;
+       font:14px/1.5 ui-sans-serif,-apple-system,"Segoe UI",sans-serif}
+  .wrap{max-width:1640px;margin:0 auto;padding:24px}
+  h2.sec{font-size:11px;letter-spacing:.09em;text-transform:uppercase;color:var(--faint);
+         margin:0 0 10px;font-weight:600}
+
+  /* ---------- map prose frame ---------- */
+  .frame{border:1px solid var(--line);border-radius:10px;background:var(--panel);
+         padding:16px 20px;margin-bottom:20px}
+  .frame .kick{font-size:11px;letter-spacing:.09em;text-transform:uppercase;color:var(--faint)}
+  .frame h1{margin:4px 0 8px;font-size:19px;font-weight:600}
+  .frame .dest{max-width:80ch;color:var(--dim)}
+  .frame .oos{margin-top:11px;padding-top:11px;border-top:1px solid var(--line);
+              color:var(--faint);font-size:12.5px}
+
+  /* ---------- cards ---------- */
+  .card{background:var(--panel2);border:1px solid var(--line);border-left-width:3px;
+        border-left-color:var(--line);border-radius:7px;padding:8px 10px;position:relative;
+        transition:opacity .12s,border-color .12s}
+  .card .r1{display:flex;gap:7px;align-items:center}
+  .card .glyph{font-size:12px;width:12px;text-align:center;flex:none;color:var(--faint)}
+  .card .seq{font-size:11.5px;color:var(--faint);font-variant-numeric:tabular-nums}
+  .card .fan{width:8px;height:8px;border-radius:2px;margin-left:auto;flex:none}
+  .card .title{margin-top:3px;font-size:12.5px;line-height:1.35}
+  .card .r2{margin-top:7px;display:flex;gap:5px;flex-wrap:wrap;align-items:center}
+  .chip{font-size:10px;padding:2px 6px;border-radius:999px;border:1px solid currentColor;
+        opacity:.95;white-space:nowrap}
+  .chip.blocked{color:var(--c-blocked)} .chip.ready{color:var(--c-ready)}
+  .chip.prog{color:var(--c-prog)} .chip.review{color:var(--c-review)} .chip.done{color:var(--c-done)}
+  .chip.claim{color:#c9a55e;border-style:dashed}
+  .chip.plain{color:var(--faint)}
+  .card.done{opacity:.55}
+  .card.done .title{text-decoration:line-through;text-decoration-color:var(--faint)}
+  .card,.rail .item,.row[data-seq]{cursor:pointer}
+  body.hov .card{opacity:.22}
+  body.hov .card.lit{opacity:1}
+  body.hov .card.self{opacity:1;border-color:#8b93c4}
+  body.lock .card.self{box-shadow:0 0 0 2px #7c86ff55}
+  #hint{position:fixed;left:50%;bottom:70px;transform:translateX(-50%);display:none;z-index:99;
+        background:#20233a;border:1px solid #3b4170;color:#c8cdf5;border-radius:999px;
+        padding:5px 14px;font-size:11.5px;box-shadow:0 4px 18px #0008;white-space:nowrap}
+  body.lock #hint{display:block}
+
+  /* ---------- A: lanes ---------- */
+  .cols{display:flex;gap:28px;align-items:flex-start;position:relative}
+  .col{flex:1 1 0;min-width:0}
+  .col>h3{font-size:10.5px;letter-spacing:.09em;text-transform:uppercase;color:var(--faint);
+          margin:0 0 9px;font-weight:600}
+  .col>h3 b{color:var(--fog);font-weight:600}
+  .stack{display:flex;flex-direction:column;gap:9px}
+  svg.wires{position:absolute;inset:0;overflow:visible;pointer-events:none;z-index:0}
+  .cols .card{z-index:1}
+  .fogcol{flex:0 0 230px}
+  .donecol{flex:0 0 168px;opacity:.75}
+  .donecol>h3{color:var(--c-done);opacity:.7}
+  .donecol .card{padding:6px 8px}
+  .donecol .card .title{font-size:11.5px}
+  .donecol .card .r2{display:none}
+  .fogbox{border:1px dashed var(--fog);border-radius:10px;padding:13px;background:#171923}
+  .fogbox h3{margin:0 0 3px;font-size:10.5px;letter-spacing:.09em;text-transform:uppercase;
+             color:var(--faint);font-weight:600}
+  .fogbox p{margin:0 0 10px;font-size:10.5px;font-style:italic;color:var(--faint)}
+  .fogbox ul{margin:0;padding-left:16px;color:var(--dim)}
+  .fogbox li{margin-bottom:9px;font-size:12px;line-height:1.4}
+  .fogbox li::marker{color:var(--fog)}
+  .fogbox h3 span{color:var(--fog);font-weight:500}
+  .fogwide{padding:16px 20px}
+  .fogwide ul{columns:2;column-gap:36px}
+  .fogwide li{break-inside:avoid;margin-bottom:11px;font-size:12.5px}
+
+  /* ---------- kanban ---------- */
+  .kan{display:flex;gap:12px;align-items:flex-start}
+  .kcol{flex:1 1 0;min-width:0;background:var(--panel);border:1px solid var(--line);
+        border-top-width:2px;border-radius:8px;padding:10px}
+  .kcol h3{margin:0 0 9px;font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;
+           font-weight:600;display:flex;justify-content:space-between;align-items:center}
+  .kcol h3 span{color:var(--faint);font-weight:500}
+  .kcol .stack{gap:8px}
+  .kstrip{margin-top:26px;padding-top:20px;border-top:1px solid var(--line)}
+  .kmini{font-size:11.5px}
+  .kmini .title{font-size:11.5px}
+
+  /* ---------- B: split ---------- */
+  .split{display:grid;grid-template-columns:1fr 300px;gap:22px;align-items:start}
+  .rail{position:sticky;top:20px;background:var(--panel);border:1px solid var(--line);
+        border-radius:10px;padding:14px}
+  .rail .grp{margin-bottom:15px}
+  .rail .grp:last-child{margin-bottom:0}
+  .rail .grp>h4{margin:0 0 7px;font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;
+                font-weight:600;display:flex;justify-content:space-between}
+  .rail .grp>h4 span{color:var(--faint);font-weight:500}
+  .rail .item{display:flex;gap:7px;align-items:baseline;padding:4px 6px;border-radius:5px;
+              font-size:12px;cursor:default;transition:opacity .12s,background .12s}
+  .rail .item:hover{background:var(--panel2)}
+  .rail .item .seq{color:var(--faint);font-variant-numeric:tabular-nums;font-size:11px;
+                   width:24px;flex:none}
+  .rail .item .t{flex:1;line-height:1.3}
+  body.hov .rail .item{opacity:.25}
+  body.hov .rail .item.lit{opacity:1}
+  body.hov .rail .item.self{opacity:1;background:var(--panel2)}
+  .barline{height:4px;border-radius:2px;display:flex;overflow:hidden;margin-bottom:16px}
+  .barline i{display:block;height:100%}
+
+  /* ---------- C: grid ---------- */
+  .grid{position:relative}
+  .band{display:grid;position:relative;border-top:1px solid var(--line);padding:11px 0;
+        min-height:74px;align-items:start}
+  .band:last-child{border-bottom:1px solid var(--line)}
+  .band>.lab{position:absolute;left:0;top:11px;font-size:10px;letter-spacing:.08em;
+             text-transform:uppercase;font-weight:600;writing-mode:horizontal-tb}
+  .band>.cells{display:flex;gap:18px;padding-left:104px;width:100%}
+  .band>.cells>.cell{flex:1 1 0;min-width:0;display:flex;flex-direction:column;gap:8px}
+  .gridhead{display:flex;gap:18px;padding-left:104px;margin-bottom:6px}
+  .gridhead>div{flex:1 1 0;font-size:10.5px;letter-spacing:.09em;text-transform:uppercase;
+                color:var(--faint);font-weight:600}
+  .band.b-blocked{background:linear-gradient(90deg,#b05c5c0f,transparent 70%)}
+  .band.b-ready{background:linear-gradient(90deg,#5f8dd60f,transparent 70%)}
+  .band.b-prog{background:linear-gradient(90deg,#d9a04714,transparent 70%)}
+  .band.b-review{background:linear-gradient(90deg,#a878d80f,transparent 70%)}
+  .band.b-done{background:linear-gradient(90deg,#4ba3a00d,transparent 70%)}
+
+  /* ---------- D: briefing ---------- */
+  .doc{max-width:80ch;margin:0 auto}
+  .doc h1{font-size:23px;margin:0 0 4px;font-weight:600}
+  .doc .sub{color:var(--faint);font-size:11.5px;letter-spacing:.05em;text-transform:uppercase;
+            margin-bottom:24px}
+  .doc h2{font-size:11.5px;letter-spacing:.09em;text-transform:uppercase;color:var(--faint);
+          margin:28px 0 9px;font-weight:600;border-bottom:1px solid var(--line);padding-bottom:5px}
+  .doc p.lede{font-size:15.5px;line-height:1.6;margin:0}
+  .doc p{color:var(--dim)}
+  .row{display:flex;gap:9px;align-items:baseline;padding:4px 0}
+  .row .glyph{width:12px;flex:none;font-size:12px;color:var(--faint)}
+  .row .seq{color:var(--faint);font-size:11.5px;width:28px;flex:none;font-variant-numeric:tabular-nums}
+  .row .t{flex:1;font-size:13px}
+  .row.done .t{color:var(--faint);text-decoration:line-through}
+  .doc ol.qs{counter-reset:q;list-style:none;padding:0;margin:0}
+  .doc ol.qs li{counter-increment:q;position:relative;padding-left:32px;margin-bottom:11px;font-size:13px}
+  .doc ol.qs li::before{content:"Q" counter(q);position:absolute;left:0;top:1px;font-size:10.5px;
+                        color:var(--fog);font-weight:600}
+  .doc ul.refs{list-style:none;padding:0;margin:0}
+  .doc ul.refs li{display:flex;gap:9px;padding:5px 0;font-size:12.5px;color:var(--dim)}
+  .doc ul.refs .seq{color:var(--faint);width:30px;flex:none}
+
+  details.dec{margin-top:22px;border:1px solid var(--line);border-radius:10px;
+              background:var(--panel);padding:11px 17px}
+  details.dec summary{cursor:pointer;color:var(--dim);font-size:12.5px}
+  details.dec ol{margin:10px 0 3px;padding-left:20px;color:var(--dim)}
+  details.dec li{margin-bottom:5px}
+
+  /* ---------- legend ---------- */
+  .legend{display:flex;gap:16px;flex-wrap:wrap;align-items:center;margin:16px 0 0;
+          font-size:11px;color:var(--faint)}
+  .legend b{display:inline-block;width:16px;height:2px;vertical-align:middle;margin-right:5px}
+
+  /* ---------- switcher (prototype chrome) ---------- */
+  #sw{position:fixed;left:50%;bottom:20px;transform:translateX(-50%);display:flex;z-index:99;
+      background:#f3f4f8;color:#14161d;border-radius:999px;font-size:13px;
+      box-shadow:0 6px 28px #0009,0 0 0 1px #ffffff22}
+  #sw button{border:0;background:none;cursor:pointer;font-size:15px;padding:0 15px;
+             color:#14161d;border-radius:999px}
+  #sw button:hover{background:#dfe1ea}
+  #sw .lbl{padding:8px 4px;font-weight:600;min-width:236px;text-align:center}
+  #sw .lbl small{display:block;font-weight:400;opacity:.6;font-size:10px;letter-spacing:.03em}
+</style>
+</head>
+<body>
+<div class="wrap" id="root"></div>
+<div id="hint"></div>
+<div id="sw"><button id="prev" title="Previous (←)">‹</button><div class="lbl" id="lbl"></div><button id="next" title="Next (→)">›</button></div>
+
+<script>
+// ══════════════════════ fixture (PROTOTYPE DATA) ══════════════════════
+const MAP = {
+  title: "Replace the GitHub tracker with a local board",
+  destination: "One board that servant owns end to end. SQLite at the servant root is the contract; " +
+    "the viewer is a lens on it. No servant command needs gh or a GitHub login.",
+  outOfScope: "Live agent-activity streaming · forking agent-kanban · auth and remote access · code hosting, PRs and CI",
+  fog: [
+    "What happens to a claim if a session is killed between writing the action row and the assignment?",
+    "Should map prose sections be individually-updatable rows, or is one body blob plus optimistic locking enough?",
+    "Does the copied dispatch command need to name the workspace, or is cwd enough?",
+    "Do cross-board dependencies belong on the depth axis, or only as a badge?"
+  ],
+  decisions: [
+    [74, "Claims live on the board — assignment for the badge, action log for the history"],
+    [76, "Knowledge moves to the servant root as a local git repo with no remote"],
+    [null, "SQLite is the contract; the viewer never gatekeeps writes"],
+    [null, "Build our own board — agent-kanban's schema informs it, its runtime is not used"]
+  ]
+};
+
+// state: done | review | prog | open   (blocked vs ready is DERIVED from deps)
+const T = [
+  { seq:73, type:"task",      state:"done",   title:"Board store + schema (SQLite, WAL)", deps:[] },
+  { seq:74, type:"grilling",  state:"done",   title:"ADR: where claims live, superseding 0010", deps:[] },
+  { seq:76, type:"task",      state:"done",   title:"Move knowledge to the servant root", deps:[] },
+  { seq:75, type:"task",      state:"open",   title:"Delete the workspace dashboard", deps:[] },
+  { seq:77, type:"task",      state:"open",   title:"Version the generated agent docs", deps:[] },
+  { seq:78, type:"research",  state:"prog",   title:"Does Bun.serve SSE survive laptop sleep/wake?", deps:[], claim:"kanban-t78" },
+  { seq:79, type:"task",      state:"open",   title:"Claim model: assignment + action log", deps:[73,74] },
+  { seq:80, type:"task",      state:"prog",   title:"Dependency queries: blocked, reverse, depth", deps:[73], claim:"kanban-t80" },
+  { seq:82, type:"task",      state:"review", title:"Viewer: request handler + SSE framing", deps:[73], claim:"kanban-t82" },
+  { seq:81, type:"task",      state:"open",   title:"Rewire the frontier onto the board", deps:[73,80] },
+  { seq:87, type:"task",      state:"open",   title:"One-shot hub importer", deps:[73,80] },
+  { seq:85, type:"prototype", state:"open",   title:"Depth layout with 40+ nodes — does it still read?", deps:[80] },
+  { seq:86, type:"task",      state:"open",   title:"Map view: depth columns + fog", deps:[80,82] },
+  { seq:83, type:"task",      state:"open",   title:"Board view: status columns, badges, claim", deps:[82,79] },
+  { seq:84, type:"task",      state:"open",   title:"Copy-dispatch button", deps:[83] }
+];
+
+const GLYPH = { task:"◆", research:"◇", grilling:"○", prototype:"△" };
+const KAN = [
+  { key:"blocked", label:"Blocked",     cls:"blocked", col:"var(--c-blocked)" },
+  { key:"ready",   label:"Ready",       cls:"ready",   col:"var(--c-ready)"   },
+  { key:"prog",    label:"In progress", cls:"prog",    col:"var(--c-prog)"    },
+  { key:"review",  label:"In review",   cls:"review",  col:"var(--c-review)"  },
+  { key:"done",    label:"Done",        cls:"done",    col:"var(--c-done)"    }
+];
+const KLAB = Object.fromEntries(KAN.map(k => [k.key, k.label]));
+
+// ══════════════════════ derived model ══════════════════════
+const bySeq = new Map(T.map(t => [t.seq, t]));
+const kids  = new Map(T.map(t => [t.seq, []]));
+T.forEach(t => t.deps.forEach(d => kids.get(d)?.push(t.seq)));
+
+const openBlockers = t => t.deps.filter(d => bySeq.get(d)?.state !== "done");
+
+// Depth counts ONLY OPEN blockers, so "how many closures away from startable" —
+// not static longest-path. A ticket whose blockers have all closed collapses to 0,
+// which makes column 0 exactly the frontier's ready set. Cards migrate LEFT as
+// their blockers close; done work lands in its own column further left still.
+const depthOf = new Map();
+(function computeDepth() {
+  const walk = (seq, seen) => {
+    if (depthOf.has(seq)) return depthOf.get(seq);
+    if (seen.has(seq)) return 0;                  // cycle guard; real impl rejects at write time
+    seen.add(seq);
+    const t = bySeq.get(seq);
+    const ob = t ? openBlockers(t) : [];
+    const d = !ob.length ? 0 : Math.max(...ob.map(x => walk(x, seen) + 1));
+    depthOf.set(seq, d); return d;
+  };
+  T.forEach(t => walk(t.seq, new Set()));
+})();
+const isDone = t => t.state === "done";
+const maxDepth = Math.max(...T.filter(t => !isDone(t)).map(t => depthOf.get(t.seq)));
+const kanOf = t => t.state === "done" ? "done" : t.state === "review" ? "review"
+              : t.state === "prog" ? "prog" : (openBlockers(t).length ? "blocked" : "ready");
+
+// fan hues — only blockers that feed 2+ tickets get a colour, so colour always means "group"
+const FANHUE = ["#e0704f","#48a6c9","#c58ae0","#8fbf4a","#e0b040","#4fc0a0"];
+const fanColor = new Map();
+[...kids.entries()].filter(([, k]) => k.length >= 2)
+  .sort((a, b) => b[1].length - a[1].length || a[0] - b[0])
+  .forEach(([seq], i) => fanColor.set(seq, FANHUE[i % FANHUE.length]));
+const EDGE_GREY = "#39405a";
+const edgeColor = from => fanColor.get(from) || EDGE_GREY;
+const primaryBlocker = t => t.deps.find(d => fanColor.has(d)) ?? t.deps[0];
+
+// order within a column: group a fan's children together (barycentre by blocker)
+const orderKey = new Map();
+(function order() {
+  T.filter(isDone).sort((a, b) => a.seq - b.seq).forEach((t, i) => orderKey.set(t.seq, i));
+  for (let d = 0; d <= maxDepth; d++) {
+    const here = T.filter(t => !isDone(t) && depthOf.get(t.seq) === d);
+    here.sort((a, b) => {
+      const pa = primaryBlocker(a), pb = primaryBlocker(b);
+      const ka = pa != null ? (orderKey.get(pa) ?? 0) : -1;
+      const kb = pb != null ? (orderKey.get(pb) ?? 0) : -1;
+      return ka - kb || (pa ?? 0) - (pb ?? 0) || a.seq - b.seq;
+    });
+    here.forEach((t, i) => orderKey.set(t.seq, (d + 1) * 100 + i));
+  }
+})();
+const byOrder = (a, b) => orderKey.get(a.seq) - orderKey.get(b.seq);
+const atDepth = d => T.filter(t => !isDone(t) && depthOf.get(t.seq) === d).sort(byOrder);
+const doneCol = () => T.filter(isDone).sort(byOrder);
+
+// columns of the dependency tree, left to right: done · now · next · … · fog
+const DEPTHLAB = ["Now", "Next", "Then", "Later"];
+function treeCols() {
+  const out = [{ label: "Done", items: doneCol(), muted: true }];
+  for (let d = 0; d <= maxDepth; d++)
+    out.push({ label: DEPTHLAB[d] || `+${d}`, items: atDepth(d) });
+  return out;
+}
+const inKan  = k => T.filter(t => kanOf(t) === k).sort(byOrder);
+
+// chain highlight sets
+function chain(seq) {
+  const up = new Set(), down = new Set();
+  (function u(s){ (bySeq.get(s)?.deps || []).forEach(d => { if (!up.has(d)) { up.add(d); u(d); } }); })(seq);
+  (function d(s){ (kids.get(s) || []).forEach(k => { if (!down.has(k)) { down.add(k); d(k); } }); })(seq);
+  return new Set([...up, ...down]);
+}
+
+const esc = s => String(s).replace(/[&<>]/g, c => ({ "&":"&amp;","<":"&lt;",">":"&gt;" }[c]));
+
+// ══════════════════════ shared fragments ══════════════════════
+function card(t, mini) {
+  const k = kanOf(t), ob = openBlockers(t), fan = fanColor.get(t.seq);
+  const stripe = fan || (t.deps.length ? edgeColor(primaryBlocker(t)) : "var(--line)");
+  return `<div class="card ${t.state === "done" ? "done" : ""} ${mini ? "kmini" : ""}"
+    data-seq="${t.seq}" style="border-left-color:${stripe}">
+    <div class="r1">
+      <span class="glyph">${GLYPH[t.type]}</span>
+      <span class="seq">${t.seq}</span>
+      ${fan ? `<span class="fan" style="background:${fan}" title="blocks ${kids.get(t.seq).length} tickets"></span>` : ""}
+    </div>
+    <div class="title">${esc(t.title)}</div>
+    <div class="r2">
+      <span class="chip ${k === "prog" ? "prog" : k}">${KLAB[k]}</span>
+      ${t.claim ? `<span class="chip claim">${t.claim}</span>` : ""}
+      ${ob.length ? `<span class="chip plain">← ${ob.map(n => "#" + n).join(" ")}</span>` : ""}
+    </div>
+  </div>`;
+}
+
+const frame = () => `<div class="frame">
+  <div class="kick">Destination</div><h1>${esc(MAP.title)}</h1>
+  <div class="dest">${esc(MAP.destination)}</div>
+  <div class="oos"><b style="font-weight:600">Out of scope</b> — ${esc(MAP.outOfScope)}</div></div>`;
+
+const fogbox = () => `<div class="fogbox"><h3>Not yet specified</h3><p>the edge of the map</p>
+  <ul>${MAP.fog.map(q => `<li>${esc(q)}</li>`).join("")}</ul></div>`;
+
+// wide form, for variants where fog sits below the tree instead of beside it
+const fogwide = () => `<div class="fogbox fogwide">
+  <h3>Not yet specified <span>· ${MAP.fog.length} open questions</span></h3>
+  <p>the edge of the map — answering one turns it into a ticket</p>
+  <ul>${MAP.fog.map(q => `<li>${esc(q)}</li>`).join("")}</ul></div>`;
+
+const decisions = () => `<details class="dec"><summary>Decisions so far — ${MAP.decisions.length} settled</summary>
+  <ol>${MAP.decisions.map(([n, d]) => `<li>${esc(d)}${n ? ` <span style="color:var(--faint)">#${n}</span>` : ""}</li>`).join("")}</ol></details>`;
+
+const legend = () => `<div class="legend">
+  ${[...fanColor.entries()].map(([s, c]) =>
+    `<span><b style="background:${c}"></b>#${s} blocks ${kids.get(s).length}</span>`).join("")}
+  <span><b style="background:${EDGE_GREY}"></b>single dependency</span>
+  <span style="margin-left:auto">hover a card to trace its chain</span></div>`;
+
+// fog deliberately NOT a column here — it was stealing width from the tree,
+// which is the thing that needs room for the lines to be followable
+function treeColsHtml() {
+  return treeCols().map(c =>
+    `<div class="col ${c.muted ? "donecol" : ""}"><h3>${c.label} <b>· ${c.items.length}</b></h3>
+      <div class="stack">${c.items.map(t => card(t)).join("")
+        || `<div style="color:var(--fog);font-size:11px">—</div>`}</div></div>`).join("");
+}
+
+const flowNote = () => `<div style="font-size:11px;color:var(--faint);margin:0 0 10px">` +
+  `edges point right (blocker → dependent) · cards migrate <b style="color:var(--dim)">left</b> as their blockers close` +
+  ` · <b style="color:var(--dim)">Now</b> is the frontier</div>`;
+
+function kanban(mini) {
+  return `<div class="kan">${KAN.map(k => {
+    const items = inKan(k.key);
+    return `<div class="kcol" style="border-top-color:${k.col}">
+      <h3 style="color:${k.col}">${k.label}<span>${items.length}</span></h3>
+      <div class="stack">${items.map(t => card(t, mini)).join("") || `<div style="color:var(--fog);font-size:11px">—</div>`}</div>
+    </div>`;
+  }).join("")}</div>`;
+}
+
+// ══════════════════════ A — lanes + kanban strip ══════════════════════
+function VariantA() {
+  return frame() +
+    `<h2 class="sec">Dependency order — closures away from startable</h2>
+     ${flowNote()}
+     <div class="cols" id="cols"><svg class="wires" id="wires"></svg>${treeColsHtml()}</div>
+     ${legend()}
+     <div class="kstrip"><h2 class="sec">Board — where the work actually is</h2>${kanban(true)}</div>
+     <div class="kstrip">${fogwide()}</div>` +
+    decisions();
+}
+
+// ══════════════════════ B — split: tree | board rail ══════════════════════
+function VariantB() {
+  const bar = KAN.map(k => {
+    const n = inKan(k.key).length;
+    return n ? `<i style="background:${k.col};flex:${n}" title="${k.label}: ${n}"></i>` : "";
+  }).join("");
+  const rail = KAN.map(k => {
+    const items = inKan(k.key);
+    return `<div class="grp"><h4 style="color:${k.col}">${k.label}<span>${items.length}</span></h4>
+      ${items.map(t => `<div class="item" data-seq="${t.seq}">
+        <span class="seq">${t.seq}</span><span class="t">${esc(t.title)}</span></div>`).join("")
+        || `<div style="color:var(--fog);font-size:11px;padding-left:6px">—</div>`}</div>`;
+  }).join("");
+  return frame() + `<div class="split">
+    <div>
+      <h2 class="sec">Dependency order — closures away from startable</h2>
+      ${flowNote()}
+      <div class="cols" id="cols"><svg class="wires" id="wires"></svg>${treeColsHtml()}</div>
+      ${legend()}${decisions()}
+    </div>
+    <div class="rail">
+      <h2 class="sec">Board</h2><div class="barline">${bar}</div>${rail}
+      <div style="margin-top:16px;padding-top:14px;border-top:1px solid var(--line)">${fogbox()}</div>
+    </div></div>`;
+}
+
+// ══════════════════════ C — one canvas: depth × board column ══════════════════════
+function VariantC() {
+  const cols = treeCols();
+  const head = `<div class="gridhead">${cols.map(c => `<div>${c.label}</div>`).join("")}</div>`;
+  const bands = KAN.map(k => {
+    const cells = cols.map(c =>
+      `<div class="cell">${c.items.filter(t => kanOf(t) === k.key).map(t => card(t)).join("")}</div>`).join("");
+    return `<div class="band b-${k.cls}">
+      <div class="lab" style="color:${k.col}">${k.label} <span style="color:var(--faint)">${inKan(k.key).length}</span></div>
+      <div class="cells">${cells}</div></div>`;
+  }).join("");
+  return frame() +
+    `<h2 class="sec">Closures away across · board column down — a card migrates down a band, then left a column</h2>
+     ${flowNote()}
+     <div class="grid" id="cols"><svg class="wires" id="wires"></svg>${head}${bands}</div>
+     ${legend()}
+     <div class="kstrip">${fogwide()}</div>` + decisions();
+}
+
+// ══════════════════════ D — briefing ══════════════════════
+function VariantD() {
+  const seen = new Set(); let body = "";
+  const row = (t, lvl) => `<div class="row ${t.state === "done" ? "done" : ""}" data-seq="${t.seq}"
+      style="padding-left:${lvl * 22}px">
+      <span class="glyph">${GLYPH[t.type]}</span><span class="seq">${t.seq}</span>
+      <span class="t">${esc(t.title)}</span>
+      <span class="chip ${kanOf(t) === "prog" ? "prog" : kanOf(t)}">${KLAB[kanOf(t)]}</span></div>`;
+  const walk = (t, lvl) => {
+    if (seen.has(t.seq)) return; seen.add(t.seq);
+    body += row(t, lvl);
+    (kids.get(t.seq) || []).map(s => bySeq.get(s)).forEach(c => walk(c, lvl + 1));
+  };
+  [...doneCol(), ...atDepth(0)].forEach(t => walk(t, 0)); T.forEach(t => walk(t, 0));
+  return `<div class="doc"><h1>${esc(MAP.title)}</h1>
+    <div class="sub">Wayfinder map · ${T.length} tickets · ${inKan("done").length} done · ${MAP.fog.length} open questions</div>
+    <h2>Destination</h2><p class="lede">${esc(MAP.destination)}</p>
+    <h2>The work, in dependency order</h2>
+    <p style="margin-top:-2px;font-size:12px">Indentation is dependency. The chip is the board column.</p>
+    ${body}
+    <h2>Not yet specified</h2>
+    <ol class="qs">${MAP.fog.map(q => `<li>${esc(q)}</li>`).join("")}</ol>
+    <h2>Decisions so far</h2>
+    <ul class="refs">${MAP.decisions.map(([n, d]) =>
+      `<li><span class="seq">${n ? "#" + n : "—"}</span><span>${esc(d)}</span></li>`).join("")}</ul>
+    <h2>Out of scope</h2><p>${esc(MAP.outOfScope)}</p></div>`;
+}
+
+// ══════════════════════ wires ══════════════════════
+function drawWires(hl) {
+  const host = document.getElementById("cols"), svg = document.getElementById("wires");
+  if (!host || !svg) return;
+  const hb = host.getBoundingClientRect();
+  svg.setAttribute("viewBox", `0 0 ${hb.width} ${hb.height}`);
+  svg.style.width = hb.width + "px"; svg.style.height = hb.height + "px";
+  const box = seq => {
+    const el = host.querySelector(`.card[data-seq="${seq}"]`); if (!el) return null;
+    const b = el.getBoundingClientRect();
+    return { l: b.left - hb.left, r: b.right - hb.left, y: b.top - hb.top + 15 };
+  };
+  let out = "";
+  for (const t of T) for (const d of t.deps) {
+    const a = box(d), b = box(t.seq); if (!a || !b) continue;
+    const lit = !hl || (hl.set.has(d) || hl.set.has(t.seq)) && (d === hl.seq || t.seq === hl.seq || (hl.set.has(d) && hl.set.has(t.seq)));
+    const c = edgeColor(d), mx = (a.r + b.l) / 2;
+    out += `<path d="M${a.r},${a.y} C${mx},${a.y} ${mx},${b.y} ${b.l},${b.y}" fill="none"
+      stroke="${c}" stroke-width="${lit ? 2 : 1.25}" opacity="${hl ? (lit ? .95 : .07) : .55}"/>`;
+    out += `<circle cx="${b.l}" cy="${b.y}" r="2.2" fill="${c}" opacity="${hl ? (lit ? .95 : .07) : .55}"/>`;
+  }
+  svg.innerHTML = out;
+}
+
+// ══════════════════════ highlight: hover to trace, click to lock ══════════════════════
+// Locking matters on a long list: without it the chain vanishes the moment you move
+// the pointer toward the scrollbar.
+let locked = null;
+
+function applyHighlight(seq) {
+  const all = document.querySelectorAll("[data-seq]");
+  if (seq == null) {
+    document.body.classList.remove("hov", "lock");
+    all.forEach(o => o.classList.remove("lit", "self"));
+    drawWires(null);
+    return;
+  }
+  const set = chain(seq);
+  document.body.classList.add("hov");
+  document.body.classList.toggle("lock", locked != null);
+  all.forEach(o => {
+    const s = +o.dataset.seq;
+    o.classList.toggle("lit", set.has(s));
+    o.classList.toggle("self", s === seq);
+  });
+  const t = bySeq.get(seq);
+  document.getElementById("hint").textContent =
+    `chain locked on #${seq} ${t ? "— " + t.title : ""} · ${set.size} related · click anywhere to release`;
+  drawWires({ seq, set });
+}
+
+addEventListener("mouseover", e => {
+  if (locked != null) return;
+  const el = e.target.closest?.("[data-seq]");
+  applyHighlight(el ? +el.dataset.seq : null);
+});
+
+addEventListener("click", e => {
+  if (e.target.closest?.("#sw, #hint")) return;   // prototype chrome never releases the lock
+  const el = e.target.closest?.("[data-seq]");
+  if (el) {
+    const s = +el.dataset.seq;
+    locked = locked === s ? null : s;
+    applyHighlight(locked ?? null);
+  } else if (locked != null) {
+    locked = null;
+    applyHighlight(null);
+  }
+});
+
+addEventListener("keydown", e => {
+  if (e.key === "Escape" && locked != null) { locked = null; applyHighlight(null); }
+});
+
+// ══════════════════════ switcher ══════════════════════
+const VARIANTS = [
+  ["A", "Lanes — tree + strip", VariantA, true],
+  ["B", "Split — tree | board",  VariantB, true],
+  ["C", "Grid — depth × column", VariantC, true],
+  ["D", "Briefing — document",   VariantD, false]
+];
+const keyOf = () => {
+  const k = (new URLSearchParams(location.search).get("variant") || "B").toUpperCase();
+  return VARIANTS.some(v => v[0] === k) ? k : "B";
+};
+function render() {
+  const k = keyOf(), [, name, build, graph] = VARIANTS.find(v => v[0] === k);
+  document.getElementById("root").innerHTML = build();
+  document.getElementById("lbl").innerHTML = `${k} — ${name}<small>` +
+    KAN.map(x => `${inKan(x.key).length} ${x.label.toLowerCase()}`).join(" · ") +
+    ` · ${fanColor.size} fans</small>`;
+  // a lock survives a variant switch — same tickets, different lens
+  if (graph) requestAnimationFrame(() => { drawWires(null); if (locked != null) applyHighlight(locked); });
+  else if (locked != null) applyHighlight(locked);
+}
+function go(step) {
+  const i = VARIANTS.findIndex(v => v[0] === keyOf());
+  history.replaceState(null, "", "?variant=" + VARIANTS[(i + step + VARIANTS.length) % VARIANTS.length][0]);
+  render();
+}
+document.getElementById("prev").onclick = () => go(-1);
+document.getElementById("next").onclick = () => go(1);
+addEventListener("keydown", e => {
+  const el = document.activeElement, tag = el && el.tagName;
+  if (tag === "INPUT" || tag === "TEXTAREA" || (el && el.isContentEditable)) return;
+  if (e.key === "ArrowLeft") go(-1);
+  if (e.key === "ArrowRight") go(1);
+});
+addEventListener("resize", () => {
+  if (!VARIANTS.find(v => v[0] === keyOf())[3]) return;
+  if (locked != null) applyHighlight(locked); else drawWires(null);
+});
+render();
+</script>
+</body>
+</html>

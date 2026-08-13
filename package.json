@@ -21,7 +21,8 @@
     "lint": "oxlint --type-aware",
     "lint:fix": "oxlint --type-aware --fix",
     "format": "biome format --write .",
-    "format:check": "biome format ."
+    "format:check": "biome format .",
+    "prototype:map": "open src/core/board/PROTOTYPE-map-view.html"
   },
   "dependencies": {
     "citty": "^0.1.6"
