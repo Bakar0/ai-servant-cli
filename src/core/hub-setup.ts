@@ -32,7 +32,7 @@ export async function ensureHubClone(hubRepo: string, log: Log = () => {}): Prom
   if (existsSync(`${root}/.git`)) return;
   if (!(await absentOrEmpty(root))) {
     log(
-      `servant: hub dir ${root} exists but isn't a clone — leaving it (knowledge stays local-only)`,
+      `servant: hub dir ${root} exists but isn't a clone — leaving it (\`servant tasks\` will have no hub to read)`,
     );
     return;
   }
@@ -41,7 +41,7 @@ export async function ensureHubClone(hubRepo: string, log: Log = () => {}): Prom
   if (res.exitCode === 0) log(`servant: cloned hub ${hubRepo} → ${root}`);
   else
     log(
-      `servant: could not clone hub ${hubRepo} (offline or no access) — knowledge stays local-only`,
+      `servant: could not clone hub ${hubRepo} (offline or no access) — \`servant tasks\` will have no hub to read`,
     );
 }
 

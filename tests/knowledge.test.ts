@@ -1,9 +1,13 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { existsSync } from "node:fs";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { $ } from "bun";
 import {
   type KnowledgeNote,
+  commitKnowledge,
+  ensureKnowledgeStore,
   ensureProjectIndex,
   listAllNotes,
   noteScopeLabel,
@@ -17,8 +21,11 @@ import {
   upsertNote,
 } from "../src/core/knowledge.ts";
 import {
+  aiServantRoot,
+  hubRoot,
   knowledgeIndexPath,
   knowledgeProjectIndexPath,
+  knowledgeRoot,
   knowledgeTopicsDir,
   setRootOverride,
 } from "../src/core/paths.ts";
@@ -44,6 +51,40 @@ const topicNote = (over: Partial<KnowledgeNote> = {}): KnowledgeNote => ({
   confidence: "high",
   body: "WAL mode requires X.",
   ...over,
+});
+
+describe("store location", () => {
+  test("knowledge lives at the servant root, not inside the hub clone", () => {
+    expect(knowledgeRoot()).toBe(join(tmpRoot, "knowledge"));
+    expect(knowledgeRoot().startsWith(hubRoot())).toBe(false);
+    expect(knowledgeIndexPath()).toBe(join(aiServantRoot(), "knowledge", "INDEX.md"));
+  });
+});
+
+describe("git lifecycle", () => {
+  const git = async (...args: string[]) =>
+    (await $`git -C ${knowledgeRoot()} ${args}`.nothrow().quiet()).stdout.toString().trim();
+
+  test("the store is its own repository with no remote", async () => {
+    await ensureKnowledgeStore();
+    expect(existsSync(join(knowledgeRoot(), ".git"))).toBe(true);
+    expect(existsSync(join(hubRoot(), ".git"))).toBe(false);
+    expect(await git("remote")).toBe("");
+  });
+
+  test("commitKnowledge commits the notes in the knowledge repo", async () => {
+    await upsertNote(topicNote());
+    await commitKnowledge("memory: first note");
+    expect(await git("log", "--format=%s")).toBe("memory: first note");
+    expect(await git("status", "--porcelain")).toBe("");
+  });
+
+  test("commitKnowledge is a no-op when nothing changed", async () => {
+    await upsertNote(topicNote());
+    await commitKnowledge("memory: first note");
+    await commitKnowledge("memory: nothing new");
+    expect(await git("log", "--format=%s")).toBe("memory: first note");
+  });
 });
 
 describe("frontmatter round-trip", () => {
