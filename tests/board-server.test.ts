@@ -13,7 +13,8 @@ import {
 } from "../src/core/board/server.ts";
 import type { BoardHandlerDeps } from "../src/core/board/server.ts";
 import { BOARD_TEMPLATE } from "../src/core/board/board-template.ts";
-import { buildBoardView } from "../src/core/board/view.ts";
+import { buildBoardView, buildEverywhereView } from "../src/core/board/view.ts";
+import type { EverywhereView } from "../src/core/board/view.ts";
 import type { BoardView } from "../src/core/board/view.ts";
 import { setRootOverride } from "../src/core/paths.ts";
 
@@ -39,6 +40,7 @@ const file = (title: string, over: Record<string, unknown> = {}) =>
 const deps = (over: Partial<BoardHandlerDeps> = {}): BoardHandlerDeps => ({
   view: (workspace) =>
     listBoards().includes(workspace) ? buildBoardView(workspace, { now: AT }) : null,
+  everywhere: () => buildEverywhereView({ now: AT }),
   boards: listBoards,
   heartbeatMs: 0,
   ...over,
@@ -48,7 +50,13 @@ const get = (path: string, over: Partial<BoardHandlerDeps> = {}) =>
   handleBoardRequest(new Request(`http://127.0.0.1:7787${path}`), deps(over));
 
 /** The payload the page was handed, read back the way the browser would. */
-function payload(html: string): { view: BoardView | null; focus: number | null; boards: string[] } {
+function payload(html: string): {
+  view: BoardView | null;
+  everywhere: EverywhereView | null;
+  focus: number | null;
+  boards: string[];
+  eventsPath: string | null;
+} {
   const start = html.indexOf("const DATA = ");
   if (start < 0) throw new Error("the page never assigned its data");
   const json = html.slice(start + "const DATA = ".length, html.indexOf(";\n", start));
@@ -208,7 +216,7 @@ describe("the live feed", () => {
     });
     try {
       const pushed = new Promise<BoardView>((resolve) => {
-        feed.subscribe(WS, resolve);
+        feed.subscribe(WS, (view) => resolve(view as BoardView));
       });
 
       // The actual CLI, in its own process, against this board. Nothing tells the feed it ran.
@@ -332,5 +340,65 @@ describe("the viewer is not in anyone's way", () => {
         expect(`${path}: ${source.includes(`${write}(`)}`).toBe(`${path}: false`);
       }
     }
+  });
+});
+
+describe("every board on one surface", () => {
+  test("serves the cross-board frontier as its own page, with no single board's view", async () => {
+    const here = file("ready here");
+    const there = createTicket({ workspace: "other", title: "ready there", now: AT });
+
+    const res = get("/everywhere");
+    expect(res.status).toBe(200);
+    const data = payload(await res.text());
+
+    expect(data.view).toBeNull();
+    expect(data.everywhere?.boards.map((b) => b.workspace)).toEqual(["kanban", "other"]);
+    expect(data.everywhere?.boards.flatMap((b) => b.cards.map((c) => c.seq))).toEqual([
+      here.seq,
+      there.seq,
+    ]);
+    // Both boards are still offered, so the surface is one entry in the selector rather than a
+    // dead end.
+    expect(data.boards).toEqual(["kanban", "other"]);
+    expect(data.eventsPath).toBe("/everywhere/events");
+  });
+
+  test("answers the same view as JSON, so a script reads what the page reads", async () => {
+    file("ready here");
+    const res = get("/api/everywhere");
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toContain("application/json");
+    const body = (await res.json()) as EverywhereView;
+    expect(body.ready).toBe(1);
+    expect(body.boards).toHaveLength(1);
+  });
+
+  test("streams under its own frame name, so the page cannot confuse the two shapes", async () => {
+    file("ready here");
+    const res = get("/everywhere/events");
+    expect(res.status).toBe(200);
+    const frame = await readFrame(res);
+    expect(frame.startsWith("event: everywhere\ndata: ")).toBe(true);
+    const view = JSON.parse(frame.slice("event: everywhere\ndata: ".length)) as EverywhereView;
+    expect(view.boards[0]?.cards).toHaveLength(1);
+  });
+
+  test("subscribes under the everywhere scope rather than a board name", () => {
+    file("ready here");
+    const scopes: string[] = [];
+    get("/everywhere/events", {
+      subscribe: (scope) => {
+        scopes.push(scope);
+        return () => {};
+      },
+    });
+    expect(scopes).toEqual(["everywhere"]);
+  });
+
+  test("has no streaming JSON endpoint, and no board named after the surface", () => {
+    file("ready here");
+    expect(get("/api/everywhere/events").status).toBe(404);
+    expect(get("/w/everywhere").status).toBe(404);
   });
 });

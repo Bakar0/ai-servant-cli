@@ -18,8 +18,8 @@ import {
   updateClaim,
   updateTicket,
 } from "../src/core/board/store.ts";
-import { buildBoardView } from "../src/core/board/view.ts";
-import type { BoardView } from "../src/core/board/view.ts";
+import { buildBoardView, buildEverywhereView, dispatchCommand } from "../src/core/board/view.ts";
+import type { BoardView, EverywhereView } from "../src/core/board/view.ts";
 import { fillDataSlot } from "../src/core/html-artifact.ts";
 import { setRootOverride } from "../src/core/paths.ts";
 
@@ -49,6 +49,7 @@ const file = (title: string, over: Record<string, unknown> = {}) =>
 /** Load the real page with a payload, and run its script. */
 async function mount(payload: {
   view: BoardView | null;
+  everywhere?: EverywhereView | null;
   focus?: number | null;
   boards?: string[];
 }): Promise<void> {
@@ -56,6 +57,7 @@ async function mount(payload: {
     boards: payload.boards ?? [WS],
     workspace: payload.view?.workspace ?? null,
     view: payload.view,
+    everywhere: payload.everywhere ?? null,
     focus: payload.focus ?? null,
     // No stream in these tests: the page must render from what it was served.
     eventsPath: null,
@@ -470,11 +472,16 @@ describe("switching boards", () => {
   test("names every board and marks the one on screen", async () => {
     file("here");
     await mount({ view: view(), boards: ["kanban", "other"] });
-    expect($$(".boards .board").map((a) => a.textContent)).toEqual(["kanban", "other"]);
+    expect($$(".boards .board").map((a) => a.textContent)).toEqual([
+      "kanban",
+      "other",
+      "everywhere",
+    ]);
     // Real links, so a board can still be middle-clicked into its own tab or bookmarked.
     expect($$(".boards .board").map((a) => a.getAttribute("href"))).toEqual([
       "/w/kanban",
       "/w/other",
+      "/everywhere",
     ]);
     expect($(".boards .board.on")?.textContent).toBe("kanban");
   });
@@ -677,5 +684,85 @@ describe("a long column", () => {
     expect(style.maxHeight).toBe(`calc(${win.innerHeight}px - 40px)`);
     expect(style.overflowY).toBe("auto");
     expect(rail.querySelector(".fogbox")).not.toBeNull();
+  });
+});
+
+describe("every board on one surface", () => {
+  const everywhere = () =>
+    buildEverywhereView({ now: NOW, liveness: { known: true, liveSessions: [] } });
+
+  test("lists what is dispatchable, grouped by board, with the command on each", async () => {
+    const here = file("ready here");
+    const there = createTicket({ workspace: "other", title: "ready there", now: AT });
+
+    await mount({ view: null, everywhere: everywhere(), boards: ["kanban", "other"] });
+
+    expect($$(".everyboard h2 .board-link").map((a) => a.textContent)).toEqual(["kanban", "other"]);
+    expect($$(".ready-card .title").map((t) => t.textContent)).toEqual([
+      "ready here",
+      "ready there",
+    ]);
+    // The command each card carries is the board's own, workspace included — this surface is the
+    // one place two boards' tickets sit together, so a command aimed at the wrong board would run.
+    expect($$(".ready-card .copy").map((b) => b.getAttribute("data-dispatch"))).toEqual([
+      dispatchCommand("kanban", here.seq, here.title),
+      dispatchCommand("other", there.seq, there.title),
+    ]);
+    // No tree here: depth is per board, and one axis across boards would order the unrelated.
+    expect($(".cols")).toBeNull();
+  });
+
+  test("says how much work there is, and where it is", async () => {
+    file("ready here");
+    createTicket({ workspace: "other", title: "ready there", now: AT });
+
+    await mount({ view: null, everywhere: everywhere(), boards: ["kanban", "other"] });
+
+    expect($(".frame h1")?.textContent).toBe("Ready to dispatch");
+    expect($(".frame .dest")?.textContent).toContain("2 ready");
+    expect($(".frame .dest")?.textContent).toContain("across 2 boards");
+  });
+
+  test("marks a ticket whose session is gone, and still offers its command", async () => {
+    const abandoned = file("abandoned");
+    updateClaim(abandoned.id, { session: "s-gone", at: AT });
+
+    await mount({ view: null, everywhere: everywhere(), boards: ["kanban"] });
+
+    expect($(".ready-card .chip.claim.gone")?.textContent).toContain("s-gone · gone");
+    expect($(".ready-card .copy")).not.toBeNull();
+    expect($(".frame .dest")?.textContent).toContain("1 to reclaim");
+  });
+
+  test("says so rather than showing an empty page when nothing is dispatchable", async () => {
+    const blocker = file("blocker");
+    const waiting = file("waiting");
+    addDependency(waiting.id, blocker.id, { now: AT });
+    updateClaim(blocker.id, { session: "s-alive", at: AT });
+    const held = buildEverywhereView({
+      now: NOW,
+      liveness: { known: true, liveSessions: ["s-alive"] },
+    });
+
+    await mount({ view: null, everywhere: held, boards: ["kanban"] });
+
+    expect($(".frame h1")?.textContent).toBe("Nothing is dispatchable right now");
+    expect($$(".ready-card")).toHaveLength(0);
+  });
+
+  test("warns when liveness could not be read, since a live session may be listed", async () => {
+    file("ready");
+    await mount({ view: null, everywhere: buildEverywhereView({ now: NOW }), boards: ["kanban"] });
+    expect($(".frame .oos")?.textContent).toContain("could not read the session registry");
+  });
+
+  test("is one entry in the selector, and a board name in the list switches to it", async () => {
+    file("ready here");
+    await mount({ view: null, everywhere: everywhere(), boards: ["kanban", "other"] });
+
+    expect($(".boards .board.every.on")?.textContent).toBe("everywhere");
+    expect($('.everyboard .board-link[data-board="kanban"]')?.getAttribute("href")).toBe(
+      "/w/kanban",
+    );
   });
 });

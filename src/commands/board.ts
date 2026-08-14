@@ -6,9 +6,9 @@
 
 import { defineCommand } from "citty";
 import { createBoardFeed } from "../core/board/feed.ts";
-import { serveBoard } from "../core/board/server.ts";
+import { EVERYWHERE, serveBoard } from "../core/board/server.ts";
 import { listBoards } from "../core/board/store.ts";
-import { buildBoardView } from "../core/board/view.ts";
+import { buildBoardView, buildEverywhereView } from "../core/board/view.ts";
 import { openInDefaultApp } from "../core/open.ts";
 import { applyRootOverride, BOARD_VIEWER_PORT } from "../core/paths.ts";
 import { readLiveSessions } from "../core/session-registry.ts";
@@ -112,7 +112,11 @@ export const boardCommand = defineCommand({
 
     const view = (name: string) =>
       listBoards().includes(name) ? buildBoardView(name, { liveness: liveness.get() }) : null;
-    const feed = createBoardFeed({ view });
+    const everywhere = () => buildEverywhereView({ liveness: liveness.get() });
+    // One feed over both surfaces: a scope is a board's name, or `EVERYWHERE`.
+    const feed = createBoardFeed({
+      view: (scope) => (scope === EVERYWHERE ? everywhere() : view(scope)),
+    });
 
     let server: ReturnType<typeof serveBoard>;
     try {
@@ -120,8 +124,9 @@ export const boardCommand = defineCommand({
         port,
         deps: {
           view,
+          everywhere,
           boards: () => listBoards(),
-          subscribe: (ws, onView) => feed.subscribe(ws, onView),
+          subscribe: (scope, onView) => feed.subscribe(scope, onView),
         },
       });
     } catch (error) {

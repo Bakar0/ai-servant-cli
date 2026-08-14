@@ -13,11 +13,18 @@
 //     badges, which go stale with the passage of time rather than with any write.
 
 import { boardDataVersion } from "./store.ts";
-import type { BoardView } from "./view.ts";
+import type { BoardView, EverywhereView } from "./view.ts";
+
+/**
+ * What a subscriber watches: one board, or every board's frontier. The feed treats it as an opaque
+ * key — it polls one counter for all of them, because `PRAGMA data_version` is per-database, not
+ * per-board.
+ */
+export type FeedView = BoardView | EverywhereView;
 
 export interface BoardFeedOptions {
-  /** Builds the current view for a board. Null when that board no longer exists. */
-  view: (workspace: string) => BoardView | null;
+  /** Builds the current view for a scope. Null when that scope no longer exists. */
+  view: (scope: string) => FeedView | null;
   /** How often to ask whether another process has committed. */
   pollMs?: number;
   /** The slow rebuild that catches time-based change. 0 disables it. */
@@ -25,14 +32,14 @@ export interface BoardFeedOptions {
 }
 
 export interface BoardFeed {
-  subscribe(workspace: string, onView: (view: BoardView) => void): () => void;
+  subscribe(scope: string, onView: (view: FeedView) => void): () => void;
   stop(): void;
 }
 
 interface Subscriber {
-  workspace: string;
-  onView: (view: BoardView) => void;
-  /** The last view this subscriber was sent, so an unchanged board pushes nothing. */
+  scope: string;
+  onView: (view: FeedView) => void;
+  /** The last view this subscriber was sent, so an unchanged scope pushes nothing. */
   last: string;
 }
 
@@ -40,7 +47,7 @@ interface Subscriber {
  * A view's identity for change detection. `generatedAt` is dropped: it moves on every rebuild, and
  * a timestamp that always differs would turn every sweep into a push and every push into noise.
  */
-function signature(view: BoardView): string {
+function signature(view: FeedView): string {
   const { generatedAt: _ignored, ...rest } = view;
   return JSON.stringify(rest);
 }
@@ -56,19 +63,19 @@ export function createBoardFeed(opts: BoardFeedOptions): BoardFeed {
 
   const publish = () => {
     if (stopped || subscribers.size === 0) return;
-    // One rebuild per board, however many pages are watching it.
-    const built = new Map<string, BoardView | null>();
+    // One rebuild per scope, however many pages are watching it.
+    const built = new Map<string, FeedView | null>();
     for (const sub of subscribers) {
-      if (!built.has(sub.workspace)) {
+      if (!built.has(sub.scope)) {
         try {
-          built.set(sub.workspace, opts.view(sub.workspace));
+          built.set(sub.scope, opts.view(sub.scope));
         } catch {
           // A rebuild that throws — a transient lock, a half-applied migration — is a reason to
           // leave the last good view on screen, never a reason to tear down the feed.
-          built.set(sub.workspace, null);
+          built.set(sub.scope, null);
         }
       }
-      const view = built.get(sub.workspace);
+      const view = built.get(sub.scope);
       if (!view) continue;
       const next = signature(view);
       if (next === sub.last) continue;
@@ -97,16 +104,16 @@ export function createBoardFeed(opts: BoardFeedOptions): BoardFeed {
   };
 
   return {
-    subscribe(workspace, onView) {
-      const sub: Subscriber = { workspace, onView, last: "" };
+    subscribe(scope, onView) {
+      const sub: Subscriber = { scope, onView, last: "" };
       // Seeded from the current view: the caller has already sent it, so re-sending it on the first
       // tick would be a duplicate frame for a board nothing has happened to.
       try {
-        const current = opts.view(workspace);
+        const current = opts.view(scope);
         if (current) sub.last = signature(current);
         seenVersion = boardDataVersion();
       } catch {
-        // An unreadable board now is one the first tick will pick up.
+        // An unreadable scope now is one the first tick will pick up.
       }
       subscribers.add(sub);
       startTimers();

@@ -136,6 +136,41 @@ export interface BoardView {
   livenessKnown: boolean;
 }
 
+/** One dispatchable ticket, wherever it lives. */
+export interface ReadyCard {
+  workspace: string;
+  seq: number;
+  title: string;
+  type: WayfinderType;
+  dispatch: string;
+  /**
+   * The dead Claim standing in front of this ticket, when there is one. It is still dispatchable —
+   * the command reclaims as it spawns — but a reader has to know a session was here and stopped.
+   */
+  staleClaim: ClaimView | null;
+  url: string;
+}
+
+/**
+ * Every board's frontier on one surface: what a session could be dispatched onto right now,
+ * anywhere.
+ *
+ * Deliberately *not* a tree. Depth is per-board — `openBlockerDepths` counts a board's own open
+ * blockers — so one depth axis across four unrelated initiatives would order tickets that have no
+ * relationship to order. Dispatchability, unlike depth, means the same thing everywhere, so that is
+ * the only thing this view claims. A cross-board blocker still counts, because the frontier is
+ * computed over every ticket before it is grouped.
+ */
+export interface EverywhereView {
+  generatedAt: string;
+  /** Free to take now. */
+  ready: number;
+  /** Dispatchable once a dead session's Claim is reclaimed, which the command does. */
+  reclaimable: number;
+  boards: { workspace: string; cards: ReadyCard[] }[];
+  livenessKnown: boolean;
+}
+
 /**
  * Fan hues. Six because a seventh fan on one board is past the point where colour is doing the
  * grouping work anyway, and the cycle is more honest than an unreadable near-duplicate.
@@ -408,6 +443,66 @@ export function buildBoardView(workspace: string, opts: BuildViewOptions = {}): 
     fans,
     chains: buildChains(edges, [...cardsBySeq.keys()]),
     livenessKnown: liveness.known,
+  };
+}
+
+/**
+ * The frontier of every board at once.
+ *
+ * `computeFrontier` with no workspace *is* `servant tasks --frontier` with no `--ws`, so the two
+ * agree by construction rather than by a second implementation kept in step. Only its two
+ * dispatchable buckets appear here; in-flight and blocked work stays on its own board, where the
+ * tree explains why it is waiting.
+ */
+export function buildEverywhereView(opts: BuildViewOptions = {}): EverywhereView {
+  const now = opts.now ?? new Date().toISOString();
+  const liveness = opts.liveness ?? { known: false };
+  const frontier = computeFrontier(listTickets(), liveness);
+
+  const goneClaim = (session: string, since: string): ClaimView => ({
+    // The frontier put this ticket in `stale`, which is the PID check's verdict — the badge states
+    // it rather than asking a second time (ADR-0011 decision 3).
+    ...claimView(session, since, now),
+    state: "gone",
+  });
+
+  const cards: ReadyCard[] = [
+    ...frontier.ready.map((ticket) => toReadyCard(ticket, null)),
+    ...frontier.stale.map((claimed) =>
+      toReadyCard(claimed.ticket, goneClaim(claimed.claim.session, claimed.claim.at)),
+    ),
+  ];
+
+  const byBoard = new Map<string, ReadyCard[]>();
+  for (const card of cards) {
+    const list = byBoard.get(card.workspace);
+    if (list) list.push(card);
+    else byBoard.set(card.workspace, [card]);
+  }
+
+  return {
+    generatedAt: now,
+    ready: frontier.ready.length,
+    reclaimable: frontier.stale.length,
+    boards: [...byBoard.entries()]
+      .map(([workspace, list]) => ({
+        workspace,
+        cards: list.toSorted((a, b) => a.seq - b.seq),
+      }))
+      .toSorted((a, b) => a.workspace.localeCompare(b.workspace)),
+    livenessKnown: liveness.known,
+  };
+}
+
+function toReadyCard(ticket: Ticket, staleClaim: ClaimView | null): ReadyCard {
+  return {
+    workspace: ticket.workspace,
+    seq: ticket.seq,
+    title: ticket.title,
+    type: wayfinderType(ticket.labels),
+    dispatch: dispatchCommand(ticket.workspace, ticket.seq, ticket.title),
+    staleClaim,
+    url: ticket.url,
   };
 }
 

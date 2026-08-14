@@ -14,6 +14,7 @@ import {
 import type { Ticket } from "../src/core/board/store.ts";
 import {
   buildBoardView,
+  buildEverywhereView,
   dispatchCommand,
   formatAge,
   splitSections,
@@ -490,5 +491,86 @@ describe("formatAge", () => {
     expect(formatAge("2026-08-14T09:00:00.000Z", base)).toBe("3h ago");
     expect(formatAge("2026-08-10T12:00:00.000Z", base)).toBe("4d ago");
     expect(formatAge("not a date", base)).toBeNull();
+  });
+});
+
+describe("every board's frontier", () => {
+  const elsewhere = (title: string, over: Record<string, unknown> = {}): Ticket =>
+    createTicket({ workspace: "other", title, now: AT, ...over });
+
+  const everywhere = (over: Parameters<typeof buildEverywhereView>[0] = {}) =>
+    buildEverywhereView({ now: NOW, ...over });
+
+  test("carries what is dispatchable on any board, and nothing else", () => {
+    const ready = file("ready here");
+    const blocker = file("blocker");
+    const blocked = file("blocked here");
+    blocks(blocker, blocked);
+    const held = file("held here");
+    updateClaim(held.id, { session: "s-alive", at: AT });
+    const abandoned = file("abandoned here");
+    updateClaim(abandoned.id, { session: "s-gone", at: AT });
+    const there = elsewhere("ready there");
+
+    const v = everywhere({ liveness: { known: true, liveSessions: ["s-alive"] } });
+
+    expect(v.boards.map((b) => b.workspace)).toEqual(["kanban", "other"]);
+    expect(v.boards[0]?.cards.map((c) => c.title).toSorted()).toEqual([
+      "abandoned here",
+      "blocker",
+      "ready here",
+    ]);
+    expect(v.boards[1]?.cards.map((c) => c.title)).toEqual([there.title]);
+    // Blocked and in-flight work stays on its own board.
+    expect(v.boards.flatMap((b) => b.cards).map((c) => c.seq)).not.toContain(blocked.seq);
+    expect(v.boards.flatMap((b) => b.cards).map((c) => c.seq)).not.toContain(held.seq);
+    expect(v.ready).toBe(3);
+    expect(v.reclaimable).toBe(1);
+    expect(ready.seq).toBeGreaterThan(0);
+  });
+
+  test("agrees with the frontier the CLI reports, because it is the same computation", () => {
+    const one = file("one");
+    const two = elsewhere("two");
+    const waiting = elsewhere("waiting");
+    blocks(one, waiting);
+    updateClaim(two.id, { session: "s-gone", at: AT });
+    const liveness = { known: true, liveSessions: [] as string[] };
+
+    const frontier = computeFrontier(listTickets(), liveness);
+    const listed = everywhere({ liveness })
+      .boards.flatMap((b) => b.cards.map((c) => `${c.workspace}#${c.seq}`))
+      .toSorted();
+
+    expect(listed).toEqual(
+      [
+        ...frontier.ready.map((t) => `${t.workspace}#${t.seq}`),
+        ...frontier.stale.map((c) => `${c.ticket.workspace}#${c.ticket.seq}`),
+      ].toSorted(),
+    );
+  });
+
+  test("a blocker on another board still blocks, so its dependent is not offered", () => {
+    const blocker = file("blocker here");
+    const waiting = elsewhere("waiting there");
+    blocks(blocker, waiting);
+
+    const v = everywhere({ liveness: { known: true, liveSessions: [] } });
+
+    expect(v.boards.map((b) => b.workspace)).toEqual(["kanban"]);
+    expect(v.boards[0]?.cards.map((c) => c.seq)).toEqual([blocker.seq]);
+  });
+
+  test("marks a dead session's ticket as reclaimable, and still offers the command", () => {
+    const t = file("abandoned");
+    updateClaim(t.id, { session: "s-gone", at: AT });
+
+    const v = everywhere({ liveness: { known: true, liveSessions: [] } });
+    const listed = v.boards[0]?.cards[0];
+
+    expect(listed?.staleClaim?.session).toBe("s-gone");
+    expect(listed?.staleClaim?.state).toBe("gone");
+    // The command reclaims as it spawns, so a dead Claim is not a reason to withhold it.
+    expect(listed?.dispatch).toBe(dispatchCommand(WS, t.seq, t.title));
   });
 });

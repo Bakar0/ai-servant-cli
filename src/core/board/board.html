@@ -38,6 +38,16 @@
                  transition:color .12s,border-color .12s}
   .boards .board:hover{color:var(--ink);border-color:var(--fog)}
   .boards .board.on{color:var(--ink);border-color:#4b5478;background:var(--panel2)}
+  .boards .every{margin-left:6px;border-style:dashed}
+
+  /* One column, not a tree: see everywhereHtml. Cards are wide because nothing sits beside them. */
+  .everyboard{margin-bottom:22px}
+  .everyboard h2.sec{display:flex;gap:7px;align-items:baseline}
+  .everyboard h2.sec b{color:var(--fog);font-weight:600}
+  .everyboard .board-link{color:var(--dim);text-decoration:none}
+  .everyboard .board-link:hover{color:var(--ink);text-decoration:underline}
+  .ready-card{cursor:default;max-width:920px}
+  .ready-card .title{font-size:13px}
 
   .frame{border:1px solid var(--line);border-radius:10px;background:var(--panel);
          padding:16px 20px;margin-bottom:20px}
@@ -184,8 +194,13 @@ const DATA = __BOARD_DATA__;
 const GLYPH = { task: "◆", research: "◇", grilling: "○", prototype: "△", map: "❖" };
 const NEUTRAL_EDGE = "#39405a";
 
+/** The `/everywhere` scope, as the server names it. */
+const EVERYWHERE = "everywhere";
+
 let view = DATA.view;
-/** The board on screen. Mutable, because the selector switches boards without a reload. */
+/** Set instead of `view` on `/everywhere`: the two are alternative surfaces, never both. */
+let everywhere = DATA.everywhere;
+/** The board on screen, null on `/everywhere`. Mutable — the selector switches without a reload. */
 let workspace = DATA.workspace;
 /** The traced chain, held across pointer moves. Seeded from a /t/<seq> deep link. */
 let locked = null;
@@ -287,7 +302,64 @@ function boardsHtml() {
       ${boards.map((b) => html`
         <a class="board${b === workspace ? " on" : ""}" data-board="${b}"
            href="/w/${encodeURIComponent(b)}">${b}</a>`)}
+      <a class="board every${workspace === null ? " on" : ""}" data-board="${EVERYWHERE}"
+         href="/everywhere">everywhere</a>
     </nav>`;
+}
+
+/**
+ * Every board's frontier, and only that. Not a tree: depth is counted per board, so one axis across
+ * unrelated initiatives would order tickets that have no relationship to order. What does mean the
+ * same thing everywhere is whether a ticket can be picked up, so that is all this claims.
+ */
+function everywhereHtml() {
+  const data = everywhere;
+  const total = data.ready + data.reclaimable;
+  return html`
+    <div class="frame">
+      <div class="kick">Every board</div>
+      <h1>${total > 0 ? "Ready to dispatch" : "Nothing is dispatchable right now"}</h1>
+      <div class="dest">${
+        total > 0
+          ? html`${data.ready} ready${
+              data.reclaimable > 0
+                ? html`, ${data.reclaimable} to reclaim from a session that is gone`
+                : ""} across ${data.boards.length} ${
+              data.boards.length === 1 ? "board" : "boards"}. Blocked and in-flight work stays on its
+              own board, where the tree says why.`
+          : html`Every open ticket is blocked, done, or already being carried. The boards above say
+                 which.`}</div>
+      ${data.livenessKnown
+        ? ""
+        : html`<div class="oos">This host could not read the session registry, so a ticket held by
+                 a live session may be listed here. Check before dispatching.</div>`}
+    </div>
+    ${data.boards.map((board) => html`
+      <div class="everyboard">
+        <h2 class="sec"><a class="board-link" data-board="${board.workspace}"
+             href="/w/${encodeURIComponent(board.workspace)}">${board.workspace}</a>
+          <b>· ${board.cards.length}</b></h2>
+        <div class="stack">${board.cards.map((card) => readyHtml(card))}</div>
+      </div>`)}`;
+}
+
+function readyHtml(card) {
+  const claim = card.staleClaim;
+  return html`
+    <div class="card ready-card">
+      <div class="r1">
+        <span class="glyph" title="${card.type}">${GLYPH[card.type] || GLYPH.task}</span>
+        <span class="seq">${card.seq}</span>
+      </div>
+      <div class="title">${card.title}</div>
+      <div class="r2">
+        ${claim
+          ? html`<span class="chip claim gone">${claim.session} · gone${
+              claim.age ? " · " + claim.age : ""}</span>`
+          : html`<span class="chip ready">Ready</span>`}
+        <button class="copy" data-dispatch="${card.dispatch}">copy dispatch</button>
+      </div>
+    </div>`;
 }
 
 function frameHtml() {
@@ -404,6 +476,10 @@ function pickerHtml() {
 
 function render() {
   const app = document.getElementById("app");
+  if (everywhere) {
+    app.innerHTML = html`${boardsHtml()}${everywhereHtml()}`.__html;
+    return;
+  }
   if (!view) { app.innerHTML = pickerHtml().__html; return; }
   app.innerHTML = html`
     ${boardsHtml()}
@@ -588,14 +664,24 @@ function connect() {
   // frames into `applyBoardView` and quietly undo the switch.
   if (stream) stream.close();
   stream = null;
-  if (!workspace || DATA.eventsPath === null) return;
+  if (DATA.eventsPath === null || (!workspace && !everywhere)) return;
   const status = document.getElementById("status");
-  const source = new EventSource("/w/" + encodeURIComponent(workspace) + "/events");
+  const source = new EventSource(
+    workspace ? "/w/" + encodeURIComponent(workspace) + "/events" : "/" + EVERYWHERE + "/events",
+  );
   stream = source;
   source.addEventListener("view", (e) => {
     status.textContent = "";
     status.classList.remove("off");
     applyBoardView(JSON.parse(e.data));
+  });
+  // A separate frame name rather than a shape sniff: the two views have nothing in common, and a
+  // page that guessed wrong would paint one surface with the other's data.
+  source.addEventListener(EVERYWHERE, (e) => {
+    status.textContent = "";
+    status.classList.remove("off");
+    everywhere = JSON.parse(e.data);
+    render();
   });
   source.addEventListener("open", () => {
     status.textContent = "";
@@ -622,20 +708,23 @@ function connect() {
  */
 function switchTo(name, options) {
   const push = !options || options.push !== false;
-  if (name === workspace) return;
+  const toEverywhere = name === EVERYWHERE;
+  if (toEverywhere ? everywhere !== null : name === workspace) return;
   const status = document.getElementById("status");
   status.textContent = "loading " + name + "…";
   status.classList.remove("off");
-  fetch("/api/w/" + encodeURIComponent(name))
+  const path = toEverywhere ? "/" + EVERYWHERE : "/w/" + encodeURIComponent(name);
+  fetch("/api" + path)
     .then((r) => (r.ok ? r.json() : Promise.reject(new Error(String(r.status)))))
     .then((next) => {
-      workspace = name;
       // The lock belongs to the board that was on screen; carrying a sequence number across boards
       // would trace whichever unrelated ticket happens to share the number.
       locked = null;
-      view = next;
+      workspace = toEverywhere ? null : name;
+      view = toEverywhere ? null : next;
+      everywhere = toEverywhere ? next : null;
       status.textContent = "";
-      if (push) history.pushState({ workspace: name }, "", "/w/" + encodeURIComponent(name));
+      if (push) history.pushState({ board: name }, "", path);
       render();
       connect();
     })
@@ -645,14 +734,15 @@ function switchTo(name, options) {
     });
 }
 
-/** The workspace a board URL names, or null for the picker at `/`. */
-function workspaceOfPath(pathname) {
+/** What a URL selects: a board's name, `EVERYWHERE`, or null for the picker at `/`. */
+function boardOfPath(pathname) {
   const parts = pathname.split("/").filter(Boolean).map(decodeURIComponent);
+  if (parts[0] === EVERYWHERE) return EVERYWHERE;
   return parts[0] === "w" && parts[1] ? parts[1] : null;
 }
 
 addEventListener("popstate", () => {
-  const name = workspaceOfPath(location.pathname);
+  const name = boardOfPath(location.pathname);
   // Back out of every board and the picker is a real page, not a state this one can paint.
   if (name === null) location.reload();
   else switchTo(name, { push: false });

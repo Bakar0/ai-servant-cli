@@ -11,15 +11,20 @@
 import { BOARD_VIEWER_PORT } from "../paths.ts";
 import { fillDataSlot } from "../html-artifact.ts";
 import { BOARD_TEMPLATE } from "./board-template.ts";
-import type { BoardView } from "./view.ts";
+import type { BoardView, EverywhereView } from "./view.ts";
 
 export const BOARD_DATA_SLOT = "__BOARD_DATA__";
+
+/** The `/everywhere` scope, as a subscription key and as a URL segment. */
+export const EVERYWHERE = "everywhere";
 
 /** What the page is handed: the view, which board it is, and which ticket the URL singled out. */
 export interface BoardPayload {
   boards: string[];
   workspace: string | null;
   view: BoardView | null;
+  /** Set on `/everywhere` only, and then `view` is null: the two are alternative surfaces. */
+  everywhere: EverywhereView | null;
   /** The ticket a `/w/<ws>/t/<seq>` deep link named — `ticketUrl()`'s half of the contract. */
   focus: number | null;
   eventsPath: string | null;
@@ -28,12 +33,15 @@ export interface BoardPayload {
 export interface BoardHandlerDeps {
   /** The view for one board, or null when no such board exists. */
   view: (workspace: string) => BoardView | null;
+  /** Every board's frontier at once. */
+  everywhere: () => EverywhereView;
   boards: () => string[];
   /**
-   * Register for views of a board as it changes; returns an unsubscribe. Injected so the handler's
-   * framing is testable on its own — the real one watches the database file.
+   * Register for views of a scope as it changes — a board's name, or `EVERYWHERE`; returns an
+   * unsubscribe. Injected so the handler's framing is testable on its own — the real one watches
+   * the database file.
    */
-  subscribe?: (workspace: string, onView: (view: BoardView) => void) => () => void;
+  subscribe?: (scope: string, onView: (view: BoardView | EverywhereView) => void) => () => void;
   template?: string;
   /** Comment-frame interval. 0 disables it, which is what a test that reads a fixed number wants. */
   heartbeatMs?: number;
@@ -115,22 +123,48 @@ export function handleBoardRequest(req: Request, deps: BoardHandlerDeps): Respon
         headers: { location: `/w/${encodeURIComponent(boards[0] as string)}` },
       });
     }
-    return page({ boards, workspace: null, view: null, focus: null, eventsPath: null }, template);
+    return page(
+      { boards, workspace: null, view: null, everywhere: null, focus: null, eventsPath: null },
+      template,
+    );
   }
 
   // `/api/w/<ws>` is the same view the page gets, without the page — the shape every assertion and
   // every `curl` reads, so the JSON is never a second rendering of the board.
   const isApi = url.pathname === "/api" || url.pathname.startsWith("/api/");
-  const route = parsePath(isApi ? url.pathname.slice("/api".length) : url.pathname);
+  const path = isApi ? url.pathname.slice("/api".length) : url.pathname;
+
+  // Every board's frontier at once. A surface of its own rather than a board named "everywhere",
+  // because it answers a different question and has no tree to draw.
+  if (path === `/${EVERYWHERE}` || path === `/${EVERYWHERE}/events`) {
+    const everywhere = deps.everywhere();
+    if (path.endsWith("/events")) {
+      return isApi ? notFound("No such page.") : eventStream(EVERYWHERE, everywhere, deps);
+    }
+    if (isApi) return json(everywhere);
+    return page(
+      {
+        boards,
+        workspace: null,
+        view: null,
+        everywhere,
+        focus: null,
+        eventsPath: `/${EVERYWHERE}/events`,
+      },
+      template,
+    );
+  }
+
+  const route = parsePath(path);
   if (!route) return notFound("No such page.");
   const { workspace, rest } = route;
 
-  if (!isApi && rest[0] === "events" && rest.length === 1) {
-    return eventStream(workspace, deps);
-  }
-
   const view = deps.view(workspace);
   if (!view) return notFound(`No board for the "${workspace}" workspace.`);
+
+  if (!isApi && rest[0] === "events" && rest.length === 1) {
+    return eventStream(workspace, view, deps);
+  }
 
   if (isApi) return rest.length === 0 ? json(view) : notFound("No such page.");
 
@@ -143,7 +177,10 @@ export function handleBoardRequest(req: Request, deps: BoardHandlerDeps): Respon
     return notFound("No such page.");
   }
 
-  return page({ boards, workspace, view, focus, eventsPath: eventsPath(workspace) }, template);
+  return page(
+    { boards, workspace, view, everywhere: null, focus, eventsPath: eventsPath(workspace) },
+    template,
+  );
 }
 
 /**
@@ -153,9 +190,11 @@ export function handleBoardRequest(req: Request, deps: BoardHandlerDeps): Respon
  * waiting for the next write — a stream whose first useful frame needs someone else to do something
  * is indistinguishable from a broken one.
  */
-function eventStream(workspace: string, deps: BoardHandlerDeps): Response {
-  const initial = deps.view(workspace);
-  if (!initial) return notFound(`No board for the "${workspace}" workspace.`);
+function eventStream(
+  scope: string,
+  initial: BoardView | EverywhereView,
+  deps: BoardHandlerDeps,
+): Response {
   const subscribe = deps.subscribe;
 
   const encoder = new TextEncoder();
@@ -178,8 +217,11 @@ function eventStream(workspace: string, deps: BoardHandlerDeps): Response {
           close();
         }
       };
-      send(sseFrame("view", initial));
-      if (subscribe) unsubscribe = subscribe(workspace, (view) => send(sseFrame("view", view)));
+      // The two scopes carry different shapes, so they get different frame names — a page that had
+      // to guess which it received could paint one surface with the other's data.
+      const event = scope === EVERYWHERE ? EVERYWHERE : "view";
+      send(sseFrame(event, initial));
+      if (subscribe) unsubscribe = subscribe(scope, (view) => send(sseFrame(event, view)));
       const every = deps.heartbeatMs ?? 15_000;
       if (every > 0) heartbeat = setInterval(() => send(SSE_HEARTBEAT), every);
     },
