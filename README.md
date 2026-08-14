@@ -13,11 +13,12 @@
 
 ---
 
-`servant` puts coding agents to work in the engineer's service. Every task gets its own workspace: a dedicated folder, git worktrees of the repos you're working in, and a coding agent (Claude Code or Codex) launched in a fresh terminal tab. Work is shaped and tracked with [mattpocock/skills](https://github.com/mattpocock/skills) against a shared GitHub **hub** repo (tasks = Issues), so sessions are resumable, agents get smarter, and the backlog stays navigable across every workspace - the agent does the heavy lifting while you stay the architect. Like the compiler before it, servant raises the level you work at without taking your hands off the wheel.
+`servant` puts coding agents to work in the engineer's service. Every task gets its own workspace: a dedicated folder, git worktrees of the repos you're working in, and a coding agent (Claude Code or Codex) launched in a fresh terminal tab. Work is shaped and tracked with [mattpocock/skills](https://github.com/mattpocock/skills) against a local **board** — SQLite at the servant root, with a loopback viewer as a lens on it — so sessions are resumable, agents get smarter, and the backlog stays navigable across every workspace with no network and no GitHub login - the agent does the heavy lifting while you stay the architect. Like the compiler before it, servant raises the level you work at without taking your hands off the wheel.
 
 ```bash
 servant spawn -w add-rate-limiter -r    # -w names the workspace; -r picks repos + adds worktrees
-servant tasks                           # every workspace's open tasks (GitHub Issues in the hub)
+servant tasks                           # every workspace's open tasks, from the local board
+servant board                           # watch the board live: kanban + wayfinder map, on loopback
 servant recall "rate limit"             # search accumulated knowledge, ranked
 servant insights --deep                 # render an offline HTML dashboard of how the setup steers agents
 servant fine-tune                       # insights analyst: read your metrics, then tune the instructions
@@ -25,7 +26,7 @@ servant fine-tune                       # insights analyst: read your metrics, t
 
 > **The everyday move - `/servant:handoff`.** From inside a session, take the work forward:
 > write a handoff doc, route to the next step of the flow, and spawn the continuation session(s) -
-> one per ready ticket. Specs and tickets live as Issues in the shared hub - not in the repo - so
+> one per ready ticket. Specs and tickets live on the board - not in the repo - so
 > ongoing context is shared across sessions: each new agent picks up exactly where the last one
 > left off, instead of starting cold. This is how you keep command while the work fans out.
 
@@ -37,7 +38,7 @@ servant fine-tune                       # insights analyst: read your metrics, t
 - [Installation](#installation) - `brew install` + first-time setup
 - [Quick start](#quick-start)
 - [How it works](#how-it-works)
-- [The workflow & the hub](#the-workflow--the-hub)
+- [The workflow & the board](#the-workflow--the-board)
 - [Commands](#commands)
 - [In-session slash commands](#in-session-slash-commands)
 - [Configuration](#configuration)
@@ -117,13 +118,13 @@ Everything servant manages lives under a single root, `~/.ai_servant/`:
     ├── CLAUDE.md · AGENTS.md    # synced conventions (Claude @-imports · Codex inlined)
     ├── GOAL.md · CONTEXT.md     # workspace intent · shared glossary
     ├── docs/adr/                # architecture decision records
-    ├── docs/agents/             # per-workspace skills config (hub-pinned issue tracker, etc.)
+    ├── docs/agents/             # per-workspace skills config (board-backed issue tracker, etc.)
     ├── .claude/                 # settings + hooks
     └── repos/<repo>__<branch>/  # git worktree of your local clone
 ```
 
 - A **workspace** is a self-contained folder for one initiative. The coding agent runs there with its own `CLAUDE.md`/`AGENTS.md` and slash commands.
-- **Tasks and plans are not files** — they're GitHub Issues in the shared hub, labeled `ws:<workspace>`. See [The workflow & the hub](#the-workflow--the-hub).
+- **Tasks and plans are not files** — they're tickets on the local board, one board per workspace. See [The workflow & the board](#the-workflow--the-board).
 - **Worktrees** use a flat `repos/<repo>__<branch>/` layout — multiple repos per workspace, each a real `git worktree` of your existing local clone (your original checkout is untouched).
 - **Assets are CLI-owned and self-healing**: they're re-synced on every `spawn`/`resume`, so updating servant updates every workspace's instructions automatically. Your `fine-tune` overlays are layered on top and preserved.
 
@@ -131,13 +132,20 @@ Everything servant manages lives under a single root, `~/.ai_servant/`:
 
 ---
 
-## The workflow & the hub
+## The workflow & the board
 
 servant embraces [mattpocock/skills](https://github.com/mattpocock/skills) for the engineering
-flow, and points them at one shared **hub** repo (`config.hubRepo`, default `Barak-Zen/majordomo`)
-cloned to `~/.ai_servant/majordomo/`. The hub is the **issue tracker**: every workspace's tasks,
-specs, and tickets are GitHub Issues labeled `ws:<workspace>`, so the whole backlog is navigable in
-one place (`servant tasks`, the label, or a Project board).
+flow, and points them at one local **board**: a SQLite database at `~/.ai_servant/board.sqlite`
+(ADR-0011). Every workspace is a board on it, and every task, spec and ticket is a row — so the
+whole backlog is navigable in one place (`servant tasks`, or `servant board` to watch it live)
+with no network, no GitHub account, and no `gh`.
+
+Every command opens that file directly. The viewer is a lens on it, never a gate in front of it:
+close the board and the CLI is unaffected.
+
+`servant import-hub` is the one-shot migration off the old GitHub-Issues hub. It preserves each
+issue number as the ticket's board number, so in-flight session names and cross-references stay
+valid, and it is expected to be deleted once run.
 
 The knowledge base is separate and deliberately local — see
 [Knowledge base](#knowledge-base--recall--memories).
@@ -146,8 +154,8 @@ The idea → ship flow (skills you reach for by name in a session):
 
 ```
 /grill-me      align on the task            →  sharpens CONTEXT.md
-/to-spec       publish a spec               →  a hub Issue  [ws:<name>, spec]
-/to-tickets    break it into tracer-bullet tickets  →  hub Issues with blocking edges
+/to-spec       publish a spec               →  a board ticket  [spec]
+/to-tickets    break it into tracer-bullet tickets  →  board tickets with blocking edges
 /implement     build a ticket (drives /tdd, closes with /code-review)
 /servant:handoff   take it forward          →  writes a handoff doc, then spawns the next session(s),
                                                one per ready ticket (see servant tasks --frontier)
@@ -155,8 +163,8 @@ The idea → ship flow (skills you reach for by name in a session):
 
 Skills are opt-in tools, not a mandatory pipeline — a session opens in plain conversation, and you
 reach for a skill when the situation calls for one. `docs/agents/issue-tracker.md` (generated per
-workspace) pins every `gh` call to the hub, so the skills file issues in the right place
-automatically.
+workspace) points every tracker operation at `servant ticket`, so the skills file tickets in the
+right place automatically.
 
 ---
 
@@ -170,7 +178,11 @@ Run any command with `--help` for the full flag list.
 | `servant spawn` | Create/enter a workspace and open a terminal tab running a coding agent. |
 | `servant repo add\|list\|rm` | Manage git worktrees of your local clones inside a workspace. |
 | `servant resume` | Re-attach to a previous Claude Code session. |
-| `servant tasks` | List the hub's tasks (GitHub Issues) grouped by workspace; `--frontier` splits ready vs blocked. |
+| `servant tasks` | List the board's tickets grouped by workspace; `--frontier` sorts them into ready / in-flight / stale / blocked. |
+| `servant ticket` | File, read and edit tickets: `new`, `show`, `comment`, `label`, `status`, `close`, `block`, `unblock`. |
+| `servant claim` | Record which session is carrying a ticket, or release it. |
+| `servant board` | Serve the board on loopback: a live kanban and wayfinder map over the local tracker. |
+| `servant import-hub` | One-shot migration of a GitHub-Issues hub onto the board, issue numbers intact. |
 | `servant recall` | Search the knowledge base by tag and content; prints matching notes. |
 | `servant memories` | Browse the knowledge base in an fzf picker. |
 | `servant insights` | Transcript-driven observability across instructions, tokens, and the knowledge base; `--deep` renders an offline HTML dashboard. |
@@ -229,14 +241,39 @@ servant resume --prompt "continue"      # resume with a kickoff prompt
 
 ### `servant tasks`
 
-List the hub's Issues (the task tracker) grouped by workspace, with deep links. Falls back to a cached snapshot when offline.
+List the board's tickets grouped by workspace, with deep links into the viewer. No network, so
+there is nothing to be offline from and no cache tier.
 
 ```bash
-servant tasks                        # every workspace's open tasks
+servant tasks                        # every workspace's open tickets
 servant tasks --ws add-rate-limiter  # just one workspace
 servant tasks --state all            # include closed
-servant tasks --frontier --ws foo    # ready (blockers closed) vs blocked — what /servant:handoff dispatches
+servant tasks --frontier --ws foo    # ready / in-flight / stale / blocked — what /servant:handoff dispatches
 ```
+
+### `servant board`
+
+Open the board in a browser. Two surfaces over the same tickets:
+
+- **The board** — `blocked | ready | in progress | in review | done`, where `blocked` and `ready`
+  are *derived* from open dependencies rather than stored, so a column can never disagree with
+  `servant tasks --frontier`. Each card shows its state, the session holding it with a last-seen
+  age, and what still blocks it. A button copies the exact dispatch command; it is absent on a
+  blocked or already-claimed ticket, because the board holds no queue and starts no process.
+- **The map** — the wayfinder map as a map: the dependency tree on the left ordered by *closures
+  away from startable*, the board as a rail on the right, the map's Destination and Out-of-scope
+  framing the canvas, and "Not yet specified" rendered as fog. Hover traces a ticket's whole chain;
+  click locks the trace; Escape releases it.
+
+```bash
+servant board                        # the current workspace's board, opened in your browser
+servant board -w add-rate-limiter    # a specific board
+servant board --port 7788 --no-open  # a different port; print the URL instead of opening it
+```
+
+Changes made by any servant command appear on the open page without a reload — the viewer watches
+the database and pushes over SSE. It is **read-only and loopback-only**: nothing off this machine
+can reach it, and every servant command works exactly the same with it closed.
 
 ### Knowledge base — `recall` & `memories`
 
@@ -307,7 +344,7 @@ Every workspace ships with a set of `/servant:*` slash commands for Claude Code 
 
 These stay in sync automatically - they're re-synced on every `spawn`/`resume`, so updating servant updates the commands in every workspace.
 
-Alongside these, every workspace has the **[mattpocock/skills](https://github.com/mattpocock/skills)** engineering skills installed (the `mattpocock-skills` plugin) — `/grill-me`, `/to-spec`, `/to-tickets`, `/implement`, `/tdd`, `/code-review`, and more. servant pre-configures them (via `docs/agents/`) to file issues into the hub. See [The workflow & the hub](#the-workflow--the-hub).
+Alongside these, every workspace has the **[mattpocock/skills](https://github.com/mattpocock/skills)** engineering skills installed (the `mattpocock-skills` plugin) — `/grill-me`, `/to-spec`, `/to-tickets`, `/implement`, `/tdd`, `/code-review`, and more. servant pre-configures them (via `docs/agents/`) to file tickets onto the board. See [The workflow & the board](#the-workflow--the-board).
 
 ---
 

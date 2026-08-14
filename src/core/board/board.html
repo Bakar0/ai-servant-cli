@@ -1,0 +1,925 @@
+<!doctype html>
+<!--
+  The board viewer. Served on loopback by `servant board`; it reads the same SQLite file every
+  servant command writes and never writes a byte of its own.
+
+  Layout is variant B of the map-view prototype: the dependency tree on the left, the board as a
+  rail on the right. Nothing here derives anything — depth, ordering, fan colours, chains and the
+  dispatch command all arrive computed in the page's one data slot, because every one of them is a
+  rule that has to agree with `servant tasks --frontier`, and that agreement is worth asserting in
+  TypeScript. This file paints, and handles the pointer.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="icon" href="data:,">
+<title>servant board</title>
+<style>
+  :root {
+    --bg:#12131a; --panel:#191b24; --panel2:#1f2230; --line:#2c3040;
+    --ink:#e6e8f0; --dim:#9096ab; --faint:#5c6278; --fog:#3a3f52;
+    --c-blocked:#b05c5c; --c-ready:#5f8dd6; --c-in_progress:#d9a047;
+    --c-in_review:#a878d8; --c-done:#4ba3a0;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+       font:14px/1.5 ui-sans-serif,-apple-system,"Segoe UI",sans-serif}
+  .wrap{max-width:1640px;margin:0 auto;padding:24px}
+  h2.sec{font-size:11px;letter-spacing:.09em;text-transform:uppercase;color:var(--faint);
+         margin:0 0 10px;font-weight:600}
+  a{color:inherit}
+
+  /* A drawer rather than a row across the top: boards accumulate and are never removed, and fifty
+     of them as chips is six rows of chrome before the board starts. Closed, it costs one button. */
+  #drawer{position:fixed;left:0;top:0;bottom:0;width:248px;z-index:60;padding:16px 12px 12px;
+          background:var(--panel);border-right:1px solid var(--line);
+          display:none;flex-direction:column;gap:9px}
+  body.drawer #drawer{display:flex}
+  body.drawer .wrap{margin-left:248px}
+  #drawertoggle{position:fixed;top:14px;left:12px;z-index:61;width:24px;height:24px;padding:0;
+                border:1px solid var(--line);border-radius:6px;background:var(--panel);
+                color:var(--dim);font:inherit;font-size:13px;line-height:1;cursor:pointer}
+  body.drawer #drawertoggle{left:auto;right:auto;transform:translateX(212px)}
+  #drawertoggle:hover{color:var(--ink);border-color:var(--fog)}
+  #drawer .dhead{display:flex;align-items:baseline;gap:7px;padding-right:30px}
+  #drawer .kick{font-size:11px;letter-spacing:.09em;text-transform:uppercase;color:var(--faint)}
+  #drawer .dcount{color:var(--fog);font-size:11px}
+  #dfilter{width:100%;background:var(--bg);border:1px solid var(--line);border-radius:7px;
+           color:var(--ink);font:inherit;font-size:12px;padding:5px 9px}
+  #dfilter:focus{outline:none;border-color:#4b5478}
+  #drawer .dlist{overflow-y:auto;display:flex;flex-direction:column;gap:2px;margin-right:-6px;
+                 padding-right:6px}
+  /* flex:none, or the column shrinks every row to a sliver once there are fifty of them — the list
+     scrolls instead. */
+  #drawer .board{display:block;flex:none;text-decoration:none;color:var(--dim);font-size:12px;
+                 padding:5px 8px;border-radius:6px;border:1px solid transparent;
+                 white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  #drawer .board:hover{color:var(--ink);background:var(--panel2)}
+  #drawer .board.on{color:var(--ink);background:var(--panel2);border-color:#4b5478}
+  #drawer .board b{color:var(--c-ready);font-weight:600}
+  #drawer .board.on b{color:var(--ink)}
+  #drawer .every{border:1px dashed var(--line);flex:none}
+  #drawer .dwhen{display:block;font-size:10.5px;color:var(--faint);margin-top:1px}
+  #drawer .empty{padding:6px 8px}
+  @media (max-width:1100px){
+    body.drawer .wrap{margin-left:0}
+    body.drawer #drawer{box-shadow:0 0 40px #000a}
+  }
+
+  /* One column, not a tree: see everywhereHtml. Cards are wide because nothing sits beside them. */
+  .everyboard{margin-bottom:22px}
+  .everyboard h2.sec{display:flex;gap:7px;align-items:baseline}
+  .everyboard h2.sec b{color:var(--fog);font-weight:600}
+  .everyboard .board-link{color:var(--dim);text-decoration:none}
+  .everyboard .board-link:hover{color:var(--ink);text-decoration:underline}
+  .ready-card{cursor:default;max-width:920px}
+  .ready-card .title{font-size:13px}
+
+  .frame{border:1px solid var(--line);border-radius:10px;background:var(--panel);
+         padding:16px 20px;margin-bottom:20px}
+  .frame .kick{font-size:11px;letter-spacing:.09em;text-transform:uppercase;color:var(--faint)}
+  .frame h1{margin:4px 0 8px;font-size:19px;font-weight:600}
+  /* A map's prose is written to be read in the ticket, not sized to a header: one real Out of
+     scope section runs to 5,600 characters. Both blocks are capped so the frame stays a frame and
+     the first column of tickets stays above the fold, however much a map has to say. */
+  .frame .dest{max-width:80ch;color:var(--dim);max-height:8.4em;overflow:auto}
+  .frame .oos{margin-top:11px;padding-top:11px;border-top:1px solid var(--line);
+              color:var(--faint);font-size:12.5px}
+  .frame .oos summary{cursor:pointer}
+  .frame .oos ul{margin:9px 0 0;padding-left:18px;max-width:100ch;
+                 max-height:18em;overflow:auto}
+  .frame .oos li{margin-bottom:7px;line-height:1.45}
+  code{background:var(--panel2);border-radius:4px;padding:1px 4px;font-size:.92em}
+  .frame b,.fogbox b,details.dec b{color:var(--dim);font-weight:600}
+
+  .card{background:var(--panel2);border:1px solid var(--line);border-left-width:3px;
+        border-left-color:var(--line);border-radius:7px;padding:8px 10px;position:relative;
+        transition:opacity .12s,border-color .12s;cursor:pointer}
+  .card .r1{display:flex;gap:7px;align-items:center}
+  .card .glyph{font-size:12px;width:12px;text-align:center;flex:none;color:var(--faint)}
+  .card .seq{font-size:11.5px;color:var(--faint);font-variant-numeric:tabular-nums}
+  .card .fan{width:8px;height:8px;border-radius:2px;margin-left:auto;flex:none}
+  .card .title{margin-top:3px;font-size:12.5px;line-height:1.35}
+  .card .r2{margin-top:7px;display:flex;gap:5px;flex-wrap:wrap;align-items:center}
+  .chip{font-size:10px;padding:2px 6px;border-radius:999px;border:1px solid currentColor;
+        opacity:.95;white-space:nowrap;max-width:100%;overflow:hidden;text-overflow:ellipsis}
+  .chip.blocked{color:var(--c-blocked)} .chip.ready{color:var(--c-ready)}
+  .chip.in_progress{color:var(--c-in_progress)} .chip.in_review{color:var(--c-in_review)}
+  .chip.done{color:var(--c-done)}
+  .chip.claim{color:#c9a55e;border-style:dashed}
+  .chip.claim.gone{color:var(--c-blocked)}
+  .chip.plain{color:var(--faint)}
+  .card.done{opacity:.55}
+  .card.done .title{text-decoration:line-through;text-decoration-color:var(--faint)}
+  .copy{margin-left:auto;border:1px solid var(--line);background:transparent;color:var(--dim);
+        font:inherit;font-size:10px;padding:2px 7px;border-radius:999px;cursor:pointer}
+  .copy:hover{border-color:var(--c-ready);color:var(--c-ready)}
+  .copy.done{border-color:var(--c-done);color:var(--c-done)}
+
+  body.hov .card{opacity:.22}
+  body.hov .card.lit{opacity:1}
+  body.hov .card.self{opacity:1;border-color:#8b93c4}
+  body.lock .card.self{box-shadow:0 0 0 2px #7c86ff55}
+  #hint{position:fixed;left:50%;bottom:22px;transform:translateX(-50%);display:none;z-index:99;
+        background:#20233a;border:1px solid #3b4170;color:#c8cdf5;border-radius:999px;
+        padding:5px 14px;font-size:11.5px;box-shadow:0 4px 18px #0008;white-space:nowrap}
+  body.lock #hint{display:block}
+
+  /* The tree scrolls rather than squeezes. A depth column is a fixed width and never shrinks:
+     letting flex divide the space meant a seventh column reduced every card to an unreadable
+     sliver, and the last one fell off the right edge entirely. */
+  .treescroll{overflow-x:auto;overflow-y:hidden;padding-bottom:12px}
+  /* max-content so the SVG, which is positioned against this box, spans the whole tree rather
+     than only the part currently scrolled into view. */
+  .cols{display:flex;gap:28px;align-items:flex-start;position:relative;width:max-content;
+        /* the left gutter is where a same-column edge bows out — see wirePath */
+        padding-left:34px}
+  .col{flex:0 0 272px;min-width:0}
+  /* macOS hides an overlay scrollbar until you scroll, which hides the fact that there is more to
+     see. Anything that scrolls its own content carries `scrolls`, and those are always drawn. */
+  .scrolls::-webkit-scrollbar{height:10px;width:10px}
+  .scrolls::-webkit-scrollbar-track{background:var(--bg);border-radius:6px}
+  .scrolls::-webkit-scrollbar-thumb{background:var(--line);border-radius:6px}
+  .scrolls::-webkit-scrollbar-thumb:hover{background:var(--fog)}
+  .col>h3{font-size:10.5px;letter-spacing:.09em;text-transform:uppercase;color:var(--faint);
+          margin:0 0 9px;font-weight:600}
+  .col>h3 b{color:var(--fog);font-weight:600}
+  .stack{display:flex;flex-direction:column;gap:9px}
+  .empty{color:var(--fog);font-size:11px}
+  svg.wires{position:absolute;inset:0;overflow:visible;pointer-events:none;z-index:0}
+  .cols .card{z-index:1}
+  .donecol{flex:0 0 168px;opacity:.75}
+  .donecol>h3{color:var(--c-done);opacity:.7}
+  .donecol .card{padding:6px 8px}
+  .donecol .card .title{font-size:11.5px}
+  .donecol .card .r2{display:none}
+
+  .split{display:grid;grid-template-columns:minmax(0,1fr) 300px;gap:22px;align-items:start}
+  /* Scrolls itself. A twenty-card column makes the page far taller than the viewport, and a sticky
+     box taller than the viewport can never show its own bottom — which put the fog out of reach. */
+  .rail{position:sticky;top:20px;background:var(--panel);border:1px solid var(--line);
+        border-radius:10px;padding:14px;max-height:calc(100vh - 40px);overflow-y:auto}
+  .rail .grp{margin-bottom:15px}
+  .rail .grp:last-child{margin-bottom:0}
+  .rail .grp>h4{margin:0 0 7px;font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;
+                font-weight:600;display:flex;justify-content:space-between}
+  .rail .grp>h4 span{color:var(--faint);font-weight:500}
+  .rail .item{display:flex;gap:7px;align-items:baseline;padding:4px 6px;border-radius:5px;
+              font-size:12px;cursor:pointer;transition:opacity .12s,background .12s}
+  .rail .item:hover{background:var(--panel2)}
+  .rail .item .seq{color:var(--faint);font-variant-numeric:tabular-nums;font-size:11px;
+                   width:24px;flex:none}
+  .rail .item .t{flex:1;line-height:1.3}
+  body.hov .rail .item{opacity:.25}
+  body.hov .rail .item.lit{opacity:1}
+  body.hov .rail .item.self{opacity:1;background:var(--panel2)}
+  .barline{height:4px;border-radius:2px;display:flex;overflow:hidden;margin-bottom:16px;
+           background:var(--panel2)}
+  .barline i{display:block;height:100%}
+
+  .fogbox{border:1px dashed var(--fog);border-radius:10px;padding:13px;background:#171923}
+  .fogbox h3{margin:0 0 3px;font-size:10.5px;letter-spacing:.09em;text-transform:uppercase;
+             color:var(--faint);font-weight:600}
+  .fogbox p{margin:0 0 10px;font-size:10.5px;font-style:italic;color:var(--faint)}
+  .fogbox ul{margin:0;padding-left:16px;color:var(--dim)}
+  .fogbox li{margin-bottom:9px;font-size:12px;line-height:1.4}
+  .fogbox li::marker{color:var(--fog)}
+
+  details.dec{margin-top:22px;border:1px solid var(--line);border-radius:10px;
+              background:var(--panel);padding:11px 17px}
+  details.dec summary{cursor:pointer;color:var(--dim);font-size:12.5px}
+  details.dec ol{margin:10px 0 3px;padding-left:20px;color:var(--dim)}
+  details.dec li{margin-bottom:5px}
+
+  .legend{display:flex;gap:16px;flex-wrap:wrap;align-items:center;margin:0 0 11px;
+          font-size:11px;color:var(--faint)}
+  .legend b{display:inline-block;width:16px;height:2px;vertical-align:middle;margin-right:5px}
+
+  .picker{max-width:60ch}
+  .picker li{margin-bottom:7px}
+  #status{position:fixed;right:16px;top:14px;font-size:11px;color:var(--faint);z-index:99}
+  #status.off{color:var(--c-blocked)}
+
+  /* Last, so it wins on source order over the rules it overrides. Below this width the rail is
+     too narrow to read a ticket title in, so it goes under the tree instead of beside it. */
+  @media (max-width:1000px){
+    .split{grid-template-columns:minmax(0,1fr)}
+    .rail{position:static}
+  }
+</style>
+</head>
+<body>
+<!-- Outside #app on purpose: a view push replaces the whole board, and a drawer inside it would
+     lose the filter text and the focus mid-keystroke every time a card moved. -->
+<aside id="drawer"></aside>
+<button id="drawertoggle" type="button" title="Boards (b)"></button>
+<div class="wrap" id="app"></div>
+<div id="hint"></div>
+<div id="status"></div>
+
+<script>
+"use strict";
+const DATA = __BOARD_DATA__;
+
+const GLYPH = { task: "◆", research: "◇", grilling: "○", prototype: "△", map: "❖" };
+const NEUTRAL_EDGE = "#39405a";
+
+/** The `/everywhere` scope, as the server names it. */
+const EVERYWHERE = "everywhere";
+
+let view = DATA.view;
+/** Set instead of `view` on `/everywhere`: the two are alternative surfaces, never both. */
+let everywhere = DATA.everywhere;
+/** The board on screen, null on `/everywhere`. Mutable — the selector switches without a reload. */
+let workspace = DATA.workspace;
+/** The drawer's filter text, held here so a view push cannot clear it mid-keystroke. */
+let filter = "";
+let drawerOpen = readDrawerState();
+
+function readDrawerState() {
+  // Open by default only when there is a choice to make.
+  try {
+    const saved = localStorage.getItem("servant-board-drawer");
+    if (saved) return saved === "open";
+  } catch {
+    // No storage available; fall through to the default.
+  }
+  return (DATA.boards || []).length > 1;
+}
+/** The traced chain, held across pointer moves. Seeded from a /t/<seq> deep link. */
+let locked = null;
+
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) =>
+  ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+/**
+ * Markup with escaping on by default. Every interpolated value is escaped unless it is itself the
+ * output of `html`; arrays join themselves; `null`, `undefined` and `false` render as nothing.
+ * The hand-concatenated version escaped correctly, but only for as long as every future edit
+ * remembered to call `esc()` — the default was unsafe and the safety was a habit.
+ *
+ * A newline and its indentation collapse to one space, exactly as HTML itself would collapse them,
+ * so a template can be laid out over several lines. The containers that hold repeated fragments are
+ * all flex, which drops whitespace-only text nodes, so the layout does not see the difference.
+ */
+function html(strings, ...values) {
+  let out = fmt(strings[0]);
+  for (let i = 0; i < values.length; i++) out += flatten(values[i]) + fmt(strings[i + 1]);
+  return { __html: out };
+}
+
+const fmt = (chunk) => chunk.replace(/\s*\n\s*/g, " ");
+
+function flatten(value) {
+  if (value === null || value === undefined || value === false) return "";
+  if (Array.isArray(value)) return value.map(flatten).join("");
+  if (value.__html !== undefined) return value.__html;
+  return esc(value);
+}
+
+/**
+ * The map's prose is Markdown, because it is written to be read in the ticket as well as here. The
+ * page renders the inline part of it — code, bold, italic — and nothing else: no links, no headings,
+ * no HTML passed through. Escaping runs *first*, so the tags this adds are the only tags that can
+ * reach the page, and a map that contains markup still renders as text.
+ *
+ * Without this the section reads as its own source: `- **A capability** — the right fix…`.
+ */
+function inlineMd(text) {
+  return { __html: esc(text)
+    .replace(/``(.+?)``/g, "<code>$1</code>")
+    .replace(/`([^`]+)`/g, "<code>$1</code>")
+    // Bold before italic, and lazily: a bold run routinely contains an italic one, which a
+    // `[^*]+` body would refuse to match and leave on the page as its own asterisks.
+    .replace(/\*\*([\s\S]+?)\*\*/g, "<b>$1</b>")
+    .replace(/(^|[\s(])\*([^*\s][^*]*)\*/g, "$1<i>$2</i>") };
+}
+
+const cardsBySeq = () => new Map((view ? view.cards : []).map((c) => [c.seq, c]));
+
+// ───────────────────────────── fragments ─────────────────────────────
+
+function cardHtml(card, mini) {
+  const claim = card.claim;
+  const claimText = claim
+    ? claim.session + (claim.age ? " · " + claim.age : "") + (claim.state === "gone" ? " · gone" : "")
+    : "";
+  const blockers = card.openBlockers.map((b) => b.label).join(" ");
+  return html`
+    <div class="card${card.column === "done" ? " done" : ""}"
+         data-seq="${card.seq}" style="border-left-color:${card.stripe}">
+      <div class="r1">
+        <span class="glyph" title="${card.type}">${GLYPH[card.type] || GLYPH.task}</span>
+        <span class="seq">${card.seq}</span>
+        ${card.fanColor &&
+          html`<span class="fan" style="background:${card.fanColor}"
+                     title="blocks ${card.blocks.length} tickets"></span>`}
+      </div>
+      <div class="title">${card.title}</div>
+      ${!mini &&
+        html`
+          <div class="r2">
+            <span class="chip ${card.column}">${labelOf(card.column)}</span>
+            ${claim && html`<span class="chip claim ${claim.state}">${claimText}</span>`}
+            ${blockers && html`<span class="chip plain">← ${blockers}</span>`}
+            ${/* Suppressed on a blocked or claimed ticket: the board starts no process, and a copy
+                  that collides with a session already carrying the work is worse than no button. */
+              card.dispatch &&
+              html`<button class="copy" data-dispatch="${card.dispatch}">copy dispatch</button>`}
+          </div>`}
+    </div>`;
+}
+
+const labelOf = (key) => (view.columns.find((c) => c.key === key) || {}).label || key;
+
+// ───────────────────────────── the drawer ─────────────────────────────
+// Workspaces accumulate: a board is created by a workspace's first ticket and never removed, so
+// this list only grows. It is a drawer rather than a row of chips because fifty boards across the
+// top is six rows of chrome before the board starts, and it is ordered by what was touched most
+// recently rather than by the alphabet, because that is the order the answer is usually in.
+
+/**
+ * Subsequence match, scored. Not a ranking library — three rules: a character adjacent to the last
+ * hit counts most, one at a word boundary next, anything else counts a little. The effect worth
+ * knowing is that typing a name's initials ranks it top, because every hit is a boundary hit:
+ * `sk` finds `servant-kanban` before the boards that merely contain an s before a k.
+ */
+function fuzzyMatch(query, text) {
+  if (!query) return { score: 0, hits: [] };
+  const needle = query.toLowerCase();
+  const hay = text.toLowerCase();
+  const hits = [];
+  let score = 0;
+  let at = 0;
+  for (let i = 0; i < needle.length; i++) {
+    const ch = needle[i];
+    if (ch === " ") continue;
+    const found = hay.indexOf(ch, at);
+    if (found === -1) return null;
+    if (found === at && hits.length > 0) score += 8;
+    else if (found === 0 || /[^a-z0-9]/.test(hay[found - 1])) score += 5;
+    else score += 1;
+    hits.push(found);
+    at = found + 1;
+  }
+  // Shorter names win ties: an exact-ish match should not sit under a longer name that contains it.
+  return { score: score - text.length * 0.01, hits };
+}
+
+/** The name with its matched characters marked, so a fuzzy hit is legible rather than mysterious. */
+function markedName(name, hits) {
+  const marks = new Set(hits);
+  return name.split("").map((ch, i) => (marks.has(i) ? html`<b>${ch}</b>` : ch));
+}
+
+function boardRows() {
+  const query = filter.trim();
+  return (DATA.boards || [])
+    .map((board) => {
+      const match = fuzzyMatch(query, board.workspace);
+      return match ? { board, ...match } : null;
+    })
+    .filter((row) => row !== null)
+    // Without a query the server's order stands, which is most recently touched first.
+    .toSorted((a, b) => (query ? b.score - a.score : 0));
+}
+
+function drawerHtml() {
+  const rows = boardRows();
+  return html`
+    <div class="dhead">
+      <span class="kick">Boards</span>
+      <span class="dcount">${(DATA.boards || []).length}</span>
+    </div>
+    <input id="dfilter" type="search" placeholder="filter…" value="${filter}"
+           autocomplete="off" spellcheck="false">
+    <a class="board every${workspace === null ? " on" : ""}" data-board="${EVERYWHERE}"
+       href="/everywhere">everywhere<span class="dwhen">every board's frontier</span></a>
+    <div class="dlist scrolls">
+      ${rows.length === 0
+        ? html`<div class="empty">no board matches “${filter}”</div>`
+        : rows.map((row) => html`
+            <a class="board${row.board.workspace === workspace ? " on" : ""}"
+               data-board="${row.board.workspace}"
+               href="/w/${encodeURIComponent(row.board.workspace)}"
+               >${markedName(row.board.workspace, row.hits)}<span class="dwhen">${
+                 row.board.open > 0 ? row.board.open + " open" : "nothing open"}${
+                 row.board.lastActivity ? " · " + ago(row.board.lastActivity) : ""}</span></a>`)}
+    </div>`;
+}
+
+/** Coarse, and coarse on purpose: the drawer is sorted by this, so the number is the tiebreaker. */
+function ago(iso) {
+  const then = Date.parse(iso);
+  if (!then) return "";
+  const mins = Math.round((Date.now() - then) / 60000);
+  if (mins < 60) return mins <= 1 ? "just now" : mins + "m ago";
+  const hours = Math.round(mins / 60);
+  if (hours < 24) return hours + "h ago";
+  return Math.round(hours / 24) + "d ago";
+}
+
+function renderDrawer() {
+  document.getElementById("drawer").innerHTML = drawerHtml().__html;
+  document.getElementById("drawertoggle").textContent = drawerOpen ? "‹" : "›";
+  document.body.classList.toggle("drawer", drawerOpen);
+}
+
+function setDrawer(open, options) {
+  drawerOpen = open;
+  try {
+    localStorage.setItem("servant-board-drawer", open ? "open" : "closed");
+  } catch {
+    // Private browsing, or a locked-down profile. The drawer still works, it just forgets.
+  }
+  renderDrawer();
+  // The drawer changes the width the tree is laid out in, and no resize event fires for that.
+  if (view) applyHighlight(locked);
+  if (open && options && options.focus) document.getElementById("dfilter").focus();
+}
+
+/**
+ * Every board's frontier, and only that. Not a tree: depth is counted per board, so one axis across
+ * unrelated initiatives would order tickets that have no relationship to order. What does mean the
+ * same thing everywhere is whether a ticket can be picked up, so that is all this claims.
+ */
+function everywhereHtml() {
+  const data = everywhere;
+  const total = data.ready + data.reclaimable;
+  return html`
+    <div class="frame">
+      <div class="kick">Every board</div>
+      <h1>${total > 0 ? "Ready to dispatch" : "Nothing is dispatchable right now"}</h1>
+      <div class="dest">${
+        total > 0
+          ? html`${data.ready} ready${
+              data.reclaimable > 0
+                ? html`, ${data.reclaimable} to reclaim from a session that is gone`
+                : ""} across ${data.boards.length} ${
+              data.boards.length === 1 ? "board" : "boards"}. Blocked and in-flight work stays on its
+              own board, where the tree says why.`
+          : html`Every open ticket is blocked, done, or already being carried. The boards above say
+                 which.`}</div>
+      ${data.livenessKnown
+        ? ""
+        : html`<div class="oos">This host could not read the session registry, so a ticket held by
+                 a live session may be listed here. Check before dispatching.</div>`}
+    </div>
+    ${data.boards.map((board) => html`
+      <div class="everyboard">
+        <h2 class="sec"><a class="board-link" data-board="${board.workspace}"
+             href="/w/${encodeURIComponent(board.workspace)}">${board.workspace}</a>
+          <b>· ${board.cards.length}</b></h2>
+        <div class="stack">${board.cards.map((card) => readyHtml(card))}</div>
+      </div>`)}`;
+}
+
+function readyHtml(card) {
+  const claim = card.staleClaim;
+  return html`
+    <div class="card ready-card">
+      <div class="r1">
+        <span class="glyph" title="${card.type}">${GLYPH[card.type] || GLYPH.task}</span>
+        <span class="seq">${card.seq}</span>
+      </div>
+      <div class="title">${card.title}</div>
+      <div class="r2">
+        ${claim
+          ? html`<span class="chip claim gone">${claim.session} · gone${
+              claim.age ? " · " + claim.age : ""}</span>`
+          : html`<span class="chip ready">Ready</span>`}
+        <button class="copy" data-dispatch="${card.dispatch}">copy dispatch</button>
+      </div>
+    </div>`;
+}
+
+function frameHtml() {
+  const map = view.map;
+  if (!map) {
+    return html`
+      <div class="frame">
+        <div class="kick">Board</div>
+        <h1>${view.workspace}</h1>
+        <div class="dest">No wayfinder map on this board yet —
+          <code>servant ticket new --labels "wayfinder:map"</code> charts one.</div>
+      </div>`;
+  }
+  return html`
+    <div class="frame">
+      <div class="kick">Destination</div>
+      <h1>${map.title}</h1>
+      <div class="dest scrolls">${inlineMd(map.destination)}</div>
+      ${map.outOfScope.length > 0 &&
+        html`
+          <details class="oos">
+            <summary><b>Out of scope</b> — ${map.outOfScope.length} ${
+              map.outOfScope.length === 1 ? "note" : "exclusions"}</summary>
+            <ul class="scrolls">${map.outOfScope.map((o) => html`<li>${inlineMd(o)}</li>`)}</ul>
+          </details>`}
+    </div>`;
+}
+
+function fogHtml() {
+  const fog = view.map ? view.map.fog : [];
+  if (!fog.length) return "";
+  return html`
+    <div class="fogbox">
+      <h3>Not yet specified</h3>
+      <p>the edge of the map</p>
+      <ul>${fog.map((q) => html`<li>${inlineMd(q)}</li>`)}</ul>
+    </div>`;
+}
+
+function decisionsHtml() {
+  const decisions = view.map ? view.map.decisions : [];
+  if (!decisions.length) return "";
+  return html`
+    <details class="dec">
+      <summary>Decisions so far — ${decisions.length} settled</summary>
+      <ol>${decisions.map((d) => html`<li>${inlineMd(d)}</li>`)}</ol>
+    </details>`;
+}
+
+function treeHtml() {
+  const bySeq = cardsBySeq();
+  return view.tree.map((col) => html`
+    <div class="col${col.depth === null ? " donecol" : ""}">
+      <h3>${col.label} <b>· ${col.seqs.length}</b></h3>
+      <div class="stack">
+        ${col.seqs.length
+          ? col.seqs.map((seq) => cardHtml(bySeq.get(seq), col.depth === null))
+          : html`<div class="empty">—</div>`}
+      </div>
+    </div>`);
+}
+
+function railHtml() {
+  const bySeq = cardsBySeq();
+  return html`
+    <div class="rail scrolls">
+      <h2 class="sec">Board</h2>
+      <div class="barline">
+        ${view.columns.map((col) => col.seqs.length === 0 ? "" :
+          html`<i style="background:var(--c-${col.key});flex:${col.seqs.length}"
+                  title="${col.label}: ${col.seqs.length}"></i>`)}
+      </div>
+      ${view.columns.map((col) => html`
+        <div class="grp">
+          <h4 style="color:var(--c-${col.key})">${col.label}<span>${col.seqs.length}</span></h4>
+          ${col.seqs.length
+            ? col.seqs.map((seq) => html`
+                <div class="item" data-seq="${seq}">
+                  <span class="seq">${seq}</span><span class="t">${bySeq.get(seq).title}</span>
+                </div>`)
+            : html`<div class="empty" style="padding-left:6px">—</div>`}
+        </div>`)}
+      ${view.map && view.map.fog.length > 0 &&
+        html`<div style="margin-top:16px;padding-top:14px;border-top:1px solid var(--line)">
+               ${fogHtml()}</div>`}
+    </div>`;
+}
+
+function legendHtml() {
+  return html`
+    <div class="legend">
+      ${view.fans.map((f) =>
+        html`<span><b style="background:${f.color}"></b>#${f.seq} blocks ${f.count}</span>`)}
+      <span><b style="background:${NEUTRAL_EDGE}"></b>single dependency</span>
+      <span style="margin-left:auto">hover a card to trace its chain · click to lock it</span>
+    </div>`;
+}
+
+function pickerHtml() {
+  const boards = DATA.boards || [];
+  return html`
+    <div class="frame picker">
+      <div class="kick">servant board</div>
+      <h1>${boards.length ? "Which board?" : "No boards yet"}</h1>
+      ${boards.length
+        ? html`<ul>${boards.map((b) => html`
+            <li><a href="/w/${encodeURIComponent(b.workspace)}">${b.workspace}</a>
+              <span class="dwhen">${b.open > 0 ? b.open + " open" : "nothing open"}${
+                b.lastActivity ? " · " + ago(b.lastActivity) : ""}</span></li>`)}</ul>`
+        : html`<div class="dest">Nothing has been filed.
+                 <code>servant ticket new --title "…"</code> starts a board.</div>`}
+    </div>`;
+}
+
+// ───────────────────────────── render ─────────────────────────────
+
+function render() {
+  const app = document.getElementById("app");
+  if (everywhere) {
+    app.innerHTML = everywhereHtml().__html;
+    return;
+  }
+  if (!view) { app.innerHTML = pickerHtml().__html; return; }
+  app.innerHTML = html`
+    ${frameHtml()}
+    <div class="split">
+      <div>
+        <h2 class="sec">Dependency order — closures away from startable</h2>
+        <div style="font-size:11px;color:var(--faint);margin:0 0 10px">
+          edges point right (blocker → dependent) · cards migrate
+          <b style="color:var(--dim)">left</b> as their blockers close ·
+          <b style="color:var(--dim)">Now</b> is the frontier</div>
+        ${legendHtml()}
+        <div class="treescroll scrolls">
+          <div class="cols" id="cols">
+            <svg class="wires" id="wires"></svg>
+            ${treeHtml()}
+          </div>
+        </div>
+        ${decisionsHtml()}
+      </div>
+      ${railHtml()}
+    </div>`.__html;
+  applyHighlight(locked);
+}
+
+/**
+ * Replace the whole view. The public entry point for a pushed change, and the seam a test drives
+ * instead of standing up an EventSource.
+ */
+function applyBoardView(next) {
+  view = next;
+  // A locked chain outlives an update — the ticket you were tracing is still the one you care about
+  // when a sibling moves — but not the ticket disappearing from the board. Same guard covers the
+  // deep link, whose ticket may have been closed or renumbered since the URL was written.
+  if (locked !== null && !next.cards.some((c) => c.seq === locked)) locked = null;
+  render();
+}
+
+function lockIfPresent(seq) {
+  if (seq === null || seq === undefined || !view) return;
+  if (view.cards.some((c) => c.seq === seq)) locked = seq;
+}
+window.applyBoardView = applyBoardView;
+
+// ───────────────────────────── wires ─────────────────────────────
+
+function drawWires(highlight) {
+  const host = document.getElementById("cols");
+  const svg = document.getElementById("wires");
+  if (!host || !svg) return;
+  const hb = host.getBoundingClientRect();
+  svg.setAttribute("viewBox", "0 0 " + hb.width + " " + hb.height);
+  svg.style.width = hb.width + "px";
+  svg.style.height = hb.height + "px";
+  const box = (seq) => {
+    const el = host.querySelector('.card[data-seq="' + seq + '"]');
+    if (!el) return null;
+    const b = el.getBoundingClientRect();
+    return { l: b.left - hb.left, r: b.right - hb.left, y: b.top - hb.top + 15 };
+  };
+  svg.innerHTML = flatten(view.edges.map((edge) => {
+    const a = box(edge.from);
+    const b = box(edge.to);
+    if (!a || !b) return "";
+    const lit = !highlight
+      || edge.from === highlight.seq || edge.to === highlight.seq
+      || (highlight.set.has(edge.from) && highlight.set.has(edge.to));
+    const opacity = highlight ? (lit ? 0.95 : 0.07) : 0.55;
+    return html`
+      <path d="${wirePath(a, b)}" fill="none" stroke="${edge.color}"
+            stroke-width="${lit ? 2 : 1.25}" opacity="${opacity}"/>
+      <circle cx="${b.l}" cy="${b.y}" r="2.2" fill="${edge.color}" opacity="${opacity}"/>`;
+  }));
+}
+
+/**
+ * Two routes, because the target column is not always to the right of the source's.
+ *
+ * Done work recedes into one column regardless of what it depended on, so an edge between two
+ * finished tickets has to travel backwards. Drawn as the ordinary left-to-right bezier it loops
+ * across both cards, which reads as a connection to whatever it happens to cross. That case leaves
+ * the source's left instead and bows around into the target's left, through the gutter `.cols`
+ * reserves for it.
+ */
+function wirePath(a, b) {
+  if (b.l - a.r > 12) {
+    const mx = (a.r + b.l) / 2;
+    return "M" + a.r + "," + a.y + " C" + mx + "," + a.y + " " + mx + "," + b.y
+      + " " + b.l + "," + b.y;
+  }
+  // Deeper for a longer drop, so two back edges down one column stay distinguishable.
+  const bow = Math.min(30, 14 + Math.abs(b.y - a.y) * 0.2);
+  const around = Math.max(3, Math.min(a.l, b.l) - bow);
+  return "M" + a.l + "," + a.y + " C" + around + "," + a.y + " " + around + "," + b.y
+    + " " + b.l + "," + b.y;
+}
+
+// ───────────────────── hover to trace, click to lock ─────────────────────
+// Locking matters on a long list: without it the chain vanishes the moment the pointer moves
+// toward the scrollbar.
+
+function applyHighlight(seq) {
+  const all = document.querySelectorAll("[data-seq]");
+  if (seq === null || seq === undefined || !view) {
+    document.body.classList.remove("hov", "lock");
+    all.forEach((el) => el.classList.remove("lit", "self"));
+    drawWires(null);
+    return;
+  }
+  const set = new Set(view.chains[String(seq)] || []);
+  document.body.classList.add("hov");
+  document.body.classList.toggle("lock", locked !== null);
+  all.forEach((el) => {
+    const s = Number(el.dataset.seq);
+    el.classList.toggle("lit", set.has(s));
+    el.classList.toggle("self", s === seq);
+  });
+  const card = view.cards.find((c) => c.seq === seq);
+  document.getElementById("hint").textContent =
+    "chain locked on #" + seq + (card ? " — " + card.title : "")
+    + " · " + set.size + " related · Escape or click away to release";
+  drawWires({ seq: seq, set: set });
+}
+
+addEventListener("mouseover", (e) => {
+  if (locked !== null) return;
+  const el = e.target.closest && e.target.closest("[data-seq]");
+  applyHighlight(el ? Number(el.dataset.seq) : null);
+});
+
+addEventListener("click", (e) => {
+  if (e.target && e.target.id === "drawertoggle") {
+    setDrawer(!drawerOpen, { focus: true });
+    return;
+  }
+  const board = e.target.closest && e.target.closest("a[data-board]");
+  // Modified clicks belong to the browser: a middle click or ⌘-click opens the board in its own
+  // tab, which is exactly what running workspaces in parallel wants.
+  if (board && !e.metaKey && !e.ctrlKey && !e.shiftKey && !e.altKey && e.button === 0) {
+    e.preventDefault();
+    switchTo(board.dataset.board);
+    return;
+  }
+  const copy = e.target.closest && e.target.closest(".copy");
+  if (copy) { copyDispatch(copy); return; }
+  const el = e.target.closest && e.target.closest("[data-seq]");
+  if (el) {
+    const seq = Number(el.dataset.seq);
+    locked = locked === seq ? null : seq;
+    applyHighlight(locked);
+  } else if (locked !== null) {
+    locked = null;
+    applyHighlight(null);
+  }
+});
+
+addEventListener("keydown", (e) => {
+  const typing = e.target && (e.target.id === "dfilter" || e.target.tagName === "INPUT");
+  if (e.key === "Escape") {
+    if (typing && filter) { filter = ""; renderDrawer(); document.getElementById("dfilter").focus(); return; }
+    if (typing) { setDrawer(false); return; }
+    if (locked !== null) { locked = null; applyHighlight(null); }
+    return;
+  }
+  // One key to reach for the boards, since the drawer's whole point is that it is usually shut.
+  if (!typing && (e.key === "b" || e.key === "/") && !e.metaKey && !e.ctrlKey && !e.altKey) {
+    e.preventDefault();
+    setDrawer(true, { focus: true });
+  }
+});
+
+addEventListener("input", (e) => {
+  if (!e.target || e.target.id !== "dfilter") return;
+  filter = e.target.value;
+  renderDrawer();
+  const input = document.getElementById("dfilter");
+  input.focus();
+  // Caret to the end: the field is re-rendered on every keystroke, so it must be put back.
+  input.setSelectionRange(filter.length, filter.length);
+});
+
+// Enter takes the top match, which is what a filter is for.
+addEventListener("keypress", (e) => {
+  if (!e.target || e.target.id !== "dfilter" || e.key !== "Enter") return;
+  const first = document.querySelector("#drawer .dlist .board");
+  if (first) switchTo(first.dataset.board);
+});
+
+function copyDispatch(button) {
+  const settle = (label) => {
+    button.textContent = label;
+    button.classList.toggle("done", label === "copied");
+    setTimeout(() => {
+      button.textContent = "copy dispatch";
+      button.classList.remove("done");
+    }, 1400);
+  };
+  // 127.0.0.1 is a secure context, so the clipboard API is always there; it can still refuse when
+  // the page is not focused, and a button that silently did nothing would be the worse failure.
+  Promise.resolve(navigator.clipboard.writeText(button.dataset.dispatch)).then(
+    () => settle("copied"),
+    () => settle("copy failed"),
+  );
+}
+
+// ───────────────────────────── live ─────────────────────────────
+
+/** The open stream, held so switching boards can close it — see `connect`. */
+let stream = null;
+
+function connect() {
+  if (typeof EventSource === "undefined") return;
+  // Closed before the next one opens: a stream left running would keep pushing the old board's
+  // frames into `applyBoardView` and quietly undo the switch.
+  if (stream) stream.close();
+  stream = null;
+  if (DATA.eventsPath === null || (!workspace && !everywhere)) return;
+  const status = document.getElementById("status");
+  const source = new EventSource(
+    workspace ? "/w/" + encodeURIComponent(workspace) + "/events" : "/" + EVERYWHERE + "/events",
+  );
+  stream = source;
+  source.addEventListener("view", (e) => {
+    status.textContent = "";
+    status.classList.remove("off");
+    applyBoardView(JSON.parse(e.data));
+  });
+  // A separate frame name rather than a shape sniff: the two views have nothing in common, and a
+  // page that guessed wrong would paint one surface with the other's data.
+  source.addEventListener(EVERYWHERE, (e) => {
+    status.textContent = "";
+    status.classList.remove("off");
+    everywhere = JSON.parse(e.data);
+    render();
+  });
+  source.addEventListener("open", () => {
+    status.textContent = "";
+    status.classList.remove("off");
+  });
+  // EventSource reconnects on its own; saying so beats a page that has quietly gone stale.
+  source.addEventListener("error", () => {
+    // Only the live stream speaks here. A stale source that errors on its way out would otherwise
+    // report the current board as disconnected.
+    if (stream !== source) return;
+    status.textContent = "reconnecting…";
+    status.classList.add("off");
+  });
+}
+
+// ───────────────────── switching boards ─────────────────────
+// Workspaces run in parallel, so the board you want is often not the board you are on. The switch
+// happens in the page: the tree, the rail and the stream all follow, and the URL follows too, so a
+// board stays linkable and the back button still works.
+
+/**
+ * Show another board. Read-only, like everything else here: it re-reads `/api/w/<ws>` — the same
+ * view the page was served — and never asks the server to change anything.
+ */
+function switchTo(name, options) {
+  const push = !options || options.push !== false;
+  const toEverywhere = name === EVERYWHERE;
+  if (toEverywhere ? everywhere !== null : name === workspace) return;
+  const status = document.getElementById("status");
+  status.textContent = "loading " + name + "…";
+  status.classList.remove("off");
+  const path = toEverywhere ? "/" + EVERYWHERE : "/w/" + encodeURIComponent(name);
+  fetch("/api" + path)
+    .then((r) => (r.ok ? r.json() : Promise.reject(new Error(String(r.status)))))
+    .then((next) => {
+      // The lock belongs to the board that was on screen; carrying a sequence number across boards
+      // would trace whichever unrelated ticket happens to share the number.
+      locked = null;
+      workspace = toEverywhere ? null : name;
+      view = toEverywhere ? null : next;
+      everywhere = toEverywhere ? next : null;
+      status.textContent = "";
+      if (push) history.pushState({ board: name }, "", path);
+      render();
+      renderDrawer();
+      connect();
+    })
+    .catch(() => {
+      status.textContent = "could not load " + name;
+      status.classList.add("off");
+    });
+}
+
+/** What a URL selects: a board's name, `EVERYWHERE`, or null for the picker at `/`. */
+function boardOfPath(pathname) {
+  const parts = pathname.split("/").filter(Boolean).map(decodeURIComponent);
+  if (parts[0] === EVERYWHERE) return EVERYWHERE;
+  return parts[0] === "w" && parts[1] ? parts[1] : null;
+}
+
+addEventListener("popstate", () => {
+  const name = boardOfPath(location.pathname);
+  // Back out of every board and the picker is a real page, not a state this one can paint.
+  if (name === null) location.reload();
+  else switchTo(name, { push: false });
+});
+
+addEventListener("resize", () => { if (view) applyHighlight(locked); });
+
+lockIfPresent(DATA.focus);
+renderDrawer();
+render();
+connect();
+</script>
+</body>
+</html>

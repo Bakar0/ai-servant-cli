@@ -141,6 +141,20 @@ function readEdges(): EdgeIndex {
   return { blockedBy, blocks };
 }
 
+/**
+ * A counter SQLite bumps whenever **another connection** commits — the cheapest honest answer to
+ * "has anything changed?".
+ *
+ * The viewer polls this instead of watching the file. Watching was tried first and does not work:
+ * a WAL commit appends to `board.sqlite-wal` and may never touch `board.sqlite`, and macOS reports
+ * nothing at all for a plain append, so a filesystem watch misses most writes. This misses nothing
+ * a different process committed, and it deliberately does not move for the caller's own writes.
+ */
+export function boardDataVersion(): number {
+  const row = openBoard().query<{ data_version: number }, []>("PRAGMA data_version").get();
+  return row?.data_version ?? 0;
+}
+
 /** Board ids by workspace name. A workspace *is* a board (ADR-0011 decision 5). */
 export function listBoards(): string[] {
   return openBoard()

@@ -1,5 +1,6 @@
 #!/usr/bin/env bun
 import { defineCommand, runMain } from "citty";
+import { boardCommand } from "./commands/board.ts";
 import { callLogCommand } from "./commands/call-log.ts";
 import { claimCommand } from "./commands/claim.ts";
 import { extractMemoriesCommand } from "./commands/extract-memories.ts";
@@ -38,6 +39,7 @@ const main = defineCommand({
     memories: memoriesCommand,
     tasks: tasksCommand,
     ticket: ticketCommand,
+    board: boardCommand,
     claim: claimCommand,
     "import-hub": importHubCommand,
     insights: insightsCommand,
