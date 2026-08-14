@@ -113,7 +113,8 @@ export interface MapView {
   seq: number;
   title: string;
   destination: string;
-  outOfScope: string;
+  /** Kept as written — a list stays a list, so the page can lay it out as one. */
+  outOfScope: string[];
   /** "Not yet specified" — the edge of the map, rendered as fog. */
   fog: string[];
   decisions: string[];
@@ -251,18 +252,26 @@ function prose(section: string | undefined): string {
   return contentLines(section).join(" ");
 }
 
+/**
+ * A section written either way. These sections are prose a human edits, so the same heading holds a
+ * list on one map and a paragraph on the next; joining a list into one paragraph loses the only
+ * structure the page has to lay it out with.
+ */
+function bulletsOrProse(section: string | undefined): string[] {
+  const listed = bullets(section);
+  if (listed.length > 0) return listed;
+  const paragraph = prose(section);
+  return paragraph ? [paragraph] : [];
+}
+
 function toMapView(ticket: Ticket): MapView {
   const sections = splitSections(ticket.body);
-  const fogSection = sections.get("not yet specified");
-  const fogBullets = bullets(fogSection);
   return {
     seq: ticket.seq,
     title: ticket.title,
     destination: prose(sections.get("destination")),
-    outOfScope: prose(sections.get("out of scope")),
-    // A fog patch is coarser than a ticket, so it is written as prose as often as as a list; falling
-    // back to the paragraph keeps the edge of the map visible either way.
-    fog: fogBullets.length > 0 ? fogBullets : prose(fogSection) ? [prose(fogSection)] : [],
+    outOfScope: bulletsOrProse(sections.get("out of scope")),
+    fog: bulletsOrProse(sections.get("not yet specified")),
     decisions: bullets(sections.get("decisions so far")),
     url: ticket.url,
   };

@@ -34,9 +34,18 @@
          padding:16px 20px;margin-bottom:20px}
   .frame .kick{font-size:11px;letter-spacing:.09em;text-transform:uppercase;color:var(--faint)}
   .frame h1{margin:4px 0 8px;font-size:19px;font-weight:600}
-  .frame .dest{max-width:80ch;color:var(--dim)}
+  /* A map's prose is written to be read in the ticket, not sized to a header: one real Out of
+     scope section runs to 5,600 characters. Both blocks are capped so the frame stays a frame and
+     the first column of tickets stays above the fold, however much a map has to say. */
+  .frame .dest{max-width:80ch;color:var(--dim);max-height:8.4em;overflow:auto}
   .frame .oos{margin-top:11px;padding-top:11px;border-top:1px solid var(--line);
               color:var(--faint);font-size:12.5px}
+  .frame .oos summary{cursor:pointer}
+  .frame .oos ul{margin:9px 0 0;padding-left:18px;max-width:100ch;
+                 max-height:18em;overflow:auto}
+  .frame .oos li{margin-bottom:7px;line-height:1.45}
+  code{background:var(--panel2);border-radius:4px;padding:1px 4px;font-size:.92em}
+  .frame b,.fogbox b,details.dec b{color:var(--dim);font-weight:600}
 
   .card{background:var(--panel2);border:1px solid var(--line);border-left-width:3px;
         border-left-color:var(--line);border-radius:7px;padding:8px 10px;position:relative;
@@ -82,14 +91,11 @@
         padding-left:34px}
   .col{flex:0 0 272px;min-width:0}
   /* macOS hides an overlay scrollbar until you scroll, which hides the fact that there is more to
-     see. These are always drawn. */
-  .treescroll::-webkit-scrollbar,.rail::-webkit-scrollbar{height:10px;width:10px}
-  .treescroll::-webkit-scrollbar-track,.rail::-webkit-scrollbar-track{background:var(--bg);
-        border-radius:6px}
-  .treescroll::-webkit-scrollbar-thumb,.rail::-webkit-scrollbar-thumb{background:var(--line);
-        border-radius:6px}
-  .treescroll::-webkit-scrollbar-thumb:hover,.rail::-webkit-scrollbar-thumb:hover{
-        background:var(--fog)}
+     see. Anything that scrolls its own content carries `scrolls`, and those are always drawn. */
+  .scrolls::-webkit-scrollbar{height:10px;width:10px}
+  .scrolls::-webkit-scrollbar-track{background:var(--bg);border-radius:6px}
+  .scrolls::-webkit-scrollbar-thumb{background:var(--line);border-radius:6px}
+  .scrolls::-webkit-scrollbar-thumb:hover{background:var(--fog)}
   .col>h3{font-size:10.5px;letter-spacing:.09em;text-transform:uppercase;color:var(--faint);
           margin:0 0 9px;font-weight:600}
   .col>h3 b{color:var(--fog);font-weight:600}
@@ -201,6 +207,24 @@ function flatten(value) {
   return esc(value);
 }
 
+/**
+ * The map's prose is Markdown, because it is written to be read in the ticket as well as here. The
+ * page renders the inline part of it — code, bold, italic — and nothing else: no links, no headings,
+ * no HTML passed through. Escaping runs *first*, so the tags this adds are the only tags that can
+ * reach the page, and a map that contains markup still renders as text.
+ *
+ * Without this the section reads as its own source: `- **A capability** — the right fix…`.
+ */
+function inlineMd(text) {
+  return { __html: esc(text)
+    .replace(/``(.+?)``/g, "<code>$1</code>")
+    .replace(/`([^`]+)`/g, "<code>$1</code>")
+    // Bold before italic, and lazily: a bold run routinely contains an italic one, which a
+    // `[^*]+` body would refuse to match and leave on the page as its own asterisks.
+    .replace(/\*\*([\s\S]+?)\*\*/g, "<b>$1</b>")
+    .replace(/(^|[\s(])\*([^*\s][^*]*)\*/g, "$1<i>$2</i>") };
+}
+
 const cardsBySeq = () => new Map((view ? view.cards : []).map((c) => [c.seq, c]));
 
 // ───────────────────────────── fragments ─────────────────────────────
@@ -253,9 +277,14 @@ function frameHtml() {
     <div class="frame">
       <div class="kick">Destination</div>
       <h1>${map.title}</h1>
-      <div class="dest">${map.destination}</div>
-      ${map.outOfScope &&
-        html`<div class="oos"><b style="font-weight:600">Out of scope</b> — ${map.outOfScope}</div>`}
+      <div class="dest scrolls">${inlineMd(map.destination)}</div>
+      ${map.outOfScope.length > 0 &&
+        html`
+          <details class="oos">
+            <summary><b>Out of scope</b> — ${map.outOfScope.length} ${
+              map.outOfScope.length === 1 ? "note" : "exclusions"}</summary>
+            <ul class="scrolls">${map.outOfScope.map((o) => html`<li>${inlineMd(o)}</li>`)}</ul>
+          </details>`}
     </div>`;
 }
 
@@ -266,7 +295,7 @@ function fogHtml() {
     <div class="fogbox">
       <h3>Not yet specified</h3>
       <p>the edge of the map</p>
-      <ul>${fog.map((q) => html`<li>${q}</li>`)}</ul>
+      <ul>${fog.map((q) => html`<li>${inlineMd(q)}</li>`)}</ul>
     </div>`;
 }
 
@@ -276,7 +305,7 @@ function decisionsHtml() {
   return html`
     <details class="dec">
       <summary>Decisions so far — ${decisions.length} settled</summary>
-      <ol>${decisions.map((d) => html`<li>${d}</li>`)}</ol>
+      <ol>${decisions.map((d) => html`<li>${inlineMd(d)}</li>`)}</ol>
     </details>`;
 }
 
@@ -296,7 +325,7 @@ function treeHtml() {
 function railHtml() {
   const bySeq = cardsBySeq();
   return html`
-    <div class="rail">
+    <div class="rail scrolls">
       <h2 class="sec">Board</h2>
       <div class="barline">
         ${view.columns.map((col) => col.seqs.length === 0 ? "" :
@@ -358,7 +387,7 @@ function render() {
           <b style="color:var(--dim)">left</b> as their blockers close ·
           <b style="color:var(--dim)">Now</b> is the frontier</div>
         ${legendHtml()}
-        <div class="treescroll">
+        <div class="treescroll scrolls">
           <div class="cols" id="cols">
             <svg class="wires" id="wires"></svg>
             ${treeHtml()}

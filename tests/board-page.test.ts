@@ -217,6 +217,46 @@ describe("the page", () => {
     expect(cardEl(done.seq).querySelector(".copy")).toBeNull();
   });
 
+  // A real map's Out of scope section runs to 5,600 characters of Markdown bullets. Flattened into
+  // one paragraph it filled the screen and pushed the first column of tickets below the fold, so it
+  // stays a list, and one that is folded away until asked for.
+  test("folds a long out-of-scope section away, as a list rather than a wall", async () => {
+    file("Charted", {
+      labels: ["wayfinder:map"],
+      body: "## Out of scope\n\n- **Auth** — single user.\n- Remote access.\n- Streaming.\n",
+    });
+
+    await mount({ view: view() });
+
+    const oos = $(".frame .oos") as PageElement;
+    expect(oos.tagName.toLowerCase()).toBe("details");
+    expect(oos.hasAttribute("open")).toBe(false);
+    expect(oos.querySelector("summary")?.textContent).toBe("Out of scope — 3 exclusions");
+    expect([...oos.querySelectorAll("li")].map((li) => li.textContent)).toEqual([
+      "Auth — single user.",
+      "Remote access.",
+      "Streaming.",
+    ]);
+  });
+
+  test("renders the map's inline Markdown instead of showing its syntax", async () => {
+    file("Charted", {
+      labels: ["wayfinder:map"],
+      body: '## Destination\n\n**Bold** and `code` and *emphasis*, but <b>not</b> "markup".\n',
+    });
+
+    await mount({ view: view() });
+
+    const dest = $(".frame .dest") as PageElement;
+    expect(dest.querySelector("b")?.textContent).toBe("Bold");
+    expect(dest.querySelector("code")?.textContent).toBe("code");
+    expect(dest.querySelector("i")?.textContent).toBe("emphasis");
+    // The map's own `<b>` is text: escaping runs before the Markdown, so the only tags on the page
+    // are the ones the renderer put there.
+    expect(dest.querySelectorAll("b")).toHaveLength(1);
+    expect(dest.textContent).toContain('<b>not</b> "markup"');
+  });
+
   test("escapes a ticket title rather than letting it become markup", async () => {
     const nasty = file('<img src=x onerror="boom"> & "quoted"');
     await mount({ view: view() });

@@ -444,10 +444,22 @@ Live agent-activity streaming · forking agent-kanban · auth and remote access
     const map = view().map;
     expect(map?.title).toBe("Replace the GitHub tracker with a local board");
     expect(map?.destination).toBe("One board that servant owns end to end.");
-    expect(map?.outOfScope).toContain("forking agent-kanban");
+    expect(map?.outOfScope).toEqual([
+      "Live agent-activity streaming · forking agent-kanban · auth and remote access",
+    ]);
     expect(map?.fog).toHaveLength(2);
     expect(map?.fog[0]).toContain("dispatch command");
     expect(map?.decisions).toHaveLength(2);
+  });
+
+  // The section a real map writes as a list, which is the case that pushed the tickets off the
+  // first screen when it was flattened into one paragraph.
+  test("keeps an out-of-scope list a list, rather than joining it into a paragraph", () => {
+    file("map", {
+      labels: ["wayfinder:map"],
+      body: "## Out of scope\n\n- **Auth** — single user.\n- Remote access.\n",
+    });
+    expect(view().map?.outOfScope).toEqual(["**Auth** — single user.", "Remote access."]);
   });
 
   test("keeps the fog visible when it was written as a paragraph rather than a list", () => {
