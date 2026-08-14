@@ -21,6 +21,7 @@
     --ink:#e6e8f0; --dim:#9096ab; --faint:#5c6278; --fog:#3a3f52;
     --c-blocked:#b05c5c; --c-ready:#5f8dd6; --c-in_progress:#d9a047;
     --c-in_review:#a878d8; --c-done:#4ba3a0;
+    --panel-w:min(640px,100vw);
   }
   *{box-sizing:border-box}
   body{margin:0;background:var(--bg);color:var(--ink);
@@ -125,6 +126,10 @@
         background:#20233a;border:1px solid #3b4170;color:#c8cdf5;border-radius:999px;
         padding:5px 14px;font-size:11.5px;box-shadow:0 4px 18px #0008;white-space:nowrap}
   body.lock #hint{display:block}
+  /* The panel names the focused ticket and carries its own way out, so the hint would be the same
+     thing said twice — and it sits exactly where the panel does. */
+  body.panel #hint{display:none}
+  body.panel #status{right:calc(var(--panel-w) + 16px)}
 
   /* The tree scrolls rather than squeezes. A depth column is a fixed width and never shrinks:
      letting flex divide the space meant a seventh column reduced every card to an unreadable
@@ -196,6 +201,65 @@
           font-size:11px;color:var(--faint)}
   .legend b{display:inline-block;width:16px;height:2px;vertical-align:middle;margin-right:5px}
 
+  /* Over the rail rather than beside it: the tree stays where it was, still tracing the chain, so
+     a ticket is read while its dependents are in view. Fixed and scrolling its own content, so the
+     longest body on the real board — 49,016 characters — never makes the board itself any taller. */
+  #panel{position:fixed;right:0;top:0;bottom:0;width:var(--panel-w);z-index:70;display:none;
+         background:var(--panel);border-left:1px solid var(--line);box-shadow:-16px 0 44px #0008;
+         overflow-y:auto;padding:0 22px 44px}
+  body.panel #panel{display:block}
+  /* Sticky, so #seq and the way out stay reachable at the bottom of a 49,000-character body. */
+  #panel .phead{display:flex;gap:8px;align-items:center;flex-wrap:wrap;
+                position:sticky;top:0;background:var(--panel);padding:14px 0 11px;
+                border-bottom:1px solid var(--line);z-index:1}
+  #panel .pseq{color:var(--faint);font-variant-numeric:tabular-nums;font-size:12px}
+  #panel .pclose{margin-left:auto;border:1px solid var(--line);background:transparent;
+                 color:var(--dim);font:inherit;font-size:12px;line-height:1;padding:4px 9px;
+                 border-radius:999px;cursor:pointer}
+  #panel .pclose:hover{color:var(--ink);border-color:var(--fog)}
+  #panel h1{margin:14px 0 10px;font-size:18px;font-weight:600;line-height:1.35}
+  #panel .plabels{display:flex;gap:5px;flex-wrap:wrap;margin-bottom:4px}
+  #panel .perr{color:var(--c-blocked);font-size:12.5px}
+  #panel .ploading,#panel .pempty{color:var(--faint);font-size:12.5px}
+  #panel .pgrp{margin-top:18px;padding-top:14px;border-top:1px solid var(--line)}
+  #panel .pgrp>h4{margin:0 0 7px;font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;
+                  color:var(--faint);font-weight:600}
+  #panel .plink{display:flex;gap:8px;align-items:baseline;padding:4px 6px;border-radius:5px;
+                font-size:12px;text-decoration:none;color:var(--ink)}
+  #panel .plink:hover{background:var(--panel2)}
+  #panel .plink .seq{color:var(--faint);font-variant-numeric:tabular-nums;flex:none}
+  #panel .plink.done .t{color:var(--dim);text-decoration:line-through;
+                        text-decoration-color:var(--faint)}
+  /* Direct child only: the body is a section like the edge lists and the comments are, but a
+     comment's own rendered Markdown is inside one and must not draw a second rule. */
+  #panel>.md{margin-top:18px;padding-top:14px;border-top:1px solid var(--line)}
+  #panel .pcomment{border-left:2px solid var(--line);padding-left:11px;margin-bottom:14px}
+  #panel .pwho{font-size:10.5px;color:var(--faint);margin-bottom:2px}
+
+  /* Rendered Markdown — see blockMd. Every rule here is a block the renderer can emit, and only
+     those: nothing else can reach the page, because escaping runs before either renderer. */
+  .md{font-size:13px;line-height:1.6;color:var(--dim);overflow-wrap:anywhere}
+  .md>*:first-child{margin-top:0}
+  .md h3,.md h4,.md h5,.md h6{color:var(--ink);margin:18px 0 7px;line-height:1.35}
+  .md h3{font-size:14.5px} .md h4{font-size:13px} .md h5,.md h6{font-size:12.5px}
+  .md p{margin:0 0 10px}
+  .md ul,.md ol{margin:0 0 10px;padding-left:20px}
+  .md li{margin-bottom:5px}
+  .md li::marker{color:var(--fog)}
+  .md blockquote{margin:0 0 10px;padding-left:11px;border-left:2px solid var(--line);
+                 color:var(--faint)}
+  .md pre{background:var(--bg);border:1px solid var(--line);border-radius:7px;padding:9px 11px;
+          margin:0 0 10px;overflow-x:auto}
+  .md pre code{background:none;padding:0;font-size:11.5px;line-height:1.5}
+  .md hr{border:none;border-top:1px solid var(--line);margin:16px 0}
+  .md b{color:var(--ink);font-weight:600}
+  /* A table is the one block that has no width of its own to fall back on, so it scrolls in its
+     own box rather than forcing the panel — and the page behind it — sideways. */
+  .md .tablewrap{overflow-x:auto;margin:0 0 10px;padding-bottom:4px}
+  .md table{border-collapse:collapse;font-size:12px}
+  .md th,.md td{border:1px solid var(--line);padding:5px 8px;text-align:left;vertical-align:top}
+  .md th{color:var(--ink);font-weight:600;background:var(--panel2)}
+
   .picker{max-width:60ch}
   .picker li{margin-bottom:7px}
   #status{position:fixed;right:16px;top:14px;font-size:11px;color:var(--faint);z-index:99}
@@ -214,6 +278,9 @@
      lose the filter text and the focus mid-keystroke every time a card moved. -->
 <aside id="drawer"></aside>
 <button id="drawertoggle" type="button" title="Boards (b)"></button>
+<!-- Outside #app for the same reason as the drawer: a view push rebuilds the board, and a panel
+     inside it would close itself, and lose its scroll position, every time a card moved. -->
+<aside id="panel"></aside>
 <div class="wrap" id="app"></div>
 <div id="hint"></div>
 <div id="status"></div>
@@ -294,6 +361,123 @@ function inlineMd(text) {
     // `[^*]+` body would refuse to match and leave on the page as its own asterisks.
     .replace(/\*\*([\s\S]+?)\*\*/g, "<b>$1</b>")
     .replace(/(^|[\s(])\*([^*\s][^*]*)\*/g, "$1<i>$2</i>") };
+}
+
+/**
+ * The block half of the same deal. A ticket body is a whole document — the map's prose was a line
+ * at a time — so it needs headings, lists, fenced code and paragraphs, or it reads as its own
+ * source: a wall of `##` and `-` with no shape.
+ *
+ * Escaping still runs first, inside `inlineMd`, and the tags emitted here come from this function's
+ * own literals rather than from the text. So a body containing `<script>` or `<b>` renders as the
+ * characters a reader typed, and there is no path by which a ticket body becomes markup (ADR-0012).
+ *
+ * Deliberately not a Markdown implementation: no links, no images, no nesting. Those would each be
+ * a rule to get subtly wrong, and none of them is what makes a body unreadable.
+ */
+function blockMd(text) {
+  const lines = String(text === null || text === undefined ? "" : text).split(/\r?\n/);
+  const out = [];
+  let para = [];
+  let list = null;
+  let quote = [];
+  let code = null;
+  let table = null;
+
+  const flushPara = () => {
+    if (para.length === 0) return;
+    out.push(html`<p>${inlineMd(para.join("\n"))}</p>`);
+    para = [];
+  };
+  const flushList = () => {
+    if (list === null) return;
+    const items = list.items.map((item) => html`<li>${inlineMd(item)}</li>`);
+    out.push(list.ordered ? html`<ol>${items}</ol>` : html`<ul>${items}</ul>`);
+    list = null;
+  };
+  const flushQuote = () => {
+    if (quote.length === 0) return;
+    out.push(html`<blockquote>${inlineMd(quote.join("\n"))}</blockquote>`);
+    quote = [];
+  };
+  /**
+   * A pipe table. Real bodies use them for exactly what a table is for — a requirement against what
+   * it now means — and as a run of paragraphs they are the least readable thing on the page.
+   * The alignment row is a separator, not data: its presence is what makes the first row a header.
+   */
+  const flushTable = () => {
+    if (table === null) return;
+    const isRule = (row) => /^[\s|:-]+$/.test(row) && row.includes("-");
+    const cells = (row) => row.split("|").map((c) => c.trim());
+    const headed = table.length > 1 && isRule(table[1]);
+    const head = headed
+      ? html`<thead><tr>${cells(table[0]).map((c) => html`<th>${inlineMd(c)}</th>`)}</tr></thead>`
+      : "";
+    const rows = table
+      .filter((row, i) => !isRule(row) && !(headed && i === 0))
+      .map((row) => html`<tr>${cells(row).map((c) => html`<td>${inlineMd(c)}</td>`)}</tr>`);
+    // No whitespace inside <table>: the parser fosters a stray text node out of the element.
+    out.push(html`<div class="tablewrap scrolls"><table>${head}<tbody>${rows}</tbody></table></div>`);
+    table = null;
+  };
+  const flushText = () => { flushPara(); flushList(); flushQuote(); };
+  const flush = () => { flushText(); flushTable(); };
+
+  for (const line of lines) {
+    // Inside a fence nothing is Markdown, not even the blank line that ends every other block.
+    if (code !== null) {
+      if (/^\s*```/.test(line)) {
+        out.push(html`<pre class="scrolls"><code>${code.join("\n")}</code></pre>`);
+        code = null;
+      } else code.push(line);
+      continue;
+    }
+    if (/^\s*```/.test(line)) { flush(); code = []; continue; }
+
+    const row = /^\s*\|(.*)\|\s*$/.exec(line);
+    if (row) { flushText(); (table = table || []).push(row[1]); continue; }
+    flushTable();
+
+    if (line.trim() === "") { flush(); continue; }
+    if (/^\s*(-{3,}|\*{3,}|_{3,})\s*$/.test(line)) { flush(); out.push(html`<hr>`); continue; }
+
+    const heading = /^(#{1,6})\s+(.*)$/.exec(line);
+    if (heading) { flush(); out.push(headingHtml(heading[1].length, heading[2])); continue; }
+
+    const quoted = /^\s*>\s?(.*)$/.exec(line);
+    if (quoted) { flushPara(); flushList(); quote.push(quoted[1]); continue; }
+
+    const bullet = /^\s*[-*+]\s+(.*)$/.exec(line);
+    const numbered = /^\s*\d+[.)]\s+(.*)$/.exec(line);
+    if (bullet || numbered) {
+      flushPara();
+      flushQuote();
+      const ordered = bullet === null;
+      if (list === null || list.ordered !== ordered) { flushList(); list = { ordered, items: [] }; }
+      list.items.push((bullet || numbered)[1]);
+      continue;
+    }
+    // A line under an open list is that item wrapping, not a paragraph of its own.
+    if (list !== null) { list.items[list.items.length - 1] += "\n" + line.trim(); continue; }
+    if (quote.length > 0) { quote.push(line.trim()); continue; }
+    para.push(line);
+  }
+  if (code !== null) out.push(html`<pre class="scrolls"><code>${code.join("\n")}</code></pre>`);
+  flush();
+  return out;
+}
+
+/**
+ * A body's headings start at h3 — the panel's own `<h1>` is the ticket's title, and a body that
+ * opened with an h1 of its own would outrank it. Written as four branches rather than one
+ * interpolated tag name so every tag this can emit is visible in the source.
+ */
+function headingHtml(level, text) {
+  const inner = inlineMd(text);
+  if (level <= 1) return html`<h3>${inner}</h3>`;
+  if (level === 2) return html`<h4>${inner}</h4>`;
+  if (level === 3) return html`<h5>${inner}</h5>`;
+  return html`<h6>${inner}</h6>`;
 }
 
 const cardsBySeq = () => new Map((view ? view.cards : []).map((c) => [c.seq, c]));
@@ -444,6 +628,151 @@ function setDrawer(open, options) {
  * unrelated initiatives would order tickets that have no relationship to order. What does mean the
  * same thing everywhere is whether a ticket can be picked up, so that is all this claims.
  */
+// ───────────────────────────── the detail panel ─────────────────────────────
+// A card carries 14 fields and a body is not one of them, on purpose: the whole board payload is
+// 3.6 KB, and that is what makes an SSE push a cheap full re-render. So the panel fetches the one
+// ticket it is showing, and only when someone opens it.
+
+/** The ticket the panel is showing, what arrived for it, and why nothing did. */
+let panelSeq = null;
+let panelTicket = null;
+let panelError = null;
+/** The last answer, so a re-read that changed nothing does not rebuild the panel. */
+let panelRaw = "";
+
+function panelHtml() {
+  const t = panelTicket;
+  const card = view ? view.cards.find((c) => c.seq === panelSeq) : null;
+  // The card already says the title and the kind, so the panel opens with them rather than blank
+  // while the body is in flight.
+  const type = t ? t.type : card ? card.type : "task";
+  const title = t ? t.title : card ? card.title : "";
+  const claim = t ? t.claim : null;
+  // What the lock hint used to say. It moves in here because the panel stands where the hint did.
+  const related = view && locked !== null ? (view.chains[String(locked)] || []).length : 0;
+  return html`
+    <div class="phead">
+      <span class="glyph" title="${type}">${GLYPH[type] || GLYPH.task}</span>
+      <span class="pseq">#${panelSeq}</span>
+      ${related > 0 ? html`<span class="pseq">${related} in its chain</span>` : ""}
+      ${t && html`<span class="chip ${t.column}">${labelOf(t.column)}</span>`}
+      ${claim &&
+        html`<span class="chip claim ${claim.state}">${claim.session}${
+          claim.age ? " · " + claim.age : ""}${claim.state === "gone" ? " · gone" : ""}</span>`}
+      <button class="pclose" type="button" title="Close (Escape)">✕ close</button>
+    </div>
+    <h1>${title}</h1>
+    ${t && t.labels.length > 0 &&
+      html`<div class="plabels">${t.labels.map((l) => html`<span class="chip plain">${l}</span>`)}</div>`}
+    ${panelError && html`<p class="perr">${panelError}</p>`}
+    ${!t && !panelError && html`<p class="ploading">reading #${panelSeq}…</p>`}
+    ${t && edgesHtml(t)}
+    ${t && html`<div class="md">${t.body.trim() ? blockMd(t.body) : html`<p class="pempty">No body.</p>`}</div>`}
+    ${t && commentsHtml(t)}`;
+}
+
+function edgesHtml(t) {
+  const group = (label, links) =>
+    links.length === 0
+      ? ""
+      : html`
+          <div class="pgrp">
+            <h4>${label}</h4>
+            ${links.map((l) => html`
+              <a class="plink${l.status === "done" ? " done" : ""}" href="${l.url}"
+                 ${l.onBoard ? html`data-goto="${l.seq}"` : ""}>
+                <span class="seq">${l.onBoard ? l.seq : l.label}</span>
+                <span class="t">${l.title}</span>
+              </a>`)}
+          </div>`;
+  return html`${group("Blocked by", t.blockedBy)}${group("Blocks", t.blocks)}`;
+}
+
+function commentsHtml(t) {
+  if (t.comments.length === 0) return "";
+  return html`
+    <div class="pgrp">
+      <h4>${t.comments.length} ${t.comments.length === 1 ? "comment" : "comments"}</h4>
+      ${t.comments.map((c) => html`
+        <div class="pcomment">
+          <div class="pwho">${c.session || c.actor} · ${ago(c.at)}</div>
+          <div class="md">${blockMd(c.body)}</div>
+        </div>`)}
+    </div>`;
+}
+
+function renderPanel() {
+  const panel = document.getElementById("panel");
+  if (!panel) return;
+  document.body.classList.toggle("panel", panelSeq !== null);
+  // Rebuilding is what costs the reader their place in a 49,000-character body, so the scroll is
+  // put back. Being outside #app keeps a board push from touching the panel at all; this covers the
+  // one push that does — a re-read of the ticket the panel is showing.
+  const at = panel.scrollTop;
+  panel.innerHTML = panelSeq === null ? "" : panelHtml().__html;
+  panel.scrollTop = at;
+}
+
+/** Read one ticket. Read-only, like the board itself — a GET and nothing else. */
+function loadTicket(seq) {
+  if (!workspace) return;
+  const asked = seq;
+  fetch("/api/w/" + encodeURIComponent(workspace) + "/t/" + seq)
+    .then((r) => (r.ok ? r.json() : Promise.reject(new Error(String(r.status)))))
+    .then((detail) => {
+      // The reader moved on while this was in flight; the answer is to a question nobody is asking.
+      if (panelSeq !== asked) return;
+      // A board push re-reads the open ticket, and most pushes are about some other card. Comparing
+      // the answer rather than re-rendering unconditionally keeps a selection, and a scroll, from
+      // being thrown away by a change that was not to this ticket.
+      const raw = JSON.stringify(detail);
+      if (raw === panelRaw) return;
+      panelRaw = raw;
+      panelTicket = detail;
+      panelError = null;
+      renderPanel();
+    })
+    .catch(() => {
+      if (panelSeq !== asked) return;
+      panelRaw = "";
+      panelTicket = null;
+      panelError = "could not read #" + asked;
+      renderPanel();
+    });
+}
+
+/**
+ * The focused ticket. The traced chain and the open panel are one state because they answer one
+ * question — which ticket you are looking at — so Escape, a click away, the deep link and the back
+ * button all move the same thing. Null clears both.
+ */
+function setFocus(seq, options) {
+  const push = !options || options.push !== false;
+  const next = seq === null || seq === undefined ? null : Number(seq);
+  panelSeq = next;
+  panelTicket = null;
+  panelError = null;
+  panelRaw = "";
+  locked = next !== null && view && view.cards.some((c) => c.seq === next) ? next : null;
+  if (push) pushFocus(next);
+  renderPanel();
+  applyHighlight(locked);
+  if (next !== null) loadTicket(next);
+}
+
+/** The URL the focus is at, so a panel is linkable and the back button closes it. */
+function focusPath(seq) {
+  if (!workspace) return null;
+  const board = "/w/" + encodeURIComponent(workspace);
+  return seq === null ? board : board + "/t/" + seq;
+}
+
+function pushFocus(seq) {
+  const path = focusPath(seq);
+  if (path === null || path === location.pathname) return;
+  history.pushState({ board: workspace, ticket: seq }, "", path);
+}
+
 function everywhereHtml() {
   const data = everywhere;
   const total = data.ready + data.reclaimable;
@@ -649,11 +978,9 @@ function applyBoardView(next) {
   // deep link, whose ticket may have been closed or renumbered since the URL was written.
   if (locked !== null && !next.cards.some((c) => c.seq === locked)) locked = null;
   render();
-}
-
-function lockIfPresent(seq) {
-  if (seq === null || seq === undefined || !view) return;
-  if (view.cards.some((c) => c.seq === seq)) locked = seq;
+  // The panel is outside #app, so the push cannot close it — but what it is showing may have just
+  // changed, and a panel that quietly disagreed with the card behind it would be worse than stale.
+  if (panelSeq !== null) loadTicket(panelSeq);
 }
 window.applyBoardView = applyBoardView;
 
@@ -758,14 +1085,24 @@ addEventListener("click", (e) => {
   }
   const copy = e.target.closest && e.target.closest(".copy");
   if (copy) { copyDispatch(copy); return; }
+  // A click inside the panel is never a click away — that is the whole point of a panel you can
+  // select text in. Only its own close button and its own links do anything.
+  const panel = e.target.closest && e.target.closest("#panel");
+  if (panel) {
+    if (e.target.closest(".pclose")) { setFocus(null); return; }
+    const jump = e.target.closest("[data-goto]");
+    if (jump && !e.metaKey && !e.ctrlKey && !e.shiftKey && !e.altKey && e.button === 0) {
+      e.preventDefault();
+      setFocus(Number(jump.dataset.goto));
+    }
+    return;
+  }
   const el = e.target.closest && e.target.closest("[data-seq]");
   if (el) {
     const seq = Number(el.dataset.seq);
-    locked = locked === seq ? null : seq;
-    applyHighlight(locked);
-  } else if (locked !== null) {
-    locked = null;
-    applyHighlight(null);
+    setFocus(panelSeq === seq ? null : seq);
+  } else if (panelSeq !== null || locked !== null) {
+    setFocus(null);
   }
 });
 
@@ -774,7 +1111,7 @@ addEventListener("keydown", (e) => {
   if (e.key === "Escape") {
     if (typing && filter) { filter = ""; renderDrawer(); document.getElementById("dfilter").focus(); return; }
     if (typing) { setDrawer(false); return; }
-    if (locked !== null) { locked = null; applyHighlight(null); }
+    if (panelSeq !== null || locked !== null) setFocus(null);
     return;
   }
   // One key to reach for the boards, since the drawer's whole point is that it is usually shut.
@@ -882,9 +1219,14 @@ function switchTo(name, options) {
   fetch("/api" + path)
     .then((r) => (r.ok ? r.json() : Promise.reject(new Error(String(r.status)))))
     .then((next) => {
-      // The lock belongs to the board that was on screen; carrying a sequence number across boards
-      // would trace whichever unrelated ticket happens to share the number.
+      // The focus belongs to the board that was on screen; carrying a sequence number across boards
+      // would trace and open whichever unrelated ticket happens to share the number.
       locked = null;
+      panelSeq = null;
+      panelTicket = null;
+      panelError = null;
+      panelRaw = "";
+      renderPanel();
       workspace = toEverywhere ? null : name;
       view = toEverywhere ? null : next;
       everywhere = toEverywhere ? next : null;
@@ -907,18 +1249,34 @@ function boardOfPath(pathname) {
   return parts[0] === "w" && parts[1] ? parts[1] : null;
 }
 
+/** The ticket a `/w/<ws>/t/<seq>` URL names, or null for the board itself. */
+function ticketOfPath(pathname) {
+  const parts = pathname.split("/").filter(Boolean).map(decodeURIComponent);
+  if (parts[0] !== "w" || parts[2] !== "t" || parts[3] === undefined) return null;
+  const seq = Number(parts[3]);
+  return Number.isInteger(seq) && seq > 0 ? seq : null;
+}
+
 addEventListener("popstate", () => {
   const name = boardOfPath(location.pathname);
   // Back out of every board and the picker is a real page, not a state this one can paint.
-  if (name === null) location.reload();
-  else switchTo(name, { push: false });
+  if (name === null) { location.reload(); return; }
+  // Same board, different ticket: only the focus moved, so switching the whole board would refetch
+  // a view the page already has.
+  if (name !== EVERYWHERE && name === workspace) {
+    setFocus(ticketOfPath(location.pathname), { push: false });
+    return;
+  }
+  switchTo(name, { push: false });
 });
 
 addEventListener("resize", () => { if (view) applyHighlight(locked); });
 
-lockIfPresent(DATA.focus);
 renderDrawer();
 render();
+// The deep link is the same gesture as a click on the card, so it goes through the same path — and
+// with no push, because this URL is where the page already is.
+if (DATA.focus !== null && DATA.focus !== undefined) setFocus(DATA.focus, { push: false });
 connect();
 </script>
 </body>

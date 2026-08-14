@@ -11,7 +11,7 @@
 import { BOARD_VIEWER_PORT } from "../paths.ts";
 import { fillDataSlot } from "../html-artifact.ts";
 import { BOARD_TEMPLATE } from "./board-template.ts";
-import type { BoardSummary, BoardView, EverywhereView } from "./view.ts";
+import type { BoardSummary, BoardView, EverywhereView, TicketDetail } from "./view.ts";
 
 export const BOARD_DATA_SLOT = "__BOARD_DATA__";
 
@@ -35,6 +35,12 @@ export interface BoardHandlerDeps {
   view: (workspace: string) => BoardView | null;
   /** Every board's frontier at once. */
   everywhere: () => EverywhereView;
+  /**
+   * One ticket in full, or null when that board has no such seq. Separate from `view` because a
+   * body is large and rarely read: the board's payload stays small enough to push whole, and this
+   * is fetched only when someone opens a ticket.
+   */
+  ticket: (workspace: string, seq: number) => TicketDetail | null;
   /** Every board, for the selector — most recently touched first. */
   boards: () => BoardSummary[];
   /**
@@ -167,10 +173,10 @@ export function handleBoardRequest(req: Request, deps: BoardHandlerDeps): Respon
     return eventStream(workspace, view, deps);
   }
 
-  if (isApi) return rest.length === 0 ? json(view) : notFound("No such page.");
-
+  // `/w/<ws>/t/<seq>` addresses one ticket on both surfaces: as JSON it is that ticket in full, as
+  // a page it is the board with that ticket opened.
   let focus: number | null = null;
-  if (rest[0] === "t" && rest[1] !== undefined) {
+  if (rest[0] === "t" && rest.length === 2) {
     const seq = Number(rest[1]);
     if (!Number.isInteger(seq) || seq <= 0) return notFound("A ticket is a positive number.");
     focus = seq;
@@ -178,8 +184,21 @@ export function handleBoardRequest(req: Request, deps: BoardHandlerDeps): Respon
     return notFound("No such page.");
   }
 
+  if (isApi) {
+    if (focus === null) return json(view);
+    const ticket = deps.ticket(workspace, focus);
+    return ticket ? json(ticket) : notFound(`No ticket #${focus} on the "${workspace}" board.`);
+  }
+
   return page(
-    { boards, workspace, view, everywhere: null, focus, eventsPath: eventsPath(workspace) },
+    {
+      boards,
+      workspace,
+      view,
+      everywhere: null,
+      focus,
+      eventsPath: eventsPath(workspace),
+    },
     template,
   );
 }
