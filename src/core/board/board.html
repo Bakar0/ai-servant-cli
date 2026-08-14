@@ -1,0 +1,491 @@
+<!doctype html>
+<!--
+  The board viewer. Served on loopback by `servant board`; it reads the same SQLite file every
+  servant command writes and never writes a byte of its own.
+
+  Layout is variant B of the map-view prototype: the dependency tree on the left, the board as a
+  rail on the right. Nothing here derives anything — depth, ordering, fan colours, chains and the
+  dispatch command all arrive computed in the page's one data slot, because every one of them is a
+  rule that has to agree with `servant tasks --frontier`, and that agreement is worth asserting in
+  TypeScript. This file paints, and handles the pointer.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="icon" href="data:,">
+<title>servant board</title>
+<style>
+  :root {
+    --bg:#12131a; --panel:#191b24; --panel2:#1f2230; --line:#2c3040;
+    --ink:#e6e8f0; --dim:#9096ab; --faint:#5c6278; --fog:#3a3f52;
+    --c-blocked:#b05c5c; --c-ready:#5f8dd6; --c-in_progress:#d9a047;
+    --c-in_review:#a878d8; --c-done:#4ba3a0;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+       font:14px/1.5 ui-sans-serif,-apple-system,"Segoe UI",sans-serif}
+  .wrap{max-width:1640px;margin:0 auto;padding:24px}
+  h2.sec{font-size:11px;letter-spacing:.09em;text-transform:uppercase;color:var(--faint);
+         margin:0 0 10px;font-weight:600}
+  a{color:inherit}
+
+  .frame{border:1px solid var(--line);border-radius:10px;background:var(--panel);
+         padding:16px 20px;margin-bottom:20px}
+  .frame .kick{font-size:11px;letter-spacing:.09em;text-transform:uppercase;color:var(--faint)}
+  .frame h1{margin:4px 0 8px;font-size:19px;font-weight:600}
+  .frame .dest{max-width:80ch;color:var(--dim)}
+  .frame .oos{margin-top:11px;padding-top:11px;border-top:1px solid var(--line);
+              color:var(--faint);font-size:12.5px}
+
+  .card{background:var(--panel2);border:1px solid var(--line);border-left-width:3px;
+        border-left-color:var(--line);border-radius:7px;padding:8px 10px;position:relative;
+        transition:opacity .12s,border-color .12s;cursor:pointer}
+  .card .r1{display:flex;gap:7px;align-items:center}
+  .card .glyph{font-size:12px;width:12px;text-align:center;flex:none;color:var(--faint)}
+  .card .seq{font-size:11.5px;color:var(--faint);font-variant-numeric:tabular-nums}
+  .card .fan{width:8px;height:8px;border-radius:2px;margin-left:auto;flex:none}
+  .card .title{margin-top:3px;font-size:12.5px;line-height:1.35}
+  .card .r2{margin-top:7px;display:flex;gap:5px;flex-wrap:wrap;align-items:center}
+  .chip{font-size:10px;padding:2px 6px;border-radius:999px;border:1px solid currentColor;
+        opacity:.95;white-space:nowrap;max-width:100%;overflow:hidden;text-overflow:ellipsis}
+  .chip.blocked{color:var(--c-blocked)} .chip.ready{color:var(--c-ready)}
+  .chip.in_progress{color:var(--c-in_progress)} .chip.in_review{color:var(--c-in_review)}
+  .chip.done{color:var(--c-done)}
+  .chip.claim{color:#c9a55e;border-style:dashed}
+  .chip.claim.gone{color:var(--c-blocked)}
+  .chip.plain{color:var(--faint)}
+  .card.done{opacity:.55}
+  .card.done .title{text-decoration:line-through;text-decoration-color:var(--faint)}
+  .copy{margin-left:auto;border:1px solid var(--line);background:transparent;color:var(--dim);
+        font:inherit;font-size:10px;padding:2px 7px;border-radius:999px;cursor:pointer}
+  .copy:hover{border-color:var(--c-ready);color:var(--c-ready)}
+  .copy.done{border-color:var(--c-done);color:var(--c-done)}
+
+  body.hov .card{opacity:.22}
+  body.hov .card.lit{opacity:1}
+  body.hov .card.self{opacity:1;border-color:#8b93c4}
+  body.lock .card.self{box-shadow:0 0 0 2px #7c86ff55}
+  #hint{position:fixed;left:50%;bottom:22px;transform:translateX(-50%);display:none;z-index:99;
+        background:#20233a;border:1px solid #3b4170;color:#c8cdf5;border-radius:999px;
+        padding:5px 14px;font-size:11.5px;box-shadow:0 4px 18px #0008;white-space:nowrap}
+  body.lock #hint{display:block}
+
+  /* The tree scrolls rather than squeezes. A depth column is a fixed width and never shrinks:
+     letting flex divide the space meant a seventh column reduced every card to an unreadable
+     sliver, and the last one fell off the right edge entirely. */
+  .treescroll{overflow-x:auto;overflow-y:hidden;padding-bottom:12px}
+  /* max-content so the SVG, which is positioned against this box, spans the whole tree rather
+     than only the part currently scrolled into view. */
+  .cols{display:flex;gap:28px;align-items:flex-start;position:relative;width:max-content;
+        /* the left gutter is where a same-column edge bows out — see wirePath */
+        padding-left:34px}
+  .col{flex:0 0 272px;min-width:0}
+  /* macOS hides an overlay scrollbar until you scroll, which hides the fact that there is more
+     tree to the right. This one is always drawn. */
+  .treescroll::-webkit-scrollbar{height:10px}
+  .treescroll::-webkit-scrollbar-track{background:var(--panel);border-radius:6px}
+  .treescroll::-webkit-scrollbar-thumb{background:var(--line);border-radius:6px}
+  .treescroll::-webkit-scrollbar-thumb:hover{background:var(--fog)}
+  .col>h3{font-size:10.5px;letter-spacing:.09em;text-transform:uppercase;color:var(--faint);
+          margin:0 0 9px;font-weight:600}
+  .col>h3 b{color:var(--fog);font-weight:600}
+  .stack{display:flex;flex-direction:column;gap:9px}
+  .empty{color:var(--fog);font-size:11px}
+  svg.wires{position:absolute;inset:0;overflow:visible;pointer-events:none;z-index:0}
+  .cols .card{z-index:1}
+  .donecol{flex:0 0 168px;opacity:.75}
+  .donecol>h3{color:var(--c-done);opacity:.7}
+  .donecol .card{padding:6px 8px}
+  .donecol .card .title{font-size:11.5px}
+  .donecol .card .r2{display:none}
+
+  .split{display:grid;grid-template-columns:minmax(0,1fr) 300px;gap:22px;align-items:start}
+  .rail{position:sticky;top:20px;background:var(--panel);border:1px solid var(--line);
+        border-radius:10px;padding:14px}
+  .rail .grp{margin-bottom:15px}
+  .rail .grp:last-child{margin-bottom:0}
+  .rail .grp>h4{margin:0 0 7px;font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;
+                font-weight:600;display:flex;justify-content:space-between}
+  .rail .grp>h4 span{color:var(--faint);font-weight:500}
+  .rail .item{display:flex;gap:7px;align-items:baseline;padding:4px 6px;border-radius:5px;
+              font-size:12px;cursor:pointer;transition:opacity .12s,background .12s}
+  .rail .item:hover{background:var(--panel2)}
+  .rail .item .seq{color:var(--faint);font-variant-numeric:tabular-nums;font-size:11px;
+                   width:24px;flex:none}
+  .rail .item .t{flex:1;line-height:1.3}
+  body.hov .rail .item{opacity:.25}
+  body.hov .rail .item.lit{opacity:1}
+  body.hov .rail .item.self{opacity:1;background:var(--panel2)}
+  .barline{height:4px;border-radius:2px;display:flex;overflow:hidden;margin-bottom:16px;
+           background:var(--panel2)}
+  .barline i{display:block;height:100%}
+
+  .fogbox{border:1px dashed var(--fog);border-radius:10px;padding:13px;background:#171923}
+  .fogbox h3{margin:0 0 3px;font-size:10.5px;letter-spacing:.09em;text-transform:uppercase;
+             color:var(--faint);font-weight:600}
+  .fogbox p{margin:0 0 10px;font-size:10.5px;font-style:italic;color:var(--faint)}
+  .fogbox ul{margin:0;padding-left:16px;color:var(--dim)}
+  .fogbox li{margin-bottom:9px;font-size:12px;line-height:1.4}
+  .fogbox li::marker{color:var(--fog)}
+
+  details.dec{margin-top:22px;border:1px solid var(--line);border-radius:10px;
+              background:var(--panel);padding:11px 17px}
+  details.dec summary{cursor:pointer;color:var(--dim);font-size:12.5px}
+  details.dec ol{margin:10px 0 3px;padding-left:20px;color:var(--dim)}
+  details.dec li{margin-bottom:5px}
+
+  .legend{display:flex;gap:16px;flex-wrap:wrap;align-items:center;margin:16px 0 0;
+          font-size:11px;color:var(--faint)}
+  .legend b{display:inline-block;width:16px;height:2px;vertical-align:middle;margin-right:5px}
+
+  .picker{max-width:60ch}
+  .picker li{margin-bottom:7px}
+  #status{position:fixed;right:16px;top:14px;font-size:11px;color:var(--faint);z-index:99}
+  #status.off{color:var(--c-blocked)}
+
+  /* Last, so it wins on source order over the rules it overrides. Below this width the rail is
+     too narrow to read a ticket title in, so it goes under the tree instead of beside it. */
+  @media (max-width:1000px){
+    .split{grid-template-columns:minmax(0,1fr)}
+    .rail{position:static}
+  }
+</style>
+</head>
+<body>
+<div class="wrap" id="app"></div>
+<div id="hint"></div>
+<div id="status"></div>
+
+<script>
+"use strict";
+const DATA = __BOARD_DATA__;
+
+const GLYPH = { task: "◆", research: "◇", grilling: "○", prototype: "△", map: "❖" };
+const NEUTRAL_EDGE = "#39405a";
+
+let view = DATA.view;
+/** The traced chain, held across pointer moves. Seeded from a /t/<seq> deep link. */
+let locked = null;
+
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) =>
+  ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+const cardsBySeq = () => new Map((view ? view.cards : []).map((c) => [c.seq, c]));
+
+// ───────────────────────────── fragments ─────────────────────────────
+
+function cardHtml(card, mini) {
+  const blockers = card.openBlockers.map((b) => b.label).join(" ");
+  const claim = card.claim;
+  const claimText = claim
+    ? claim.session + (claim.age ? " · " + claim.age : "") + (claim.state === "gone" ? " · gone" : "")
+    : "";
+  return '<div class="card' + (card.column === "done" ? " done" : "") + '"'
+    + ' data-seq="' + card.seq + '" style="border-left-color:' + esc(card.stripe) + '">'
+    + '<div class="r1">'
+    + '<span class="glyph" title="' + esc(card.type) + '">' + (GLYPH[card.type] || GLYPH.task) + "</span>"
+    + '<span class="seq">' + card.seq + "</span>"
+    + (card.fanColor
+        ? '<span class="fan" style="background:' + esc(card.fanColor) + '"'
+          + ' title="blocks ' + card.blocks.length + ' tickets"></span>'
+        : "")
+    + "</div>"
+    + '<div class="title">' + esc(card.title) + "</div>"
+    + (mini ? "" :
+        '<div class="r2">'
+        + '<span class="chip ' + card.column + '">' + esc(labelOf(card.column)) + "</span>"
+        + (claim ? '<span class="chip claim ' + esc(claim.state) + '">' + esc(claimText) + "</span>" : "")
+        + (blockers ? '<span class="chip plain">← ' + esc(blockers) + "</span>" : "")
+        // Suppressed on a blocked or claimed ticket: the board starts no process, and a copy that
+        // collides with a session already carrying the work is worse than no button at all.
+        + (card.dispatch
+            ? '<button class="copy" data-dispatch="' + esc(card.dispatch) + '">copy dispatch</button>'
+            : "")
+        + "</div>")
+    + "</div>";
+}
+
+const labelOf = (key) => (view.columns.find((c) => c.key === key) || {}).label || key;
+
+function frameHtml() {
+  const map = view.map;
+  if (!map) {
+    return '<div class="frame"><div class="kick">Board</div><h1>' + esc(view.workspace) + "</h1>"
+      + '<div class="dest">No wayfinder map on this board yet — '
+      + "<code>servant ticket new --labels \"wayfinder:map\"</code> charts one.</div></div>";
+  }
+  return '<div class="frame"><div class="kick">Destination</div>'
+    + "<h1>" + esc(map.title) + "</h1>"
+    + '<div class="dest">' + esc(map.destination) + "</div>"
+    + (map.outOfScope
+        ? '<div class="oos"><b style="font-weight:600">Out of scope</b> — ' + esc(map.outOfScope) + "</div>"
+        : "")
+    + "</div>";
+}
+
+function fogHtml() {
+  const fog = view.map ? view.map.fog : [];
+  if (!fog.length) return "";
+  return '<div class="fogbox"><h3>Not yet specified</h3><p>the edge of the map</p><ul>'
+    + fog.map((q) => "<li>" + esc(q) + "</li>").join("") + "</ul></div>";
+}
+
+function decisionsHtml() {
+  const decisions = view.map ? view.map.decisions : [];
+  if (!decisions.length) return "";
+  return '<details class="dec"><summary>Decisions so far — ' + decisions.length
+    + " settled</summary><ol>"
+    + decisions.map((d) => "<li>" + esc(d) + "</li>").join("") + "</ol></details>";
+}
+
+function treeHtml() {
+  const bySeq = cardsBySeq();
+  return view.tree.map((col) =>
+    '<div class="col' + (col.depth === null ? " donecol" : "") + '">'
+    + "<h3>" + esc(col.label) + " <b>· " + col.seqs.length + "</b></h3>"
+    + '<div class="stack">'
+    + (col.seqs.length
+        ? col.seqs.map((seq) => cardHtml(bySeq.get(seq), col.depth === null)).join("")
+        : '<div class="empty">—</div>')
+    + "</div></div>").join("");
+}
+
+function railHtml() {
+  const bySeq = cardsBySeq();
+  const bar = view.columns.map((col) =>
+    col.seqs.length
+      ? '<i style="background:var(--c-' + col.key + ');flex:' + col.seqs.length + '"'
+        + ' title="' + esc(col.label) + ": " + col.seqs.length + '"></i>'
+      : "").join("");
+  const groups = view.columns.map((col) =>
+    '<div class="grp"><h4 style="color:var(--c-' + col.key + ')">' + esc(col.label)
+    + "<span>" + col.seqs.length + "</span></h4>"
+    + (col.seqs.length
+        ? col.seqs.map((seq) => {
+            const card = bySeq.get(seq);
+            return '<div class="item" data-seq="' + seq + '"><span class="seq">' + seq
+              + '</span><span class="t">' + esc(card.title) + "</span></div>";
+          }).join("")
+        : '<div class="empty" style="padding-left:6px">—</div>')
+    + "</div>").join("");
+  return '<div class="rail"><h2 class="sec">Board</h2>'
+    + '<div class="barline">' + bar + "</div>" + groups
+    + (view.map && view.map.fog.length
+        ? '<div style="margin-top:16px;padding-top:14px;border-top:1px solid var(--line)">'
+          + fogHtml() + "</div>"
+        : "")
+    + "</div>";
+}
+
+function legendHtml() {
+  return '<div class="legend">'
+    + view.fans.map((f) => '<span><b style="background:' + esc(f.color) + '"></b>#' + f.seq
+        + " blocks " + f.count + "</span>").join("")
+    + '<span><b style="background:' + NEUTRAL_EDGE + '"></b>single dependency</span>'
+    + '<span style="margin-left:auto">hover a card to trace its chain · click to lock it</span>'
+    + "</div>";
+}
+
+function pickerHtml() {
+  const boards = DATA.boards || [];
+  return '<div class="frame picker"><div class="kick">servant board</div>'
+    + "<h1>" + (boards.length ? "Which board?" : "No boards yet") + "</h1>"
+    + (boards.length
+        ? "<ul>" + boards.map((b) =>
+            '<li><a href="/w/' + encodeURIComponent(b) + '">' + esc(b) + "</a></li>").join("") + "</ul>"
+        : '<div class="dest">Nothing has been filed. '
+          + "<code>servant ticket new --title \"…\"</code> starts a board.</div>")
+    + "</div>";
+}
+
+// ───────────────────────────── render ─────────────────────────────
+
+function render() {
+  const app = document.getElementById("app");
+  if (!view) { app.innerHTML = pickerHtml(); return; }
+  app.innerHTML = frameHtml() + '<div class="split"><div>'
+    + '<h2 class="sec">Dependency order — closures away from startable</h2>'
+    + '<div style="font-size:11px;color:var(--faint);margin:0 0 10px">'
+    + 'edges point right (blocker → dependent) · cards migrate '
+    + '<b style="color:var(--dim)">left</b> as their blockers close · '
+    + '<b style="color:var(--dim)">Now</b> is the frontier</div>'
+    + '<div class="treescroll"><div class="cols" id="cols">'
+    + '<svg class="wires" id="wires"></svg>' + treeHtml() + "</div></div>"
+    + legendHtml() + decisionsHtml()
+    + "</div>" + railHtml() + "</div>";
+  applyHighlight(locked);
+}
+
+/**
+ * Replace the whole view. The public entry point for a pushed change, and the seam a test drives
+ * instead of standing up an EventSource.
+ */
+function applyBoardView(next) {
+  view = next;
+  // A locked chain outlives an update — the ticket you were tracing is still the one you care about
+  // when a sibling moves — but not the ticket disappearing from the board. Same guard covers the
+  // deep link, whose ticket may have been closed or renumbered since the URL was written.
+  if (locked !== null && !next.cards.some((c) => c.seq === locked)) locked = null;
+  render();
+}
+
+function lockIfPresent(seq) {
+  if (seq === null || seq === undefined || !view) return;
+  if (view.cards.some((c) => c.seq === seq)) locked = seq;
+}
+window.applyBoardView = applyBoardView;
+
+// ───────────────────────────── wires ─────────────────────────────
+
+function drawWires(highlight) {
+  const host = document.getElementById("cols");
+  const svg = document.getElementById("wires");
+  if (!host || !svg) return;
+  const hb = host.getBoundingClientRect();
+  svg.setAttribute("viewBox", "0 0 " + hb.width + " " + hb.height);
+  svg.style.width = hb.width + "px";
+  svg.style.height = hb.height + "px";
+  const box = (seq) => {
+    const el = host.querySelector('.card[data-seq="' + seq + '"]');
+    if (!el) return null;
+    const b = el.getBoundingClientRect();
+    return { l: b.left - hb.left, r: b.right - hb.left, y: b.top - hb.top + 15 };
+  };
+  let out = "";
+  for (const edge of view.edges) {
+    const a = box(edge.from);
+    const b = box(edge.to);
+    if (!a || !b) continue;
+    const lit = !highlight
+      || edge.from === highlight.seq || edge.to === highlight.seq
+      || (highlight.set.has(edge.from) && highlight.set.has(edge.to));
+    const opacity = highlight ? (lit ? 0.95 : 0.07) : 0.55;
+    out += '<path d="' + wirePath(a, b) + '" fill="none" stroke="' + edge.color
+      + '" stroke-width="' + (lit ? 2 : 1.25) + '" opacity="' + opacity + '"/>';
+    out += '<circle cx="' + b.l + '" cy="' + b.y + '" r="2.2" fill="' + edge.color
+      + '" opacity="' + opacity + '"/>';
+  }
+  svg.innerHTML = out;
+}
+
+/**
+ * Two routes, because the target column is not always to the right of the source's.
+ *
+ * Done work recedes into one column regardless of what it depended on, so an edge between two
+ * finished tickets has to travel backwards. Drawn as the ordinary left-to-right bezier it loops
+ * across both cards, which reads as a connection to whatever it happens to cross. That case leaves
+ * the source's left instead and bows around into the target's left, through the gutter `.cols`
+ * reserves for it.
+ */
+function wirePath(a, b) {
+  if (b.l - a.r > 12) {
+    const mx = (a.r + b.l) / 2;
+    return "M" + a.r + "," + a.y + " C" + mx + "," + a.y + " " + mx + "," + b.y
+      + " " + b.l + "," + b.y;
+  }
+  // Deeper for a longer drop, so two back edges down one column stay distinguishable.
+  const bow = Math.min(30, 14 + Math.abs(b.y - a.y) * 0.2);
+  const around = Math.max(3, Math.min(a.l, b.l) - bow);
+  return "M" + a.l + "," + a.y + " C" + around + "," + a.y + " " + around + "," + b.y
+    + " " + b.l + "," + b.y;
+}
+
+// ───────────────────── hover to trace, click to lock ─────────────────────
+// Locking matters on a long list: without it the chain vanishes the moment the pointer moves
+// toward the scrollbar.
+
+function applyHighlight(seq) {
+  const all = document.querySelectorAll("[data-seq]");
+  if (seq === null || seq === undefined || !view) {
+    document.body.classList.remove("hov", "lock");
+    all.forEach((el) => el.classList.remove("lit", "self"));
+    drawWires(null);
+    return;
+  }
+  const set = new Set(view.chains[String(seq)] || []);
+  document.body.classList.add("hov");
+  document.body.classList.toggle("lock", locked !== null);
+  all.forEach((el) => {
+    const s = Number(el.dataset.seq);
+    el.classList.toggle("lit", set.has(s));
+    el.classList.toggle("self", s === seq);
+  });
+  const card = view.cards.find((c) => c.seq === seq);
+  document.getElementById("hint").textContent =
+    "chain locked on #" + seq + (card ? " — " + card.title : "")
+    + " · " + set.size + " related · Escape or click away to release";
+  drawWires({ seq: seq, set: set });
+}
+
+addEventListener("mouseover", (e) => {
+  if (locked !== null) return;
+  const el = e.target.closest && e.target.closest("[data-seq]");
+  applyHighlight(el ? Number(el.dataset.seq) : null);
+});
+
+addEventListener("click", (e) => {
+  const copy = e.target.closest && e.target.closest(".copy");
+  if (copy) { copyDispatch(copy); return; }
+  const el = e.target.closest && e.target.closest("[data-seq]");
+  if (el) {
+    const seq = Number(el.dataset.seq);
+    locked = locked === seq ? null : seq;
+    applyHighlight(locked);
+  } else if (locked !== null) {
+    locked = null;
+    applyHighlight(null);
+  }
+});
+
+addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && locked !== null) { locked = null; applyHighlight(null); }
+});
+
+function copyDispatch(button) {
+  const settle = (label) => {
+    button.textContent = label;
+    button.classList.toggle("done", label === "copied");
+    setTimeout(() => {
+      button.textContent = "copy dispatch";
+      button.classList.remove("done");
+    }, 1400);
+  };
+  // 127.0.0.1 is a secure context, so the clipboard API is always there; it can still refuse when
+  // the page is not focused, and a button that silently did nothing would be the worse failure.
+  Promise.resolve(navigator.clipboard.writeText(button.dataset.dispatch)).then(
+    () => settle("copied"),
+    () => settle("copy failed"),
+  );
+}
+
+// ───────────────────────────── live ─────────────────────────────
+
+function connect() {
+  if (!DATA.eventsPath || typeof EventSource === "undefined") return;
+  const status = document.getElementById("status");
+  const source = new EventSource(DATA.eventsPath);
+  source.addEventListener("view", (e) => {
+    status.textContent = "";
+    status.classList.remove("off");
+    applyBoardView(JSON.parse(e.data));
+  });
+  source.addEventListener("open", () => {
+    status.textContent = "";
+    status.classList.remove("off");
+  });
+  // EventSource reconnects on its own; saying so beats a page that has quietly gone stale.
+  source.addEventListener("error", () => {
+    status.textContent = "reconnecting…";
+    status.classList.add("off");
+  });
+}
+
+addEventListener("resize", () => { if (view) applyHighlight(locked); });
+
+lockIfPresent(DATA.focus);
+render();
+connect();
+</script>
+</body>
+</html>
