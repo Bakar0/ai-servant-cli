@@ -13,7 +13,13 @@ import { blockerLabel } from "../tasks.ts";
 import type { ClaimLiveness } from "../tasks.ts";
 import { computeFrontier } from "../tasks.ts";
 import type { Ticket, TicketStatus } from "./store.ts";
-import { isOpenStatus, listTickets, openBlockerDepths, sessionLastSeen } from "./store.ts";
+import {
+  isOpenStatus,
+  listBoards,
+  listTickets,
+  openBlockerDepths,
+  sessionLastSeen,
+} from "./store.ts";
 
 /**
  * The five board columns. `blocked` and `ready` are derived from open dependencies and are
@@ -113,7 +119,8 @@ export interface MapView {
   seq: number;
   title: string;
   destination: string;
-  outOfScope: string;
+  /** Kept as written — a list stays a list, so the page can lay it out as one. */
+  outOfScope: string[];
   /** "Not yet specified" — the edge of the map, rendered as fog. */
   fog: string[];
   decisions: string[];
@@ -132,6 +139,85 @@ export interface BoardView {
   /** Every seq reachable up or down the dependency graph from each seq, precomputed for hover. */
   chains: Record<string, number[]>;
   /** False when this host could not read the session registry — claims then read as "unknown". */
+  livenessKnown: boolean;
+}
+
+/**
+ * A board as the selector needs it. Enough to sort and to say what is worth opening, and nothing
+ * else: the picker is a list of doors, not a second board view.
+ */
+export interface BoardSummary {
+  workspace: string;
+  /** Open tickets, by the same rule the columns use. */
+  open: number;
+  /** The most recent write to any of its tickets, or null for a board that has none. */
+  lastActivity: string | null;
+}
+
+/**
+ * Every board, most recently touched first.
+ *
+ * Alphabetical was the wrong order once more than a handful of workspaces accumulate: a board is
+ * created by its first ticket and never removed, so a set of long-finished workspaces sorts ahead of
+ * the two being worked on today. Recency puts the answer at the top; the count says whether there is
+ * anything there.
+ */
+export function listBoardSummaries(): BoardSummary[] {
+  const tickets = listTickets();
+  const open = new Map<string, number>();
+  const touched = new Map<string, string>();
+  for (const ticket of tickets) {
+    if (isOpenStatus(ticket.status))
+      open.set(ticket.workspace, (open.get(ticket.workspace) ?? 0) + 1);
+    const at = ticket.updatedAt;
+    const seen = touched.get(ticket.workspace);
+    if (seen === undefined || at > seen) touched.set(ticket.workspace, at);
+  }
+  return listBoards()
+    .map((workspace) => ({
+      workspace,
+      open: open.get(workspace) ?? 0,
+      lastActivity: touched.get(workspace) ?? null,
+    }))
+    .toSorted(
+      (a, b) =>
+        (b.lastActivity ?? "").localeCompare(a.lastActivity ?? "") ||
+        a.workspace.localeCompare(b.workspace),
+    );
+}
+
+/** One dispatchable ticket, wherever it lives. */
+export interface ReadyCard {
+  workspace: string;
+  seq: number;
+  title: string;
+  type: WayfinderType;
+  dispatch: string;
+  /**
+   * The dead Claim standing in front of this ticket, when there is one. It is still dispatchable —
+   * the command reclaims as it spawns — but a reader has to know a session was here and stopped.
+   */
+  staleClaim: ClaimView | null;
+  url: string;
+}
+
+/**
+ * Every board's frontier on one surface: what a session could be dispatched onto right now,
+ * anywhere.
+ *
+ * Deliberately *not* a tree. Depth is per-board — `openBlockerDepths` counts a board's own open
+ * blockers — so one depth axis across four unrelated initiatives would order tickets that have no
+ * relationship to order. Dispatchability, unlike depth, means the same thing everywhere, so that is
+ * the only thing this view claims. A cross-board blocker still counts, because the frontier is
+ * computed over every ticket before it is grouped.
+ */
+export interface EverywhereView {
+  generatedAt: string;
+  /** Free to take now. */
+  ready: number;
+  /** Dispatchable once a dead session's Claim is reclaimed, which the command does. */
+  reclaimable: number;
+  boards: { workspace: string; cards: ReadyCard[] }[];
   livenessKnown: boolean;
 }
 
@@ -251,18 +337,26 @@ function prose(section: string | undefined): string {
   return contentLines(section).join(" ");
 }
 
+/**
+ * A section written either way. These sections are prose a human edits, so the same heading holds a
+ * list on one map and a paragraph on the next; joining a list into one paragraph loses the only
+ * structure the page has to lay it out with.
+ */
+function bulletsOrProse(section: string | undefined): string[] {
+  const listed = bullets(section);
+  if (listed.length > 0) return listed;
+  const paragraph = prose(section);
+  return paragraph ? [paragraph] : [];
+}
+
 function toMapView(ticket: Ticket): MapView {
   const sections = splitSections(ticket.body);
-  const fogSection = sections.get("not yet specified");
-  const fogBullets = bullets(fogSection);
   return {
     seq: ticket.seq,
     title: ticket.title,
     destination: prose(sections.get("destination")),
-    outOfScope: prose(sections.get("out of scope")),
-    // A fog patch is coarser than a ticket, so it is written as prose as often as as a list; falling
-    // back to the paragraph keeps the edge of the map visible either way.
-    fog: fogBullets.length > 0 ? fogBullets : prose(fogSection) ? [prose(fogSection)] : [],
+    outOfScope: bulletsOrProse(sections.get("out of scope")),
+    fog: bulletsOrProse(sections.get("not yet specified")),
     decisions: bullets(sections.get("decisions so far")),
     url: ticket.url,
   };
@@ -399,6 +493,66 @@ export function buildBoardView(workspace: string, opts: BuildViewOptions = {}): 
     fans,
     chains: buildChains(edges, [...cardsBySeq.keys()]),
     livenessKnown: liveness.known,
+  };
+}
+
+/**
+ * The frontier of every board at once.
+ *
+ * `computeFrontier` with no workspace *is* `servant tasks --frontier` with no `--ws`, so the two
+ * agree by construction rather than by a second implementation kept in step. Only its two
+ * dispatchable buckets appear here; in-flight and blocked work stays on its own board, where the
+ * tree explains why it is waiting.
+ */
+export function buildEverywhereView(opts: BuildViewOptions = {}): EverywhereView {
+  const now = opts.now ?? new Date().toISOString();
+  const liveness = opts.liveness ?? { known: false };
+  const frontier = computeFrontier(listTickets(), liveness);
+
+  const goneClaim = (session: string, since: string): ClaimView => ({
+    // The frontier put this ticket in `stale`, which is the PID check's verdict — the badge states
+    // it rather than asking a second time (ADR-0011 decision 3).
+    ...claimView(session, since, now),
+    state: "gone",
+  });
+
+  const cards: ReadyCard[] = [
+    ...frontier.ready.map((ticket) => toReadyCard(ticket, null)),
+    ...frontier.stale.map((claimed) =>
+      toReadyCard(claimed.ticket, goneClaim(claimed.claim.session, claimed.claim.at)),
+    ),
+  ];
+
+  const byBoard = new Map<string, ReadyCard[]>();
+  for (const card of cards) {
+    const list = byBoard.get(card.workspace);
+    if (list) list.push(card);
+    else byBoard.set(card.workspace, [card]);
+  }
+
+  return {
+    generatedAt: now,
+    ready: frontier.ready.length,
+    reclaimable: frontier.stale.length,
+    boards: [...byBoard.entries()]
+      .map(([workspace, list]) => ({
+        workspace,
+        cards: list.toSorted((a, b) => a.seq - b.seq),
+      }))
+      .toSorted((a, b) => a.workspace.localeCompare(b.workspace)),
+    livenessKnown: liveness.known,
+  };
+}
+
+function toReadyCard(ticket: Ticket, staleClaim: ClaimView | null): ReadyCard {
+  return {
+    workspace: ticket.workspace,
+    seq: ticket.seq,
+    title: ticket.title,
+    type: wayfinderType(ticket.labels),
+    dispatch: dispatchCommand(ticket.workspace, ticket.seq, ticket.title),
+    staleClaim,
+    url: ticket.url,
   };
 }
 

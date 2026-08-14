@@ -18,8 +18,8 @@ import {
   updateClaim,
   updateTicket,
 } from "../src/core/board/store.ts";
-import { buildBoardView } from "../src/core/board/view.ts";
-import type { BoardView } from "../src/core/board/view.ts";
+import { buildBoardView, buildEverywhereView, dispatchCommand } from "../src/core/board/view.ts";
+import type { BoardView, EverywhereView } from "../src/core/board/view.ts";
 import { fillDataSlot } from "../src/core/html-artifact.ts";
 import { setRootOverride } from "../src/core/paths.ts";
 
@@ -49,13 +49,20 @@ const file = (title: string, over: Record<string, unknown> = {}) =>
 /** Load the real page with a payload, and run its script. */
 async function mount(payload: {
   view: BoardView | null;
+  everywhere?: EverywhereView | null;
   focus?: number | null;
+  /** Board names, in the order the server would send them — most recently touched first. */
   boards?: string[];
 }): Promise<void> {
   const html = fillDataSlot(BOARD_TEMPLATE, BOARD_DATA_SLOT, {
-    boards: payload.boards ?? [WS],
+    boards: (payload.boards ?? [WS]).map((workspace) => ({
+      workspace,
+      open: 1,
+      lastActivity: AT,
+    })),
     workspace: payload.view?.workspace ?? null,
     view: payload.view,
+    everywhere: payload.everywhere ?? null,
     focus: payload.focus ?? null,
     // No stream in these tests: the page must render from what it was served.
     eventsPath: null,
@@ -217,12 +224,75 @@ describe("the page", () => {
     expect(cardEl(done.seq).querySelector(".copy")).toBeNull();
   });
 
+  // A real map's Out of scope section runs to 5,600 characters of Markdown bullets. Flattened into
+  // one paragraph it filled the screen and pushed the first column of tickets below the fold, so it
+  // stays a list, and one that is folded away until asked for.
+  test("folds a long out-of-scope section away, as a list rather than a wall", async () => {
+    file("Charted", {
+      labels: ["wayfinder:map"],
+      body: "## Out of scope\n\n- **Auth** — single user.\n- Remote access.\n- Streaming.\n",
+    });
+
+    await mount({ view: view() });
+
+    const oos = $(".frame .oos") as PageElement;
+    expect(oos.tagName.toLowerCase()).toBe("details");
+    expect(oos.hasAttribute("open")).toBe(false);
+    expect(oos.querySelector("summary")?.textContent).toBe("Out of scope — 3 exclusions");
+    expect([...oos.querySelectorAll("li")].map((li) => li.textContent)).toEqual([
+      "Auth — single user.",
+      "Remote access.",
+      "Streaming.",
+    ]);
+  });
+
+  test("renders the map's inline Markdown instead of showing its syntax", async () => {
+    file("Charted", {
+      labels: ["wayfinder:map"],
+      body: '## Destination\n\n**Bold** and `code` and *emphasis*, but <b>not</b> "markup".\n',
+    });
+
+    await mount({ view: view() });
+
+    const dest = $(".frame .dest") as PageElement;
+    expect(dest.querySelector("b")?.textContent).toBe("Bold");
+    expect(dest.querySelector("code")?.textContent).toBe("code");
+    expect(dest.querySelector("i")?.textContent).toBe("emphasis");
+    // The map's own `<b>` is text: escaping runs before the Markdown, so the only tags on the page
+    // are the ones the renderer put there.
+    expect(dest.querySelectorAll("b")).toHaveLength(1);
+    expect(dest.textContent).toContain('<b>not</b> "markup"');
+  });
+
   test("escapes a ticket title rather than letting it become markup", async () => {
     const nasty = file('<img src=x onerror="boom"> & "quoted"');
     await mount({ view: view() });
     const card = cardEl(nasty.seq);
     expect(card.querySelector("img")).toBeNull();
     expect(card.querySelector(".title")?.textContent).toBe('<img src=x onerror="boom"> & "quoted"');
+  });
+
+  // Every slot at once, because the page's guarantee is that escaping is the default rather than a
+  // habit: text, an attribute, the rail and the map's prose all go through the same `html`, and a
+  // slot added later the same way inherits it. The payload closes an attribute before opening a
+  // tag, so it escapes through either kind of hole.
+  test("escapes text, attributes and the map's prose alike", async () => {
+    const payload = '"><img src=x onerror="boom">';
+    const nasty = file(payload, {
+      labels: ["wayfinder:map"],
+      body: `## Destination\n\n${payload}\n\n## Out of scope\n\n${payload}`,
+    });
+    updateClaim(nasty.id, { session: payload, at: AT });
+
+    await mount({ view: view() });
+
+    expect($$("img")).toHaveLength(0);
+    expect($(".frame .dest")?.textContent).toContain(payload);
+    expect($(".frame .oos")?.textContent).toContain(payload);
+    expect($(`.rail .item[data-seq="${nasty.seq}"] .t`)?.textContent).toBe(payload);
+    const claimChip = cardEl(nasty.seq).querySelector(".chip.claim") as PageElement;
+    expect(claimChip.textContent).toContain(payload);
+    expect(claimChip.getAttribute("class")).toBe("chip claim unknown");
   });
 });
 
@@ -363,6 +433,112 @@ describe("the picker", () => {
   test("says so, rather than showing an empty board, when nothing has been filed", async () => {
     await mount({ view: null, boards: [] });
     expect($(".picker h1")?.textContent).toBe("No boards yet");
+  });
+});
+
+// Workspaces run in parallel, so the board you want is often not the board you are on.
+describe("switching boards", () => {
+  const otherBoard = () => {
+    createTicket({ workspace: "other", title: "elsewhere", now: AT });
+    return buildBoardView("other", { now: NOW });
+  };
+
+  /**
+   * Answer `/api/w/<ws>` with this view, and record both what was asked for and what the page
+   * pushed onto the history. The pushes are what the assertions read: happy-dom follows an anchor's
+   * href whether or not the click was default-prevented, so `location` here says nothing about
+   * whether the page navigated. That half is asserted in a real browser instead.
+   */
+  const serve = (next: BoardView | null): { asked: string[]; pushed: string[] } => {
+    const asked: string[] = [];
+    const pushed: string[] = [];
+    (win as unknown as { fetch: (url: string) => Promise<unknown> }).fetch = (url: string) => {
+      asked.push(url);
+      return Promise.resolve({
+        ok: next !== null,
+        status: next === null ? 404 : 200,
+        json: () => Promise.resolve(next),
+      });
+    };
+    win.history.pushState = ((_state: unknown, _title: string, url: string) => {
+      pushed.push(url);
+    }) as typeof win.history.pushState;
+    return { asked, pushed };
+  };
+
+  const settle = () => win.happyDOM.waitUntilComplete();
+
+  test("stays shut by default when there is only one board", async () => {
+    file("only");
+    await mount({ view: view() });
+    expect(body().classList.contains("drawer")).toBe(false);
+    // Still reachable — the toggle is always there, because a second board can appear at any time.
+    expect($("#drawertoggle")).not.toBeNull();
+  });
+
+  test("opens by default when there is a choice to make", async () => {
+    file("here");
+    await mount({ view: view(), boards: ["kanban", "other"] });
+    expect(body().classList.contains("drawer")).toBe(true);
+  });
+
+  test("names every board and marks the one on screen", async () => {
+    file("here");
+    await mount({ view: view(), boards: ["kanban", "other"] });
+    expect($$("#drawer .dlist .board").map((a) => a.getAttribute("data-board"))).toEqual([
+      "kanban",
+      "other",
+    ]);
+    // Real links, so a board can still be middle-clicked into its own tab or bookmarked.
+    expect($$("#drawer .dlist .board").map((a) => a.getAttribute("href"))).toEqual([
+      "/w/kanban",
+      "/w/other",
+    ]);
+    expect($("#drawer .board.on")?.getAttribute("data-board")).toBe("kanban");
+    // Every board's frontier is its own entry, outside the filtered list.
+    expect($("#drawer .every")?.getAttribute("href")).toBe("/everywhere");
+  });
+
+  test("switches the whole page in place, and the URL follows", async () => {
+    file("here");
+    const next = otherBoard();
+    await mount({ view: view(), boards: ["kanban", "other"] });
+    const { asked, pushed } = serve(next);
+
+    click($('#drawer .board[data-board="other"]') as PageElement);
+    await settle();
+
+    expect(asked).toEqual(["/api/w/other"]);
+    expect($("#drawer .board.on")?.getAttribute("data-board")).toBe("other");
+    expect($$(".rail .item .t").map((t) => t.textContent)).toEqual(["elsewhere"]);
+    expect(pushed).toEqual(["/w/other"]);
+  });
+
+  test("drops a lock rather than carrying its number onto another board", async () => {
+    const here = file("here");
+    const next = otherBoard();
+    await mount({ view: view(), focus: here.seq, boards: ["kanban", "other"] });
+    expect(body().classList.contains("lock")).toBe(true);
+    serve(next);
+
+    click($('#drawer .board[data-board="other"]') as PageElement);
+    await settle();
+
+    expect(body().classList.contains("lock")).toBe(false);
+  });
+
+  test("says so and stays put when the other board cannot be read", async () => {
+    file("here");
+    await mount({ view: view(), boards: ["kanban", "other"] });
+    const { pushed } = serve(null);
+
+    click($('#drawer .board[data-board="other"]') as PageElement);
+    await settle();
+
+    expect($("#status")?.textContent).toBe("could not load other");
+    expect($("#drawer .board.on")?.getAttribute("data-board")).toBe("kanban");
+    // Nothing was pushed, so the back button does not lead to a board that never loaded.
+    expect(pushed).toEqual([]);
   });
 });
 
@@ -521,5 +697,200 @@ describe("a long column", () => {
     expect(style.maxHeight).toBe(`calc(${win.innerHeight}px - 40px)`);
     expect(style.overflowY).toBe("auto");
     expect(rail.querySelector(".fogbox")).not.toBeNull();
+  });
+});
+
+describe("every board on one surface", () => {
+  const everywhere = () =>
+    buildEverywhereView({ now: NOW, liveness: { known: true, liveSessions: [] } });
+
+  test("lists what is dispatchable, grouped by board, with the command on each", async () => {
+    const here = file("ready here");
+    const there = createTicket({ workspace: "other", title: "ready there", now: AT });
+
+    await mount({ view: null, everywhere: everywhere(), boards: ["kanban", "other"] });
+
+    expect($$(".everyboard h2 .board-link").map((a) => a.textContent)).toEqual(["kanban", "other"]);
+    expect($$(".ready-card .title").map((t) => t.textContent)).toEqual([
+      "ready here",
+      "ready there",
+    ]);
+    // The command each card carries is the board's own, workspace included — this surface is the
+    // one place two boards' tickets sit together, so a command aimed at the wrong board would run.
+    expect($$(".ready-card .copy").map((b) => b.getAttribute("data-dispatch"))).toEqual([
+      dispatchCommand("kanban", here.seq, here.title),
+      dispatchCommand("other", there.seq, there.title),
+    ]);
+    // No tree here: depth is per board, and one axis across boards would order the unrelated.
+    expect($(".cols")).toBeNull();
+  });
+
+  test("says how much work there is, and where it is", async () => {
+    file("ready here");
+    createTicket({ workspace: "other", title: "ready there", now: AT });
+
+    await mount({ view: null, everywhere: everywhere(), boards: ["kanban", "other"] });
+
+    expect($(".frame h1")?.textContent).toBe("Ready to dispatch");
+    expect($(".frame .dest")?.textContent).toContain("2 ready");
+    expect($(".frame .dest")?.textContent).toContain("across 2 boards");
+  });
+
+  test("marks a ticket whose session is gone, and still offers its command", async () => {
+    const abandoned = file("abandoned");
+    updateClaim(abandoned.id, { session: "s-gone", at: AT });
+
+    await mount({ view: null, everywhere: everywhere(), boards: ["kanban"] });
+
+    expect($(".ready-card .chip.claim.gone")?.textContent).toContain("s-gone · gone");
+    expect($(".ready-card .copy")).not.toBeNull();
+    expect($(".frame .dest")?.textContent).toContain("1 to reclaim");
+  });
+
+  test("says so rather than showing an empty page when nothing is dispatchable", async () => {
+    const blocker = file("blocker");
+    const waiting = file("waiting");
+    addDependency(waiting.id, blocker.id, { now: AT });
+    updateClaim(blocker.id, { session: "s-alive", at: AT });
+    const held = buildEverywhereView({
+      now: NOW,
+      liveness: { known: true, liveSessions: ["s-alive"] },
+    });
+
+    await mount({ view: null, everywhere: held, boards: ["kanban"] });
+
+    expect($(".frame h1")?.textContent).toBe("Nothing is dispatchable right now");
+    expect($$(".ready-card")).toHaveLength(0);
+  });
+
+  test("warns when liveness could not be read, since a live session may be listed", async () => {
+    file("ready");
+    await mount({ view: null, everywhere: buildEverywhereView({ now: NOW }), boards: ["kanban"] });
+    expect($(".frame .oos")?.textContent).toContain("could not read the session registry");
+  });
+
+  test("is one entry in the selector, and a board name in the list switches to it", async () => {
+    file("ready here");
+    await mount({ view: null, everywhere: everywhere(), boards: ["kanban", "other"] });
+
+    expect($("#drawer .board.every.on")?.getAttribute("data-board")).toBe("everywhere");
+    expect($('.everyboard .board-link[data-board="kanban"]')?.getAttribute("href")).toBe(
+      "/w/kanban",
+    );
+  });
+});
+
+// Boards accumulate — one is created by a workspace's first ticket and never removed — so the
+// drawer is the part that has to survive fifty of them.
+describe("the board drawer", () => {
+  const many = [
+    "servant-kanban",
+    "datalake-loadtest",
+    "ai_servant",
+    "this_is_test145",
+    "datalake-mvp",
+    "task_abcd",
+  ];
+
+  const rows = () => $$("#drawer .dlist .board").map((a) => a.getAttribute("data-board"));
+
+  const type = async (text: string) => {
+    const input = $("#dfilter") as PageElement;
+    (input as unknown as { value: string }).value = text;
+    input.dispatchEvent(new win.Event("input", { bubbles: true }));
+    await win.happyDOM.waitUntilComplete();
+  };
+
+  test("keeps the server's order — most recently touched first — until asked otherwise", async () => {
+    file("here");
+    await mount({ view: view(), boards: many });
+    expect(rows()).toEqual(many);
+  });
+
+  test("filters fuzzily, and ranks a tighter match above a looser one", async () => {
+    file("here");
+    await mount({ view: view(), boards: many });
+
+    await type("dlm");
+    expect(rows()).toEqual(["datalake-mvp"]);
+
+    // Both datalake boards match; the shorter name breaks the tie.
+    await type("dat");
+    expect(rows()).toEqual(["datalake-mvp", "datalake-loadtest"]);
+
+    // Initials beat a mid-word run: "sk" is the acronym of servant-kanban, and merely an adjacent
+    // pair inside task_abcd. Typing the first letters of the words is how a name is usually recalled.
+    await type("sk");
+    expect(rows()[0]).toBe("servant-kanban");
+    expect(rows()).toContain("task_abcd");
+
+    await type("zzz");
+    expect(rows()).toEqual([]);
+    expect($("#drawer .empty")?.textContent).toContain("no board matches");
+  });
+
+  test("marks the characters that matched, so a fuzzy hit is legible", async () => {
+    file("here");
+    await mount({ view: view(), boards: many });
+    await type("dlm");
+    expect(
+      $$("#drawer .dlist .board b")
+        .map((b) => b.textContent)
+        .join(""),
+    ).toBe("dlm");
+  });
+
+  test("says what is on each board, since the name alone does not", async () => {
+    file("here");
+    await mount({ view: view(), boards: ["kanban", "other"] });
+    expect($('#drawer .board[data-board="kanban"] .dwhen')?.textContent).toContain("1 open");
+  });
+
+  test("survives a live update with its filter and its caret intact", async () => {
+    const t = file("here");
+    await mount({ view: view(), boards: many });
+    await type("dat");
+    const before = rows();
+
+    const moved = view();
+    (win as unknown as { applyBoardView: (v: BoardView) => void }).applyBoardView(moved);
+    await win.happyDOM.waitUntilComplete();
+
+    // The board repainted; the drawer is outside that swap, so the filter did not blink out.
+    expect(rows()).toEqual(before);
+    expect(($("#dfilter") as unknown as { value: string }).value).toBe("dat");
+    expect(t.seq).toBeGreaterThan(0);
+  });
+
+  test("closes and reopens, and remembers which for the next page", async () => {
+    file("here");
+    await mount({ view: view(), boards: many });
+    expect(body().classList.contains("drawer")).toBe(true);
+
+    click($("#drawertoggle") as PageElement);
+    expect(body().classList.contains("drawer")).toBe(false);
+    expect(win.localStorage.getItem("servant-board-drawer")).toBe("closed");
+
+    click($("#drawertoggle") as PageElement);
+    expect(body().classList.contains("drawer")).toBe(true);
+    expect(win.localStorage.getItem("servant-board-drawer")).toBe("open");
+  });
+
+  test("Escape clears the filter first, and closes the drawer only once it is empty", async () => {
+    file("here");
+    await mount({ view: view(), boards: many });
+    await type("dat");
+
+    const escape = () =>
+      ($("#dfilter") as PageElement).dispatchEvent(
+        new win.KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
+      );
+
+    escape();
+    expect(($("#dfilter") as unknown as { value: string }).value).toBe("");
+    expect(body().classList.contains("drawer")).toBe(true);
+
+    escape();
+    expect(body().classList.contains("drawer")).toBe(false);
   });
 });
