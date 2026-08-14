@@ -81,12 +81,15 @@
         /* the left gutter is where a same-column edge bows out — see wirePath */
         padding-left:34px}
   .col{flex:0 0 272px;min-width:0}
-  /* macOS hides an overlay scrollbar until you scroll, which hides the fact that there is more
-     tree to the right. This one is always drawn. */
-  .treescroll::-webkit-scrollbar{height:10px}
-  .treescroll::-webkit-scrollbar-track{background:var(--panel);border-radius:6px}
-  .treescroll::-webkit-scrollbar-thumb{background:var(--line);border-radius:6px}
-  .treescroll::-webkit-scrollbar-thumb:hover{background:var(--fog)}
+  /* macOS hides an overlay scrollbar until you scroll, which hides the fact that there is more to
+     see. These are always drawn. */
+  .treescroll::-webkit-scrollbar,.rail::-webkit-scrollbar{height:10px;width:10px}
+  .treescroll::-webkit-scrollbar-track,.rail::-webkit-scrollbar-track{background:var(--bg);
+        border-radius:6px}
+  .treescroll::-webkit-scrollbar-thumb,.rail::-webkit-scrollbar-thumb{background:var(--line);
+        border-radius:6px}
+  .treescroll::-webkit-scrollbar-thumb:hover,.rail::-webkit-scrollbar-thumb:hover{
+        background:var(--fog)}
   .col>h3{font-size:10.5px;letter-spacing:.09em;text-transform:uppercase;color:var(--faint);
           margin:0 0 9px;font-weight:600}
   .col>h3 b{color:var(--fog);font-weight:600}
@@ -101,8 +104,10 @@
   .donecol .card .r2{display:none}
 
   .split{display:grid;grid-template-columns:minmax(0,1fr) 300px;gap:22px;align-items:start}
+  /* Scrolls itself. A twenty-card column makes the page far taller than the viewport, and a sticky
+     box taller than the viewport can never show its own bottom — which put the fog out of reach. */
   .rail{position:sticky;top:20px;background:var(--panel);border:1px solid var(--line);
-        border-radius:10px;padding:14px}
+        border-radius:10px;padding:14px;max-height:calc(100vh - 40px);overflow-y:auto}
   .rail .grp{margin-bottom:15px}
   .rail .grp:last-child{margin-bottom:0}
   .rail .grp>h4{margin:0 0 7px;font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;
@@ -135,7 +140,7 @@
   details.dec ol{margin:10px 0 3px;padding-left:20px;color:var(--dim)}
   details.dec li{margin-bottom:5px}
 
-  .legend{display:flex;gap:16px;flex-wrap:wrap;align-items:center;margin:16px 0 0;
+  .legend{display:flex;gap:16px;flex-wrap:wrap;align-items:center;margin:0 0 11px;
           font-size:11px;color:var(--faint)}
   .legend b{display:inline-block;width:16px;height:2px;vertical-align:middle;margin-right:5px}
 
@@ -310,9 +315,10 @@ function render() {
     + 'edges point right (blocker → dependent) · cards migrate '
     + '<b style="color:var(--dim)">left</b> as their blockers close · '
     + '<b style="color:var(--dim)">Now</b> is the frontier</div>'
+    + legendHtml()
     + '<div class="treescroll"><div class="cols" id="cols">'
     + '<svg class="wires" id="wires"></svg>' + treeHtml() + "</div></div>"
-    + legendHtml() + decisionsHtml()
+    + decisionsHtml()
     + "</div>" + railHtml() + "</div>";
   applyHighlight(locked);
 }

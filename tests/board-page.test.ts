@@ -458,3 +458,68 @@ describe("wiring the tree", () => {
     expect(wire?.control).toBeGreaterThanOrEqual(0);
   });
 });
+
+describe("a long column", () => {
+  /** One blocker fanning out to `count` tickets — the shape that makes a column long. */
+  const fanOut = (count: number) => {
+    const fan = file("the fan");
+    for (let i = 1; i <= count; i++) {
+      const kid = file(`ticket ${i}`);
+      addDependency(kid.id, fan.id, { now: AT });
+    }
+    return fan;
+  };
+
+  test("renders every card, however many are stacked in one column", async () => {
+    fanOut(26);
+    await mount({ view: view() });
+    expect(seqsUnder("Next")).toHaveLength(26);
+    expect($$(".cols .card")).toHaveLength(27);
+    // One wire per dependency, so nothing is silently dropped past some threshold.
+    expect($$("#wires path")).toHaveLength(26);
+  });
+
+  test("keeps the fan's children adjacent rather than scattering them down the column", async () => {
+    const fan = fanOut(20);
+    // A second, unrelated root whose child would otherwise interleave by seq.
+    const other = file("other root");
+    const otherKid = file("other kid");
+    addDependency(otherKid.id, other.id, { now: AT });
+    await mount({ view: view() });
+
+    const next = seqsUnder("Next");
+    const fanKids = view()
+      .cards.filter((c) => c.openBlockers.some((b) => b.seq === fan.seq))
+      .map((c) => c.seq);
+    const positions = fanKids.map((seq) => next.indexOf(seq)).toSorted((a, b) => a - b);
+    // Contiguous: the highest position is exactly (count - 1) above the lowest.
+    expect((positions.at(-1) as number) - (positions[0] as number)).toBe(fanKids.length - 1);
+  });
+
+  test("puts the legend above the tree, so a fan's colours are readable without scrolling", async () => {
+    fanOut(26);
+    await mount({ view: view() });
+    const legend = $(".legend") as PageElement;
+    const tree = $(".treescroll") as PageElement;
+    // The legend explains the edge colours; on a long board it must not sit below 2000px of cards.
+    // DOCUMENT_POSITION_FOLLOWING — the tree comes after the legend.
+    expect(legend.compareDocumentPosition(tree as never) & 4).toBeTruthy();
+  });
+
+  test("bounds the rail so it can scroll to its own fog instead of overflowing the viewport", async () => {
+    file("map", {
+      labels: ["wayfinder:map"],
+      body: "## Not yet specified\n\n- one open question\n",
+    });
+    fanOut(26);
+    await mount({ view: view() });
+    // happy-dom computes no layout, so the declaration is what gets asserted: the rail is capped to
+    // the viewport and scrolls, which is what makes a rail taller than the screen usable at all.
+    const rail = $(".rail") as PageElement;
+    const style = win.getComputedStyle(rail as never);
+    // happy-dom resolves the viewport unit, which is the point: the cap tracks the screen.
+    expect(style.maxHeight).toBe(`calc(${win.innerHeight}px - 40px)`);
+    expect(style.overflowY).toBe("auto");
+    expect(rail.querySelector(".fogbox")).not.toBeNull();
+  });
+});
