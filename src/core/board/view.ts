@@ -13,7 +13,13 @@ import { blockerLabel } from "../tasks.ts";
 import type { ClaimLiveness } from "../tasks.ts";
 import { computeFrontier } from "../tasks.ts";
 import type { Ticket, TicketStatus } from "./store.ts";
-import { isOpenStatus, listTickets, openBlockerDepths, sessionLastSeen } from "./store.ts";
+import {
+  isOpenStatus,
+  listBoards,
+  listTickets,
+  openBlockerDepths,
+  sessionLastSeen,
+} from "./store.ts";
 
 /**
  * The five board columns. `blocked` and `ready` are derived from open dependencies and are
@@ -134,6 +140,50 @@ export interface BoardView {
   chains: Record<string, number[]>;
   /** False when this host could not read the session registry — claims then read as "unknown". */
   livenessKnown: boolean;
+}
+
+/**
+ * A board as the selector needs it. Enough to sort and to say what is worth opening, and nothing
+ * else: the picker is a list of doors, not a second board view.
+ */
+export interface BoardSummary {
+  workspace: string;
+  /** Open tickets, by the same rule the columns use. */
+  open: number;
+  /** The most recent write to any of its tickets, or null for a board that has none. */
+  lastActivity: string | null;
+}
+
+/**
+ * Every board, most recently touched first.
+ *
+ * Alphabetical was the wrong order once more than a handful of workspaces accumulate: a board is
+ * created by its first ticket and never removed, so a set of long-finished workspaces sorts ahead of
+ * the two being worked on today. Recency puts the answer at the top; the count says whether there is
+ * anything there.
+ */
+export function listBoardSummaries(): BoardSummary[] {
+  const tickets = listTickets();
+  const open = new Map<string, number>();
+  const touched = new Map<string, string>();
+  for (const ticket of tickets) {
+    if (isOpenStatus(ticket.status))
+      open.set(ticket.workspace, (open.get(ticket.workspace) ?? 0) + 1);
+    const at = ticket.updatedAt;
+    const seen = touched.get(ticket.workspace);
+    if (seen === undefined || at > seen) touched.set(ticket.workspace, at);
+  }
+  return listBoards()
+    .map((workspace) => ({
+      workspace,
+      open: open.get(workspace) ?? 0,
+      lastActivity: touched.get(workspace) ?? null,
+    }))
+    .toSorted(
+      (a, b) =>
+        (b.lastActivity ?? "").localeCompare(a.lastActivity ?? "") ||
+        a.workspace.localeCompare(b.workspace),
+    );
 }
 
 /** One dispatchable ticket, wherever it lives. */

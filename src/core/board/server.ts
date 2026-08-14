@@ -11,7 +11,7 @@
 import { BOARD_VIEWER_PORT } from "../paths.ts";
 import { fillDataSlot } from "../html-artifact.ts";
 import { BOARD_TEMPLATE } from "./board-template.ts";
-import type { BoardView, EverywhereView } from "./view.ts";
+import type { BoardSummary, BoardView, EverywhereView } from "./view.ts";
 
 export const BOARD_DATA_SLOT = "__BOARD_DATA__";
 
@@ -20,7 +20,7 @@ export const EVERYWHERE = "everywhere";
 
 /** What the page is handed: the view, which board it is, and which ticket the URL singled out. */
 export interface BoardPayload {
-  boards: string[];
+  boards: BoardSummary[];
   workspace: string | null;
   view: BoardView | null;
   /** Set on `/everywhere` only, and then `view` is null: the two are alternative surfaces. */
@@ -35,7 +35,8 @@ export interface BoardHandlerDeps {
   view: (workspace: string) => BoardView | null;
   /** Every board's frontier at once. */
   everywhere: () => EverywhereView;
-  boards: () => string[];
+  /** Every board, for the selector — most recently touched first. */
+  boards: () => BoardSummary[];
   /**
    * Register for views of a scope as it changes — a board's name, or `EVERYWHERE`; returns an
    * unsubscribe. Injected so the handler's framing is testable on its own — the real one watches
@@ -120,7 +121,7 @@ export function handleBoardRequest(req: Request, deps: BoardHandlerDeps): Respon
     if (boards.length === 1) {
       return new Response(null, {
         status: 302,
-        headers: { location: `/w/${encodeURIComponent(boards[0] as string)}` },
+        headers: { location: `/w/${encodeURIComponent((boards[0] as BoardSummary).workspace)}` },
       });
     }
     return page(

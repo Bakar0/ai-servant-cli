@@ -30,15 +30,42 @@
          margin:0 0 10px;font-weight:600}
   a{color:inherit}
 
-  .boards{display:flex;gap:7px;align-items:center;flex-wrap:wrap;margin:0 0 14px}
-  .boards .kick{font-size:11px;letter-spacing:.09em;text-transform:uppercase;color:var(--faint);
-                margin-right:3px}
-  .boards .board{text-decoration:none;color:var(--dim);font-size:12px;padding:3px 10px;
-                 border:1px solid var(--line);border-radius:999px;background:var(--panel);
-                 transition:color .12s,border-color .12s}
-  .boards .board:hover{color:var(--ink);border-color:var(--fog)}
-  .boards .board.on{color:var(--ink);border-color:#4b5478;background:var(--panel2)}
-  .boards .every{margin-left:6px;border-style:dashed}
+  /* A drawer rather than a row across the top: boards accumulate and are never removed, and fifty
+     of them as chips is six rows of chrome before the board starts. Closed, it costs one button. */
+  #drawer{position:fixed;left:0;top:0;bottom:0;width:248px;z-index:60;padding:16px 12px 12px;
+          background:var(--panel);border-right:1px solid var(--line);
+          display:none;flex-direction:column;gap:9px}
+  body.drawer #drawer{display:flex}
+  body.drawer .wrap{margin-left:248px}
+  #drawertoggle{position:fixed;top:14px;left:12px;z-index:61;width:24px;height:24px;padding:0;
+                border:1px solid var(--line);border-radius:6px;background:var(--panel);
+                color:var(--dim);font:inherit;font-size:13px;line-height:1;cursor:pointer}
+  body.drawer #drawertoggle{left:auto;right:auto;transform:translateX(212px)}
+  #drawertoggle:hover{color:var(--ink);border-color:var(--fog)}
+  #drawer .dhead{display:flex;align-items:baseline;gap:7px;padding-right:30px}
+  #drawer .kick{font-size:11px;letter-spacing:.09em;text-transform:uppercase;color:var(--faint)}
+  #drawer .dcount{color:var(--fog);font-size:11px}
+  #dfilter{width:100%;background:var(--bg);border:1px solid var(--line);border-radius:7px;
+           color:var(--ink);font:inherit;font-size:12px;padding:5px 9px}
+  #dfilter:focus{outline:none;border-color:#4b5478}
+  #drawer .dlist{overflow-y:auto;display:flex;flex-direction:column;gap:2px;margin-right:-6px;
+                 padding-right:6px}
+  /* flex:none, or the column shrinks every row to a sliver once there are fifty of them — the list
+     scrolls instead. */
+  #drawer .board{display:block;flex:none;text-decoration:none;color:var(--dim);font-size:12px;
+                 padding:5px 8px;border-radius:6px;border:1px solid transparent;
+                 white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  #drawer .board:hover{color:var(--ink);background:var(--panel2)}
+  #drawer .board.on{color:var(--ink);background:var(--panel2);border-color:#4b5478}
+  #drawer .board b{color:var(--c-ready);font-weight:600}
+  #drawer .board.on b{color:var(--ink)}
+  #drawer .every{border:1px dashed var(--line);flex:none}
+  #drawer .dwhen{display:block;font-size:10.5px;color:var(--faint);margin-top:1px}
+  #drawer .empty{padding:6px 8px}
+  @media (max-width:1100px){
+    body.drawer .wrap{margin-left:0}
+    body.drawer #drawer{box-shadow:0 0 40px #000a}
+  }
 
   /* One column, not a tree: see everywhereHtml. Cards are wide because nothing sits beside them. */
   .everyboard{margin-bottom:22px}
@@ -183,6 +210,10 @@
 </style>
 </head>
 <body>
+<!-- Outside #app on purpose: a view push replaces the whole board, and a drawer inside it would
+     lose the filter text and the focus mid-keystroke every time a card moved. -->
+<aside id="drawer"></aside>
+<button id="drawertoggle" type="button" title="Boards (b)"></button>
 <div class="wrap" id="app"></div>
 <div id="hint"></div>
 <div id="status"></div>
@@ -202,6 +233,20 @@ let view = DATA.view;
 let everywhere = DATA.everywhere;
 /** The board on screen, null on `/everywhere`. Mutable — the selector switches without a reload. */
 let workspace = DATA.workspace;
+/** The drawer's filter text, held here so a view push cannot clear it mid-keystroke. */
+let filter = "";
+let drawerOpen = readDrawerState();
+
+function readDrawerState() {
+  // Open by default only when there is a choice to make.
+  try {
+    const saved = localStorage.getItem("servant-board-drawer");
+    if (saved) return saved === "open";
+  } catch {
+    // No storage available; fall through to the default.
+  }
+  return (DATA.boards || []).length > 1;
+}
 /** The traced chain, held across pointer moves. Seeded from a /t/<seq> deep link. */
 let locked = null;
 
@@ -288,23 +333,110 @@ function cardHtml(card, mini) {
 
 const labelOf = (key) => (view.columns.find((c) => c.key === key) || {}).label || key;
 
+// ───────────────────────────── the drawer ─────────────────────────────
+// Workspaces accumulate: a board is created by a workspace's first ticket and never removed, so
+// this list only grows. It is a drawer rather than a row of chips because fifty boards across the
+// top is six rows of chrome before the board starts, and it is ordered by what was touched most
+// recently rather than by the alphabet, because that is the order the answer is usually in.
+
 /**
- * The switcher. Real links, so a board can be middle-clicked, copied or bookmarked and the page
- * still works with the script disabled; the click handler intercepts them to switch in place.
- * Absent when there is only one board, which is the ordinary case and needs no chrome.
+ * Subsequence match, scored. Not a ranking library — three rules: a character adjacent to the last
+ * hit counts most, one at a word boundary next, anything else counts a little. The effect worth
+ * knowing is that typing a name's initials ranks it top, because every hit is a boundary hit:
+ * `sk` finds `servant-kanban` before the boards that merely contain an s before a k.
  */
-function boardsHtml() {
-  const boards = DATA.boards || [];
-  if (boards.length < 2) return "";
+function fuzzyMatch(query, text) {
+  if (!query) return { score: 0, hits: [] };
+  const needle = query.toLowerCase();
+  const hay = text.toLowerCase();
+  const hits = [];
+  let score = 0;
+  let at = 0;
+  for (let i = 0; i < needle.length; i++) {
+    const ch = needle[i];
+    if (ch === " ") continue;
+    const found = hay.indexOf(ch, at);
+    if (found === -1) return null;
+    if (found === at && hits.length > 0) score += 8;
+    else if (found === 0 || /[^a-z0-9]/.test(hay[found - 1])) score += 5;
+    else score += 1;
+    hits.push(found);
+    at = found + 1;
+  }
+  // Shorter names win ties: an exact-ish match should not sit under a longer name that contains it.
+  return { score: score - text.length * 0.01, hits };
+}
+
+/** The name with its matched characters marked, so a fuzzy hit is legible rather than mysterious. */
+function markedName(name, hits) {
+  const marks = new Set(hits);
+  return name.split("").map((ch, i) => (marks.has(i) ? html`<b>${ch}</b>` : ch));
+}
+
+function boardRows() {
+  const query = filter.trim();
+  return (DATA.boards || [])
+    .map((board) => {
+      const match = fuzzyMatch(query, board.workspace);
+      return match ? { board, ...match } : null;
+    })
+    .filter((row) => row !== null)
+    // Without a query the server's order stands, which is most recently touched first.
+    .toSorted((a, b) => (query ? b.score - a.score : 0));
+}
+
+function drawerHtml() {
+  const rows = boardRows();
   return html`
-    <nav class="boards">
+    <div class="dhead">
       <span class="kick">Boards</span>
-      ${boards.map((b) => html`
-        <a class="board${b === workspace ? " on" : ""}" data-board="${b}"
-           href="/w/${encodeURIComponent(b)}">${b}</a>`)}
-      <a class="board every${workspace === null ? " on" : ""}" data-board="${EVERYWHERE}"
-         href="/everywhere">everywhere</a>
-    </nav>`;
+      <span class="dcount">${(DATA.boards || []).length}</span>
+    </div>
+    <input id="dfilter" type="search" placeholder="filter…" value="${filter}"
+           autocomplete="off" spellcheck="false">
+    <a class="board every${workspace === null ? " on" : ""}" data-board="${EVERYWHERE}"
+       href="/everywhere">everywhere<span class="dwhen">every board's frontier</span></a>
+    <div class="dlist scrolls">
+      ${rows.length === 0
+        ? html`<div class="empty">no board matches “${filter}”</div>`
+        : rows.map((row) => html`
+            <a class="board${row.board.workspace === workspace ? " on" : ""}"
+               data-board="${row.board.workspace}"
+               href="/w/${encodeURIComponent(row.board.workspace)}"
+               >${markedName(row.board.workspace, row.hits)}<span class="dwhen">${
+                 row.board.open > 0 ? row.board.open + " open" : "nothing open"}${
+                 row.board.lastActivity ? " · " + ago(row.board.lastActivity) : ""}</span></a>`)}
+    </div>`;
+}
+
+/** Coarse, and coarse on purpose: the drawer is sorted by this, so the number is the tiebreaker. */
+function ago(iso) {
+  const then = Date.parse(iso);
+  if (!then) return "";
+  const mins = Math.round((Date.now() - then) / 60000);
+  if (mins < 60) return mins <= 1 ? "just now" : mins + "m ago";
+  const hours = Math.round(mins / 60);
+  if (hours < 24) return hours + "h ago";
+  return Math.round(hours / 24) + "d ago";
+}
+
+function renderDrawer() {
+  document.getElementById("drawer").innerHTML = drawerHtml().__html;
+  document.getElementById("drawertoggle").textContent = drawerOpen ? "‹" : "›";
+  document.body.classList.toggle("drawer", drawerOpen);
+}
+
+function setDrawer(open, options) {
+  drawerOpen = open;
+  try {
+    localStorage.setItem("servant-board-drawer", open ? "open" : "closed");
+  } catch {
+    // Private browsing, or a locked-down profile. The drawer still works, it just forgets.
+  }
+  renderDrawer();
+  // The drawer changes the width the tree is laid out in, and no resize event fires for that.
+  if (view) applyHighlight(locked);
+  if (open && options && options.focus) document.getElementById("dfilter").focus();
 }
 
 /**
@@ -465,8 +597,10 @@ function pickerHtml() {
       <div class="kick">servant board</div>
       <h1>${boards.length ? "Which board?" : "No boards yet"}</h1>
       ${boards.length
-        ? html`<ul>${boards.map((b) =>
-            html`<li><a href="/w/${encodeURIComponent(b)}">${b}</a></li>`)}</ul>`
+        ? html`<ul>${boards.map((b) => html`
+            <li><a href="/w/${encodeURIComponent(b.workspace)}">${b.workspace}</a>
+              <span class="dwhen">${b.open > 0 ? b.open + " open" : "nothing open"}${
+                b.lastActivity ? " · " + ago(b.lastActivity) : ""}</span></li>`)}</ul>`
         : html`<div class="dest">Nothing has been filed.
                  <code>servant ticket new --title "…"</code> starts a board.</div>`}
     </div>`;
@@ -477,12 +611,11 @@ function pickerHtml() {
 function render() {
   const app = document.getElementById("app");
   if (everywhere) {
-    app.innerHTML = html`${boardsHtml()}${everywhereHtml()}`.__html;
+    app.innerHTML = everywhereHtml().__html;
     return;
   }
   if (!view) { app.innerHTML = pickerHtml().__html; return; }
   app.innerHTML = html`
-    ${boardsHtml()}
     ${frameHtml()}
     <div class="split">
       <div>
@@ -611,6 +744,10 @@ addEventListener("mouseover", (e) => {
 });
 
 addEventListener("click", (e) => {
+  if (e.target && e.target.id === "drawertoggle") {
+    setDrawer(!drawerOpen, { focus: true });
+    return;
+  }
   const board = e.target.closest && e.target.closest("a[data-board]");
   // Modified clicks belong to the browser: a middle click or ⌘-click opens the board in its own
   // tab, which is exactly what running workspaces in parallel wants.
@@ -633,7 +770,35 @@ addEventListener("click", (e) => {
 });
 
 addEventListener("keydown", (e) => {
-  if (e.key === "Escape" && locked !== null) { locked = null; applyHighlight(null); }
+  const typing = e.target && (e.target.id === "dfilter" || e.target.tagName === "INPUT");
+  if (e.key === "Escape") {
+    if (typing && filter) { filter = ""; renderDrawer(); document.getElementById("dfilter").focus(); return; }
+    if (typing) { setDrawer(false); return; }
+    if (locked !== null) { locked = null; applyHighlight(null); }
+    return;
+  }
+  // One key to reach for the boards, since the drawer's whole point is that it is usually shut.
+  if (!typing && (e.key === "b" || e.key === "/") && !e.metaKey && !e.ctrlKey && !e.altKey) {
+    e.preventDefault();
+    setDrawer(true, { focus: true });
+  }
+});
+
+addEventListener("input", (e) => {
+  if (!e.target || e.target.id !== "dfilter") return;
+  filter = e.target.value;
+  renderDrawer();
+  const input = document.getElementById("dfilter");
+  input.focus();
+  // Caret to the end: the field is re-rendered on every keystroke, so it must be put back.
+  input.setSelectionRange(filter.length, filter.length);
+});
+
+// Enter takes the top match, which is what a filter is for.
+addEventListener("keypress", (e) => {
+  if (!e.target || e.target.id !== "dfilter" || e.key !== "Enter") return;
+  const first = document.querySelector("#drawer .dlist .board");
+  if (first) switchTo(first.dataset.board);
 });
 
 function copyDispatch(button) {
@@ -726,6 +891,7 @@ function switchTo(name, options) {
       status.textContent = "";
       if (push) history.pushState({ board: name }, "", path);
       render();
+      renderDrawer();
       connect();
     })
     .catch(() => {
@@ -751,6 +917,7 @@ addEventListener("popstate", () => {
 addEventListener("resize", () => { if (view) applyHighlight(locked); });
 
 lockIfPresent(DATA.focus);
+renderDrawer();
 render();
 connect();
 </script>

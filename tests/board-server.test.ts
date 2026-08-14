@@ -13,8 +13,8 @@ import {
 } from "../src/core/board/server.ts";
 import type { BoardHandlerDeps } from "../src/core/board/server.ts";
 import { BOARD_TEMPLATE } from "../src/core/board/board-template.ts";
-import { buildBoardView, buildEverywhereView } from "../src/core/board/view.ts";
-import type { EverywhereView } from "../src/core/board/view.ts";
+import { buildBoardView, buildEverywhereView, listBoardSummaries } from "../src/core/board/view.ts";
+import type { BoardSummary, EverywhereView } from "../src/core/board/view.ts";
 import type { BoardView } from "../src/core/board/view.ts";
 import { setRootOverride } from "../src/core/paths.ts";
 
@@ -41,7 +41,7 @@ const deps = (over: Partial<BoardHandlerDeps> = {}): BoardHandlerDeps => ({
   view: (workspace) =>
     listBoards().includes(workspace) ? buildBoardView(workspace, { now: AT }) : null,
   everywhere: () => buildEverywhereView({ now: AT }),
-  boards: listBoards,
+  boards: listBoardSummaries,
   heartbeatMs: 0,
   ...over,
 });
@@ -54,7 +54,7 @@ function payload(html: string): {
   view: BoardView | null;
   everywhere: EverywhereView | null;
   focus: number | null;
-  boards: string[];
+  boards: BoardSummary[];
   eventsPath: string | null;
 } {
   const start = html.indexOf("const DATA = ");
@@ -99,7 +99,7 @@ describe("routing", () => {
     expect(res.status).toBe(200);
     const data = payload(await res.text());
     expect(data.view).toBeNull();
-    expect(data.boards.toSorted((a, b) => a.localeCompare(b))).toEqual(["kanban", "other"]);
+    expect(data.boards.map((b) => b.workspace).toSorted()).toEqual(["kanban", "other"]);
   });
 
   test("serves an empty-state page rather than an error when nothing has been filed", async () => {
@@ -360,7 +360,7 @@ describe("every board on one surface", () => {
     ]);
     // Both boards are still offered, so the surface is one entry in the selector rather than a
     // dead end.
-    expect(data.boards).toEqual(["kanban", "other"]);
+    expect(data.boards.map((b) => b.workspace).toSorted()).toEqual(["kanban", "other"]);
     expect(data.eventsPath).toBe("/everywhere/events");
   });
 
