@@ -224,6 +224,29 @@ describe("the page", () => {
     expect(card.querySelector("img")).toBeNull();
     expect(card.querySelector(".title")?.textContent).toBe('<img src=x onerror="boom"> & "quoted"');
   });
+
+  // Every slot at once, because the page's guarantee is that escaping is the default rather than a
+  // habit: text, an attribute, the rail and the map's prose all go through the same `html`, and a
+  // slot added later the same way inherits it. The payload closes an attribute before opening a
+  // tag, so it escapes through either kind of hole.
+  test("escapes text, attributes and the map's prose alike", async () => {
+    const payload = '"><img src=x onerror="boom">';
+    const nasty = file(payload, {
+      labels: ["wayfinder:map"],
+      body: `## Destination\n\n${payload}\n\n## Out of scope\n\n${payload}`,
+    });
+    updateClaim(nasty.id, { session: payload, at: AT });
+
+    await mount({ view: view() });
+
+    expect($$("img")).toHaveLength(0);
+    expect($(".frame .dest")?.textContent).toContain(payload);
+    expect($(".frame .oos")?.textContent).toContain(payload);
+    expect($(`.rail .item[data-seq="${nasty.seq}"] .t`)?.textContent).toBe(payload);
+    const claimChip = cardEl(nasty.seq).querySelector(".chip.claim") as PageElement;
+    expect(claimChip.textContent).toContain(payload);
+    expect(claimChip.getAttribute("class")).toBe("chip claim unknown");
+  });
 });
 
 describe("tracing a chain", () => {

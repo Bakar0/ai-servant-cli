@@ -176,39 +176,64 @@ let locked = null;
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) =>
   ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 
+/**
+ * Markup with escaping on by default. Every interpolated value is escaped unless it is itself the
+ * output of `html`; arrays join themselves; `null`, `undefined` and `false` render as nothing.
+ * The hand-concatenated version escaped correctly, but only for as long as every future edit
+ * remembered to call `esc()` — the default was unsafe and the safety was a habit.
+ *
+ * A newline and its indentation collapse to one space, exactly as HTML itself would collapse them,
+ * so a template can be laid out over several lines. The containers that hold repeated fragments are
+ * all flex, which drops whitespace-only text nodes, so the layout does not see the difference.
+ */
+function html(strings, ...values) {
+  let out = fmt(strings[0]);
+  for (let i = 0; i < values.length; i++) out += flatten(values[i]) + fmt(strings[i + 1]);
+  return { __html: out };
+}
+
+const fmt = (chunk) => chunk.replace(/\s*\n\s*/g, " ");
+
+function flatten(value) {
+  if (value === null || value === undefined || value === false) return "";
+  if (Array.isArray(value)) return value.map(flatten).join("");
+  if (value.__html !== undefined) return value.__html;
+  return esc(value);
+}
+
 const cardsBySeq = () => new Map((view ? view.cards : []).map((c) => [c.seq, c]));
 
 // ───────────────────────────── fragments ─────────────────────────────
 
 function cardHtml(card, mini) {
-  const blockers = card.openBlockers.map((b) => b.label).join(" ");
   const claim = card.claim;
   const claimText = claim
     ? claim.session + (claim.age ? " · " + claim.age : "") + (claim.state === "gone" ? " · gone" : "")
     : "";
-  return '<div class="card' + (card.column === "done" ? " done" : "") + '"'
-    + ' data-seq="' + card.seq + '" style="border-left-color:' + esc(card.stripe) + '">'
-    + '<div class="r1">'
-    + '<span class="glyph" title="' + esc(card.type) + '">' + (GLYPH[card.type] || GLYPH.task) + "</span>"
-    + '<span class="seq">' + card.seq + "</span>"
-    + (card.fanColor
-        ? '<span class="fan" style="background:' + esc(card.fanColor) + '"'
-          + ' title="blocks ' + card.blocks.length + ' tickets"></span>'
-        : "")
-    + "</div>"
-    + '<div class="title">' + esc(card.title) + "</div>"
-    + (mini ? "" :
-        '<div class="r2">'
-        + '<span class="chip ' + card.column + '">' + esc(labelOf(card.column)) + "</span>"
-        + (claim ? '<span class="chip claim ' + esc(claim.state) + '">' + esc(claimText) + "</span>" : "")
-        + (blockers ? '<span class="chip plain">← ' + esc(blockers) + "</span>" : "")
-        // Suppressed on a blocked or claimed ticket: the board starts no process, and a copy that
-        // collides with a session already carrying the work is worse than no button at all.
-        + (card.dispatch
-            ? '<button class="copy" data-dispatch="' + esc(card.dispatch) + '">copy dispatch</button>'
-            : "")
-        + "</div>")
-    + "</div>";
+  const blockers = card.openBlockers.map((b) => b.label).join(" ");
+  return html`
+    <div class="card${card.column === "done" ? " done" : ""}"
+         data-seq="${card.seq}" style="border-left-color:${card.stripe}">
+      <div class="r1">
+        <span class="glyph" title="${card.type}">${GLYPH[card.type] || GLYPH.task}</span>
+        <span class="seq">${card.seq}</span>
+        ${card.fanColor &&
+          html`<span class="fan" style="background:${card.fanColor}"
+                     title="blocks ${card.blocks.length} tickets"></span>`}
+      </div>
+      <div class="title">${card.title}</div>
+      ${!mini &&
+        html`
+          <div class="r2">
+            <span class="chip ${card.column}">${labelOf(card.column)}</span>
+            ${claim && html`<span class="chip claim ${claim.state}">${claimText}</span>`}
+            ${blockers && html`<span class="chip plain">← ${blockers}</span>`}
+            ${/* Suppressed on a blocked or claimed ticket: the board starts no process, and a copy
+                  that collides with a session already carrying the work is worse than no button. */
+              card.dispatch &&
+              html`<button class="copy" data-dispatch="${card.dispatch}">copy dispatch</button>`}
+          </div>`}
+    </div>`;
 }
 
 const labelOf = (key) => (view.columns.find((c) => c.key === key) || {}).label || key;
@@ -216,110 +241,133 @@ const labelOf = (key) => (view.columns.find((c) => c.key === key) || {}).label |
 function frameHtml() {
   const map = view.map;
   if (!map) {
-    return '<div class="frame"><div class="kick">Board</div><h1>' + esc(view.workspace) + "</h1>"
-      + '<div class="dest">No wayfinder map on this board yet — '
-      + "<code>servant ticket new --labels \"wayfinder:map\"</code> charts one.</div></div>";
+    return html`
+      <div class="frame">
+        <div class="kick">Board</div>
+        <h1>${view.workspace}</h1>
+        <div class="dest">No wayfinder map on this board yet —
+          <code>servant ticket new --labels "wayfinder:map"</code> charts one.</div>
+      </div>`;
   }
-  return '<div class="frame"><div class="kick">Destination</div>'
-    + "<h1>" + esc(map.title) + "</h1>"
-    + '<div class="dest">' + esc(map.destination) + "</div>"
-    + (map.outOfScope
-        ? '<div class="oos"><b style="font-weight:600">Out of scope</b> — ' + esc(map.outOfScope) + "</div>"
-        : "")
-    + "</div>";
+  return html`
+    <div class="frame">
+      <div class="kick">Destination</div>
+      <h1>${map.title}</h1>
+      <div class="dest">${map.destination}</div>
+      ${map.outOfScope &&
+        html`<div class="oos"><b style="font-weight:600">Out of scope</b> — ${map.outOfScope}</div>`}
+    </div>`;
 }
 
 function fogHtml() {
   const fog = view.map ? view.map.fog : [];
   if (!fog.length) return "";
-  return '<div class="fogbox"><h3>Not yet specified</h3><p>the edge of the map</p><ul>'
-    + fog.map((q) => "<li>" + esc(q) + "</li>").join("") + "</ul></div>";
+  return html`
+    <div class="fogbox">
+      <h3>Not yet specified</h3>
+      <p>the edge of the map</p>
+      <ul>${fog.map((q) => html`<li>${q}</li>`)}</ul>
+    </div>`;
 }
 
 function decisionsHtml() {
   const decisions = view.map ? view.map.decisions : [];
   if (!decisions.length) return "";
-  return '<details class="dec"><summary>Decisions so far — ' + decisions.length
-    + " settled</summary><ol>"
-    + decisions.map((d) => "<li>" + esc(d) + "</li>").join("") + "</ol></details>";
+  return html`
+    <details class="dec">
+      <summary>Decisions so far — ${decisions.length} settled</summary>
+      <ol>${decisions.map((d) => html`<li>${d}</li>`)}</ol>
+    </details>`;
 }
 
 function treeHtml() {
   const bySeq = cardsBySeq();
-  return view.tree.map((col) =>
-    '<div class="col' + (col.depth === null ? " donecol" : "") + '">'
-    + "<h3>" + esc(col.label) + " <b>· " + col.seqs.length + "</b></h3>"
-    + '<div class="stack">'
-    + (col.seqs.length
-        ? col.seqs.map((seq) => cardHtml(bySeq.get(seq), col.depth === null)).join("")
-        : '<div class="empty">—</div>')
-    + "</div></div>").join("");
+  return view.tree.map((col) => html`
+    <div class="col${col.depth === null ? " donecol" : ""}">
+      <h3>${col.label} <b>· ${col.seqs.length}</b></h3>
+      <div class="stack">
+        ${col.seqs.length
+          ? col.seqs.map((seq) => cardHtml(bySeq.get(seq), col.depth === null))
+          : html`<div class="empty">—</div>`}
+      </div>
+    </div>`);
 }
 
 function railHtml() {
   const bySeq = cardsBySeq();
-  const bar = view.columns.map((col) =>
-    col.seqs.length
-      ? '<i style="background:var(--c-' + col.key + ');flex:' + col.seqs.length + '"'
-        + ' title="' + esc(col.label) + ": " + col.seqs.length + '"></i>'
-      : "").join("");
-  const groups = view.columns.map((col) =>
-    '<div class="grp"><h4 style="color:var(--c-' + col.key + ')">' + esc(col.label)
-    + "<span>" + col.seqs.length + "</span></h4>"
-    + (col.seqs.length
-        ? col.seqs.map((seq) => {
-            const card = bySeq.get(seq);
-            return '<div class="item" data-seq="' + seq + '"><span class="seq">' + seq
-              + '</span><span class="t">' + esc(card.title) + "</span></div>";
-          }).join("")
-        : '<div class="empty" style="padding-left:6px">—</div>')
-    + "</div>").join("");
-  return '<div class="rail"><h2 class="sec">Board</h2>'
-    + '<div class="barline">' + bar + "</div>" + groups
-    + (view.map && view.map.fog.length
-        ? '<div style="margin-top:16px;padding-top:14px;border-top:1px solid var(--line)">'
-          + fogHtml() + "</div>"
-        : "")
-    + "</div>";
+  return html`
+    <div class="rail">
+      <h2 class="sec">Board</h2>
+      <div class="barline">
+        ${view.columns.map((col) => col.seqs.length === 0 ? "" :
+          html`<i style="background:var(--c-${col.key});flex:${col.seqs.length}"
+                  title="${col.label}: ${col.seqs.length}"></i>`)}
+      </div>
+      ${view.columns.map((col) => html`
+        <div class="grp">
+          <h4 style="color:var(--c-${col.key})">${col.label}<span>${col.seqs.length}</span></h4>
+          ${col.seqs.length
+            ? col.seqs.map((seq) => html`
+                <div class="item" data-seq="${seq}">
+                  <span class="seq">${seq}</span><span class="t">${bySeq.get(seq).title}</span>
+                </div>`)
+            : html`<div class="empty" style="padding-left:6px">—</div>`}
+        </div>`)}
+      ${view.map && view.map.fog.length > 0 &&
+        html`<div style="margin-top:16px;padding-top:14px;border-top:1px solid var(--line)">
+               ${fogHtml()}</div>`}
+    </div>`;
 }
 
 function legendHtml() {
-  return '<div class="legend">'
-    + view.fans.map((f) => '<span><b style="background:' + esc(f.color) + '"></b>#' + f.seq
-        + " blocks " + f.count + "</span>").join("")
-    + '<span><b style="background:' + NEUTRAL_EDGE + '"></b>single dependency</span>'
-    + '<span style="margin-left:auto">hover a card to trace its chain · click to lock it</span>'
-    + "</div>";
+  return html`
+    <div class="legend">
+      ${view.fans.map((f) =>
+        html`<span><b style="background:${f.color}"></b>#${f.seq} blocks ${f.count}</span>`)}
+      <span><b style="background:${NEUTRAL_EDGE}"></b>single dependency</span>
+      <span style="margin-left:auto">hover a card to trace its chain · click to lock it</span>
+    </div>`;
 }
 
 function pickerHtml() {
   const boards = DATA.boards || [];
-  return '<div class="frame picker"><div class="kick">servant board</div>'
-    + "<h1>" + (boards.length ? "Which board?" : "No boards yet") + "</h1>"
-    + (boards.length
-        ? "<ul>" + boards.map((b) =>
-            '<li><a href="/w/' + encodeURIComponent(b) + '">' + esc(b) + "</a></li>").join("") + "</ul>"
-        : '<div class="dest">Nothing has been filed. '
-          + "<code>servant ticket new --title \"…\"</code> starts a board.</div>")
-    + "</div>";
+  return html`
+    <div class="frame picker">
+      <div class="kick">servant board</div>
+      <h1>${boards.length ? "Which board?" : "No boards yet"}</h1>
+      ${boards.length
+        ? html`<ul>${boards.map((b) =>
+            html`<li><a href="/w/${encodeURIComponent(b)}">${b}</a></li>`)}</ul>`
+        : html`<div class="dest">Nothing has been filed.
+                 <code>servant ticket new --title "…"</code> starts a board.</div>`}
+    </div>`;
 }
 
 // ───────────────────────────── render ─────────────────────────────
 
 function render() {
   const app = document.getElementById("app");
-  if (!view) { app.innerHTML = pickerHtml(); return; }
-  app.innerHTML = frameHtml() + '<div class="split"><div>'
-    + '<h2 class="sec">Dependency order — closures away from startable</h2>'
-    + '<div style="font-size:11px;color:var(--faint);margin:0 0 10px">'
-    + 'edges point right (blocker → dependent) · cards migrate '
-    + '<b style="color:var(--dim)">left</b> as their blockers close · '
-    + '<b style="color:var(--dim)">Now</b> is the frontier</div>'
-    + legendHtml()
-    + '<div class="treescroll"><div class="cols" id="cols">'
-    + '<svg class="wires" id="wires"></svg>' + treeHtml() + "</div></div>"
-    + decisionsHtml()
-    + "</div>" + railHtml() + "</div>";
+  if (!view) { app.innerHTML = pickerHtml().__html; return; }
+  app.innerHTML = html`
+    ${frameHtml()}
+    <div class="split">
+      <div>
+        <h2 class="sec">Dependency order — closures away from startable</h2>
+        <div style="font-size:11px;color:var(--faint);margin:0 0 10px">
+          edges point right (blocker → dependent) · cards migrate
+          <b style="color:var(--dim)">left</b> as their blockers close ·
+          <b style="color:var(--dim)">Now</b> is the frontier</div>
+        ${legendHtml()}
+        <div class="treescroll">
+          <div class="cols" id="cols">
+            <svg class="wires" id="wires"></svg>
+            ${treeHtml()}
+          </div>
+        </div>
+        ${decisionsHtml()}
+      </div>
+      ${railHtml()}
+    </div>`.__html;
   applyHighlight(locked);
 }
 
@@ -358,21 +406,19 @@ function drawWires(highlight) {
     const b = el.getBoundingClientRect();
     return { l: b.left - hb.left, r: b.right - hb.left, y: b.top - hb.top + 15 };
   };
-  let out = "";
-  for (const edge of view.edges) {
+  svg.innerHTML = flatten(view.edges.map((edge) => {
     const a = box(edge.from);
     const b = box(edge.to);
-    if (!a || !b) continue;
+    if (!a || !b) return "";
     const lit = !highlight
       || edge.from === highlight.seq || edge.to === highlight.seq
       || (highlight.set.has(edge.from) && highlight.set.has(edge.to));
     const opacity = highlight ? (lit ? 0.95 : 0.07) : 0.55;
-    out += '<path d="' + wirePath(a, b) + '" fill="none" stroke="' + edge.color
-      + '" stroke-width="' + (lit ? 2 : 1.25) + '" opacity="' + opacity + '"/>';
-    out += '<circle cx="' + b.l + '" cy="' + b.y + '" r="2.2" fill="' + edge.color
-      + '" opacity="' + opacity + '"/>';
-  }
-  svg.innerHTML = out;
+    return html`
+      <path d="${wirePath(a, b)}" fill="none" stroke="${edge.color}"
+            stroke-width="${lit ? 2 : 1.25}" opacity="${opacity}"/>
+      <circle cx="${b.l}" cy="${b.y}" r="2.2" fill="${edge.color}" opacity="${opacity}"/>`;
+  }));
 }
 
 /**
