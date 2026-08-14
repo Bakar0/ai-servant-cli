@@ -429,6 +429,99 @@ describe("the picker", () => {
   });
 });
 
+// Workspaces run in parallel, so the board you want is often not the board you are on.
+describe("switching boards", () => {
+  const otherBoard = () => {
+    createTicket({ workspace: "other", title: "elsewhere", now: AT });
+    return buildBoardView("other", { now: NOW });
+  };
+
+  /**
+   * Answer `/api/w/<ws>` with this view, and record both what was asked for and what the page
+   * pushed onto the history. The pushes are what the assertions read: happy-dom follows an anchor's
+   * href whether or not the click was default-prevented, so `location` here says nothing about
+   * whether the page navigated. That half is asserted in a real browser instead.
+   */
+  const serve = (next: BoardView | null): { asked: string[]; pushed: string[] } => {
+    const asked: string[] = [];
+    const pushed: string[] = [];
+    (win as unknown as { fetch: (url: string) => Promise<unknown> }).fetch = (url: string) => {
+      asked.push(url);
+      return Promise.resolve({
+        ok: next !== null,
+        status: next === null ? 404 : 200,
+        json: () => Promise.resolve(next),
+      });
+    };
+    win.history.pushState = ((_state: unknown, _title: string, url: string) => {
+      pushed.push(url);
+    }) as typeof win.history.pushState;
+    return { asked, pushed };
+  };
+
+  const settle = () => win.happyDOM.waitUntilComplete();
+
+  test("offers no chrome at all when there is only one board", async () => {
+    file("only");
+    await mount({ view: view() });
+    expect($(".boards")).toBeNull();
+  });
+
+  test("names every board and marks the one on screen", async () => {
+    file("here");
+    await mount({ view: view(), boards: ["kanban", "other"] });
+    expect($$(".boards .board").map((a) => a.textContent)).toEqual(["kanban", "other"]);
+    // Real links, so a board can still be middle-clicked into its own tab or bookmarked.
+    expect($$(".boards .board").map((a) => a.getAttribute("href"))).toEqual([
+      "/w/kanban",
+      "/w/other",
+    ]);
+    expect($(".boards .board.on")?.textContent).toBe("kanban");
+  });
+
+  test("switches the whole page in place, and the URL follows", async () => {
+    file("here");
+    const next = otherBoard();
+    await mount({ view: view(), boards: ["kanban", "other"] });
+    const { asked, pushed } = serve(next);
+
+    click($('.boards .board[data-board="other"]') as PageElement);
+    await settle();
+
+    expect(asked).toEqual(["/api/w/other"]);
+    expect($(".boards .board.on")?.textContent).toBe("other");
+    expect($$(".rail .item .t").map((t) => t.textContent)).toEqual(["elsewhere"]);
+    expect(pushed).toEqual(["/w/other"]);
+  });
+
+  test("drops a lock rather than carrying its number onto another board", async () => {
+    const here = file("here");
+    const next = otherBoard();
+    await mount({ view: view(), focus: here.seq, boards: ["kanban", "other"] });
+    expect(body().classList.contains("lock")).toBe(true);
+    serve(next);
+
+    click($('.boards .board[data-board="other"]') as PageElement);
+    await settle();
+
+    expect(body().classList.contains("lock")).toBe(false);
+  });
+
+  test("says so and stays put when the other board cannot be read", async () => {
+    file("here");
+    await mount({ view: view(), boards: ["kanban", "other"] });
+    const { pushed } = serve(null);
+
+    click($('.boards .board[data-board="other"]') as PageElement);
+    await settle();
+
+    expect($("#status")?.textContent).toBe("could not load other");
+    expect($(".boards .board.on")?.textContent).toBe("kanban");
+    // Nothing was pushed, so the back button does not lead to a board that never loaded.
+    expect(pushed).toEqual([]);
+  });
+});
+
 describe("wiring the tree", () => {
   /**
    * happy-dom lays nothing out, so geometry is supplied: one synthetic column grid, keyed off where
