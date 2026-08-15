@@ -2,7 +2,13 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { addDependency, closeBoard, createTicket, listBoards } from "../src/core/board/store.ts";
+import {
+  addComment,
+  addDependency,
+  closeBoard,
+  createTicket,
+  listBoards,
+} from "../src/core/board/store.ts";
 import { createBoardFeed } from "../src/core/board/feed.ts";
 import {
   BOARD_DATA_SLOT,
@@ -13,8 +19,13 @@ import {
 } from "../src/core/board/server.ts";
 import type { BoardHandlerDeps } from "../src/core/board/server.ts";
 import { BOARD_TEMPLATE } from "../src/core/board/board-template.ts";
-import { buildBoardView, buildEverywhereView, listBoardSummaries } from "../src/core/board/view.ts";
-import type { BoardSummary, EverywhereView } from "../src/core/board/view.ts";
+import {
+  buildBoardView,
+  buildEverywhereView,
+  buildTicketDetail,
+  listBoardSummaries,
+} from "../src/core/board/view.ts";
+import type { BoardSummary, EverywhereView, TicketDetail } from "../src/core/board/view.ts";
 import type { BoardView } from "../src/core/board/view.ts";
 import { setRootOverride } from "../src/core/paths.ts";
 
@@ -41,6 +52,7 @@ const deps = (over: Partial<BoardHandlerDeps> = {}): BoardHandlerDeps => ({
   view: (workspace) =>
     listBoards().includes(workspace) ? buildBoardView(workspace, { now: AT }) : null,
   everywhere: () => buildEverywhereView({ now: AT }),
+  ticket: (workspace, seq) => buildTicketDetail(workspace, seq, { now: AT }),
   boards: listBoardSummaries,
   heartbeatMs: 0,
   ...over,
@@ -135,6 +147,46 @@ describe("routing", () => {
       expect(res.status).toBe(405);
       expect(res.headers.get("allow")).toBe("GET, HEAD");
     }
+  });
+});
+
+describe("reading one ticket", () => {
+  test("answers the ticket in full — body, edges both ways, and its comments", async () => {
+    const blocker = file("the blocker");
+    const t = file("read me", { body: "## Why\n\nBecause it is stored and unreadable." });
+    const waiting = file("waits on me");
+    addDependency(t.id, blocker.id, { now: AT });
+    addDependency(waiting.id, t.id, { now: AT });
+    addComment(t.id, "the analysis is in #78", { session: "kanban-t82", now: AT });
+
+    const res = get(`/api/w/${WS}/t/${t.seq}`);
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toContain("application/json");
+    const detail = (await res.json()) as TicketDetail;
+
+    expect(detail.title).toBe("read me");
+    expect(detail.body).toContain("Because it is stored and unreadable.");
+    expect(detail.column).toBe("blocked");
+    expect(detail.blockedBy.map((b) => b.seq)).toEqual([blocker.seq]);
+    expect(detail.blocks.map((b) => b.seq)).toEqual([waiting.seq]);
+    expect(detail.comments).toEqual([
+      { actor: "servant", session: "kanban-t82", body: "the analysis is in #78", at: AT },
+    ]);
+  });
+
+  test("404s a seq that board has never carried", () => {
+    file("t");
+    const res = get(`/api/w/${WS}/t/999`);
+    expect(res.status).toBe(404);
+  });
+
+  test("carries no body onto the board itself, so an SSE frame stays cheap", async () => {
+    const long = "x".repeat(49_000);
+    file("heavy", { body: long });
+    const view = (await get(`/api/w/${WS}`).json()) as BoardView;
+    expect(JSON.stringify(view)).not.toContain(long);
+    // The whole board, bodies excluded, is small enough to push on every change.
+    expect(JSON.stringify(view).length).toBeLessThan(4_000);
   });
 });
 
@@ -331,6 +383,9 @@ describe("the viewer is not in anyone's way", () => {
     for (const path of [
       "src/core/board/server.ts",
       "src/core/board/feed.ts",
+      // The view models are the only other module the viewer reaches the store through, and the
+      // detail panel put more store calls in it — so it is held to the same line.
+      "src/core/board/view.ts",
       "src/commands/board.ts",
     ]) {
       const source = await Bun.file(path).text();

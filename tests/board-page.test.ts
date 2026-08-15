@@ -12,13 +12,19 @@ import { join } from "node:path";
 import { BOARD_DATA_SLOT } from "../src/core/board/server.ts";
 import { BOARD_TEMPLATE } from "../src/core/board/board-template.ts";
 import {
+  addComment,
   addDependency,
   closeBoard,
   createTicket,
   updateClaim,
   updateTicket,
 } from "../src/core/board/store.ts";
-import { buildBoardView, buildEverywhereView, dispatchCommand } from "../src/core/board/view.ts";
+import {
+  buildBoardView,
+  buildEverywhereView,
+  buildTicketDetail,
+  dispatchCommand,
+} from "../src/core/board/view.ts";
 import type { BoardView, EverywhereView } from "../src/core/board/view.ts";
 import { fillDataSlot } from "../src/core/html-artifact.ts";
 import { setRootOverride } from "../src/core/paths.ts";
@@ -53,6 +59,12 @@ async function mount(payload: {
   focus?: number | null;
   /** Board names, in the order the server would send them — most recently touched first. */
   boards?: string[];
+  /**
+   * Runs against the fresh window before the page script does. The only way to assert what the page
+   * does *on load* with state it remembered from a previous visit — a second `mount` is a new
+   * window with empty storage, so toggling after it proves nothing about the read-back path.
+   */
+  seed?: (w: Window) => void;
 }): Promise<void> {
   const html = fillDataSlot(BOARD_TEMPLATE, BOARD_DATA_SLOT, {
     boards: (payload.boards ?? [WS]).map((workspace) => ({
@@ -75,6 +87,10 @@ async function mount(payload: {
     },
   } as ConstructorParameters<typeof Window>[0]);
   seedIntrinsics(win);
+  // Nothing is listening in these tests, and 127.0.0.1:7787 may well be a real board on the
+  // developer's machine. Every request fails until a test says what it should answer.
+  stubFetch(() => Promise.reject(new Error("no server")));
+  payload.seed?.(win);
   win.document.write(html);
   await win.happyDOM.waitUntilComplete();
 }
@@ -112,6 +128,16 @@ function seedIntrinsics(target: Window): void {
   ]) {
     if (into[name] === undefined) into[name] = host[name];
   }
+}
+
+/** Answer the page's reads. Every stub records what was asked, in order. */
+function stubFetch(answer: (url: string) => Promise<unknown>): string[] {
+  const asked: string[] = [];
+  (win as unknown as { fetch: (url: string) => Promise<unknown> }).fetch = (url: string) => {
+    asked.push(url);
+    return answer(url);
+  };
+  return asked;
 }
 
 const view = () => buildBoardView(WS, { now: NOW });
@@ -539,6 +565,427 @@ describe("switching boards", () => {
     expect($("#drawer .board.on")?.getAttribute("data-board")).toBe("kanban");
     // Nothing was pushed, so the back button does not lead to a board that never loaded.
     expect(pushed).toEqual([]);
+  });
+});
+
+// A ticket body is stored in full and, until this panel, unreadable anywhere but a terminal.
+describe("reading a ticket", () => {
+  /**
+   * Answer `/api/w/<ws>/t/<seq>` from the real store, so the panel is asserted against the shape
+   * the server actually sends. Also records what the page pushed onto the history — the URL half
+   * of the contract, which happy-dom's `location` cannot speak for (it follows an href regardless).
+   */
+  const servePanel = (): { asked: string[]; pushed: string[] } => {
+    const pushed: string[] = [];
+    const asked = stubFetch((url) => {
+      const seq = Number(url.split("/t/")[1]);
+      const detail = buildTicketDetail(WS, seq, { now: NOW });
+      return Promise.resolve({
+        ok: detail !== null,
+        status: detail === null ? 404 : 200,
+        json: () => Promise.resolve(detail),
+      });
+    });
+    win.history.pushState = ((_state: unknown, _title: string, url: string) => {
+      pushed.push(url);
+    }) as typeof win.history.pushState;
+    return { asked, pushed };
+  };
+
+  const settle = () => win.happyDOM.waitUntilComplete();
+  const panel = () => $("#panel");
+  const isOpen = () => body().classList.contains("panel");
+
+  test("opens on a card click, fetches that one ticket, and renders its body", async () => {
+    const t = file("read me", { body: "## Why\n\nBecause it is *stored* and unreadable." });
+    await mount({ view: view() });
+    const { asked, pushed } = servePanel();
+
+    click(cardEl(t.seq));
+    await settle();
+
+    expect(asked).toEqual([`/api/w/${WS}/t/${t.seq}`]);
+    expect(isOpen()).toBe(true);
+    expect(panel()?.querySelector("h1")?.textContent).toBe("read me");
+    expect(panel()?.querySelector(".md h4")?.textContent).toBe("Why");
+    expect(panel()?.querySelector(".md p")?.textContent).toBe(
+      "Because it is stored and unreadable.",
+    );
+    expect(panel()?.querySelector(".md p i")?.textContent).toBe("stored");
+    // The chain is locked too: the panel and the trace are one focus, on one ticket.
+    expect(body().classList.contains("lock")).toBe(true);
+    expect(pushed).toEqual([`/w/${WS}/t/${t.seq}`]);
+  });
+
+  test("opens straight from a deep link, with no click and no push", async () => {
+    const t = file("deep linked", { body: "the body" });
+    await mount({ view: view(), focus: t.seq });
+    const { asked, pushed } = servePanel();
+    await settle();
+
+    expect(isOpen()).toBe(true);
+    expect(body().classList.contains("lock")).toBe(true);
+    // The fetch went out during boot, before the stub was installed, so it is the *push* that
+    // matters here: the page is already at this URL and must not stack a second entry on it.
+    expect(asked.concat(pushed)).toEqual([]);
+  });
+
+  test("Escape closes it and the URL follows back to the board", async () => {
+    const t = file("read me");
+    await mount({ view: view() });
+    const { pushed } = servePanel();
+
+    click(cardEl(t.seq));
+    await settle();
+    press("Escape");
+
+    expect(isOpen()).toBe(false);
+    expect(panel()?.innerHTML).toBe("");
+    expect(pushed).toEqual([`/w/${WS}/t/${t.seq}`, `/w/${WS}`]);
+  });
+
+  test("a click away closes it, but a click inside it never does", async () => {
+    const t = file("read me", { body: "selectable prose" });
+    await mount({ view: view() });
+    servePanel();
+
+    click(cardEl(t.seq));
+    await settle();
+    click(panel()?.querySelector(".md p") as PageElement);
+    expect(isOpen()).toBe(true);
+
+    click(body());
+    expect(isOpen()).toBe(false);
+  });
+
+  test("the back button reopens what the forward click closed", async () => {
+    const t = file("read me");
+    await mount({ view: view() });
+    servePanel();
+    click(cardEl(t.seq));
+    await settle();
+    press("Escape");
+    expect(isOpen()).toBe(false);
+
+    // popstate is what the browser fires; the page reads the URL rather than a state object.
+    win.happyDOM.setURL(`http://127.0.0.1:7787/w/${WS}/t/${t.seq}`);
+    win.dispatchEvent(new win.Event("popstate"));
+    await settle();
+
+    expect(isOpen()).toBe(true);
+    expect(panel()?.querySelector("h1")?.textContent).toBe("read me");
+  });
+
+  test("names both directions of the chain, and moves to one when it is clicked", async () => {
+    const blocker = file("the blocker");
+    const t = file("read me");
+    const waiting = file("waits on me");
+    addDependency(t.id, blocker.id, { now: AT });
+    addDependency(waiting.id, t.id, { now: AT });
+    await mount({ view: view() });
+    const { asked } = servePanel();
+
+    click(cardEl(t.seq));
+    await settle();
+    expect($$("#panel .pgrp > h4").map((h) => h.textContent)).toEqual(["Blocked by", "Blocks"]);
+    expect($$("#panel .plink .t").map((l) => l.textContent)).toEqual([
+      "the blocker",
+      "waits on me",
+    ]);
+
+    click($('#panel .plink[data-goto="' + blocker.seq + '"]') as PageElement);
+    await settle();
+    expect(asked).toEqual([`/api/w/${WS}/t/${t.seq}`, `/api/w/${WS}/t/${blocker.seq}`]);
+    expect(panel()?.querySelector("h1")?.textContent).toBe("the blocker");
+  });
+
+  test("shows the comments left on it", async () => {
+    const t = file("read me");
+    addComment(t.id, "the analysis is in #78", { session: "kanban-t82", now: AT });
+    await mount({ view: view() });
+    servePanel();
+
+    click(cardEl(t.seq));
+    await settle();
+
+    expect($("#panel .pgrp:last-child > h4")?.textContent).toBe("1 comment");
+    expect($("#panel .pcomment .md p")?.textContent).toBe("the analysis is in #78");
+  });
+
+  test("renders a body's own markup as text, never as markup", async () => {
+    file("dangerous", {
+      body: "<script>alert(1)</script>\n\nand a <b>bold</b> tag, `<i>even</i>` in code",
+    });
+    await mount({ view: view() });
+    servePanel();
+
+    click(cardEl(1));
+    await settle();
+
+    const md = panel()?.querySelector(".md") as PageElement;
+    expect(md.querySelector("script")).toBeNull();
+    expect(md.querySelector("i")).toBeNull();
+    expect(md.textContent).toContain("<script>alert(1)</script>");
+    expect(md.textContent).toContain("a <b>bold</b> tag");
+    // The one <b> that survives is the one `**` asked for, not the one the body spelled out.
+    expect(md.querySelector("b")).toBeNull();
+    expect(md.querySelector("code")?.textContent).toBe("<i>even</i>");
+  });
+
+  test("survives a live view push while it is open", async () => {
+    const t = file("read me", { body: "still here" });
+    file("something else");
+    await mount({ view: view() });
+    servePanel();
+    click(cardEl(t.seq));
+    await settle();
+    expect(isOpen()).toBe(true);
+
+    updateTicket(t.id, { status: "in_progress" }, { now: NOW });
+    (win as unknown as { applyBoardView: (v: BoardView) => void }).applyBoardView(view());
+    await settle();
+
+    expect(isOpen()).toBe(true);
+    expect(panel()?.querySelector("h1")?.textContent).toBe("read me");
+    // Re-read with the board, so the panel cannot disagree with the card behind it.
+    expect(panel()?.querySelector(".phead .chip")?.textContent).toBe("In progress");
+  });
+
+  test("leaves the panel alone when the push was about some other card", async () => {
+    const t = file("read me", { body: "a body worth scrolling" });
+    const other = file("something else");
+    await mount({ view: view() });
+    servePanel();
+    click(cardEl(t.seq));
+    await settle();
+
+    // Whatever the reader had — their place in the body, a selection — lives in these nodes. If
+    // they survive, so does it; happy-dom lays nothing out, so the nodes are what can be asserted.
+    const marked = panel()?.querySelector(".md") as PageElement;
+    marked.setAttribute("data-was-here", "1");
+
+    updateTicket(other.id, { status: "in_progress" }, { now: NOW });
+    (win as unknown as { applyBoardView: (v: BoardView) => void }).applyBoardView(view());
+    await settle();
+
+    expect(panel()?.querySelector(".md")?.getAttribute("data-was-here")).toBe("1");
+
+    // A change to this ticket does rebuild it — that is the whole reason it re-reads.
+    updateTicket(t.id, { title: "renamed" }, { now: NOW });
+    (win as unknown as { applyBoardView: (v: BoardView) => void }).applyBoardView(view());
+    await settle();
+
+    expect(panel()?.querySelector("h1")?.textContent).toBe("renamed");
+    expect(panel()?.querySelector(".md")?.getAttribute("data-was-here")).toBeNull();
+  });
+
+  test("says so rather than showing a blank panel when the ticket cannot be read", async () => {
+    file("here");
+    await mount({ view: view(), focus: 999 });
+    servePanel();
+    await settle();
+
+    // Nothing on the board to lock onto, but the URL named a ticket, so the panel answers for it.
+    expect(isOpen()).toBe(true);
+    expect(body().classList.contains("lock")).toBe(false);
+  });
+});
+
+describe("Markdown at block level", () => {
+  /** The panel's rendering of a ticket body written as `source`. */
+  const rendered = async (source: string): Promise<PageElement> => {
+    const t = file("md", { body: source });
+    await mount({ view: view() });
+    stubFetch(() =>
+      Promise.resolve({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve(buildTicketDetail(WS, t.seq, { now: NOW })),
+      }),
+    );
+    click(cardEl(t.seq));
+    await win.happyDOM.waitUntilComplete();
+    return $("#panel .md") as PageElement;
+  };
+
+  test("headings start below the panel's own title, so a body cannot outrank it", async () => {
+    const md = await rendered("# Top\n\n## Second\n\n### Third\n\n#### Fourth");
+    expect([...md.children].map((c) => c.tagName)).toEqual(["H3", "H4", "H5", "H6"]);
+  });
+
+  test("a bullet list is a list, and a numbered one is ordered", async () => {
+    const md = await rendered("- one\n- two\n\n1. first\n2. second");
+    expect(md.querySelector("ul")?.children.length).toBe(2);
+    expect([...(md.querySelector("ol")?.children ?? [])].map((li) => li.textContent)).toEqual([
+      "first",
+      "second",
+    ]);
+  });
+
+  test("a wrapped bullet stays one item rather than becoming a paragraph", async () => {
+    const md = await rendered("- one line\n  and its continuation\n- two");
+    expect(md.querySelectorAll("li")).toHaveLength(2);
+    expect(md.querySelector("li")?.textContent).toContain("and its continuation");
+    expect(md.querySelector("p")).toBeNull();
+  });
+
+  test("a fenced block keeps its lines, and nothing inside it is Markdown", async () => {
+    const md = await rendered("```\nservant ticket show 82\n- not a bullet\n```");
+    expect(md.querySelector("pre code")?.textContent).toBe(
+      "servant ticket show 82\n- not a bullet",
+    );
+    expect(md.querySelector("ul")).toBeNull();
+  });
+
+  test("a pipe table is a table, with its alignment row read as a header rule", async () => {
+    const md = await rendered("| req | effect |\n|---|---|\n| **4** | the window |\n| 6 | retry |");
+    expect($$("#panel .md th").map((th) => th.textContent)).toEqual(["req", "effect"]);
+    expect($$("#panel .md tbody tr").map((tr) => tr.children.length)).toEqual([2, 2]);
+    expect(md.querySelector("td b")?.textContent).toBe("4");
+    // The rule itself is a separator, never a row.
+    expect(md.textContent).not.toContain("---");
+  });
+
+  test("a blank line separates paragraphs, and a blockquote is its own block", async () => {
+    const md = await rendered("one\n\ntwo\n\n> quoted\n\n---\n\nafter");
+    expect($$("#panel .md > p").map((p) => p.textContent)).toEqual(["one", "two", "after"]);
+    expect(md.querySelector("blockquote")?.textContent).toBe("quoted");
+    expect(md.querySelector("hr")).not.toBeNull();
+  });
+});
+
+// The tree and the rail want the same 300px. Following a chain is when the tree wants it most.
+describe("folding the rail away", () => {
+  const shut = () => body().classList.contains("railshut");
+  const toggle = () => click($(".railtoggle") as PageElement);
+
+  const mapped = (over: Record<string, unknown> = {}) =>
+    file("Replace the tracker", {
+      labels: ["wayfinder:map"],
+      body: "## Not yet specified\n\n- Does dispatch need the workspace?",
+      ...over,
+    });
+
+  test("opens showing the board, and folds to a strip that can bring it back", async () => {
+    file("a ticket");
+    await mount({ view: view() });
+
+    expect(shut()).toBe(false);
+    expect($(".rail")).not.toBeNull();
+
+    toggle();
+    expect(shut()).toBe(true);
+    expect($(".rail")).toBeNull();
+    // The way back has to survive the fold: a toggle that goes with what it toggles is unfindable.
+    // The whole strip is the button, so a click on its label reopens rather than falling through to
+    // the "click away" branch and dropping a locked chain.
+    expect($(".railstrip.railtoggle")).not.toBeNull();
+
+    toggle();
+    expect(shut()).toBe(false);
+    expect($$(".rail .item")).toHaveLength(1);
+  });
+
+  test("stays folded through a live view push", async () => {
+    const t = file("a ticket");
+    await mount({ view: view() });
+    toggle();
+
+    updateTicket(t.id, { status: "in_progress" }, { now: NOW });
+    (win as unknown as { applyBoardView: (v: BoardView) => void }).applyBoardView(view());
+
+    // The state is a variable, not a class on a node inside #app — which the push just replaced.
+    expect(shut()).toBe(true);
+    expect($(".rail")).toBeNull();
+  });
+
+  test("redraws the wires, so a locked chain still traces at the new width", async () => {
+    const blocker = file("blocker");
+    const waiting = file("waiting");
+    addDependency(waiting.id, blocker.id, { now: AT });
+    await mount({ view: view() });
+    click(cardEl(blocker.seq));
+    expect(body().classList.contains("lock")).toBe(true);
+
+    toggle();
+
+    // Folding changes the width the tree is laid out in and fires no resize event. The lock and its
+    // wires must come back from the re-render, or the edges keep their old geometry.
+    expect(shut()).toBe(true);
+    expect(body().classList.contains("lock")).toBe(true);
+    expect($$("#wires path").length).toBeGreaterThan(0);
+  });
+
+  test("the r key folds it too", async () => {
+    file("a ticket");
+    await mount({ view: view() });
+    press("r");
+    expect(shut()).toBe(true);
+    press("r");
+    expect(shut()).toBe(false);
+  });
+
+  test("writes the choice down", async () => {
+    file("a ticket");
+    await mount({ view: view() });
+    toggle();
+    expect(win.localStorage.getItem("servant-board-rail")).toBe("closed");
+    toggle();
+    expect(win.localStorage.getItem("servant-board-rail")).toBe("open");
+  });
+
+  test("opens folded when a previous visit folded it", async () => {
+    file("a ticket");
+    // Seeded before the page script runs — a second mount is a new window with empty storage, so
+    // toggling after it would prove nothing about the read-back path.
+    await mount({
+      view: view(),
+      seed: (w) => w.localStorage.setItem("servant-board-rail", "closed"),
+    });
+    expect(shut()).toBe(true);
+    expect($(".rail")).toBeNull();
+  });
+
+  test("still folds where storage is refused outright", async () => {
+    file("a ticket");
+    // A locked-down profile throws on read as well as on write.
+    await mount({
+      view: view(),
+      seed: (w) => {
+        const store = w.localStorage as unknown as Record<string, unknown>;
+        store.getItem = () => {
+          throw new Error("denied");
+        };
+        store.setItem = () => {
+          throw new Error("denied");
+        };
+      },
+    });
+    expect(shut()).toBe(false);
+    toggle();
+    expect(shut()).toBe(true);
+  });
+
+  test("says the fog folded away with the board, rather than letting it vanish", async () => {
+    mapped();
+    file("a ticket");
+    await mount({ view: view() });
+
+    // #77 settled where fog lives, and this ticket does not reopen that: it stays in the rail, on
+    // screen at first paint. Folding takes it away, so the strip has to say it is there — otherwise
+    // "not yet specified" quietly reads as "nothing unanswered".
+    expect($(".rail .fogbox")?.textContent).toContain("Does dispatch need the workspace?");
+
+    toggle();
+    expect($(".railstrip .fogcount")?.textContent).toBe("?1");
+  });
+
+  test("shows no fog count on a board whose map has none", async () => {
+    mapped({ body: "## Destination\n\nSomewhere." });
+    await mount({ view: view() });
+    toggle();
+    expect($(".railstrip")).not.toBeNull();
+    expect($(".railstrip .fogcount")).toBeNull();
   });
 });
 

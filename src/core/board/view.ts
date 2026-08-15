@@ -10,15 +10,17 @@
 // same predicate, so the agreement is structural rather than a pair of implementations kept in step.
 
 import { blockerLabel } from "../tasks.ts";
-import type { ClaimLiveness } from "../tasks.ts";
+import type { ClaimLiveness, Frontier } from "../tasks.ts";
 import { computeFrontier } from "../tasks.ts";
 import type { Ticket, TicketStatus } from "./store.ts";
 import {
+  findTicket,
   isOpenStatus,
   listBoards,
   listTickets,
   openBlockerDepths,
   sessionLastSeen,
+  ticketActions,
 } from "./store.ts";
 
 /**
@@ -233,6 +235,18 @@ const DEPTH_LABELS = ["Now", "Next", "Then", "Later"];
 
 function depthLabel(depth: number): string {
   return DEPTH_LABELS[depth] ?? `+${depth}`;
+}
+
+/**
+ * Which column a ticket sits in. `blocked` and `ready` are not stored — they are this, over the
+ * open-blocker count — so the card and the detail panel cannot say different things about the same
+ * ticket.
+ */
+function columnOf(status: TicketStatus, openBlockers: number): BoardColumn {
+  if (status === "done") return "done";
+  if (status === "in_review") return "in_review";
+  if (status === "in_progress") return "in_progress";
+  return openBlockers > 0 ? "blocked" : "ready";
 }
 
 function wayfinderType(labels: readonly string[]): WayfinderType {
@@ -467,19 +481,10 @@ export function buildBoardView(workspace: string, opts: BuildViewOptions = {}): 
 
   const mapTicket = mine.find((t) => t.labels.includes(MAP_LABEL));
 
-  // Liveness likewise comes from the frontier, which owns the PID check — not repeated here
-  // (ADR-0011 decision 3).
-  const staleSeqs = new Set(frontier.stale.map((c) => c.ticket.seq));
-  const aliveSeqs = new Set(
-    frontier.inFlight.filter((c) => c.liveness === "alive").map((c) => c.ticket.seq),
-  );
-  for (const card of cards) {
-    if (!card.claim) continue;
-    card.claim.state = aliveSeqs.has(card.seq)
-      ? "alive"
-      : staleSeqs.has(card.seq)
-        ? "gone"
-        : "unknown";
+  const states = claimStates(frontier);
+  for (const ticket of mine) {
+    const card = cardsBySeq.get(ticket.seq);
+    if (card?.claim) card.claim.state = states.get(ticket.id) ?? "unknown";
   }
 
   return {
@@ -554,6 +559,144 @@ function toReadyCard(ticket: Ticket, staleClaim: ClaimView | null): ReadyCard {
     staleClaim,
     url: ticket.url,
   };
+}
+
+/** One end of a blocking edge, named well enough to be read without opening it. */
+export interface TicketLink {
+  seq: number;
+  workspace: string;
+  title: string;
+  status: TicketStatus;
+  /** False when the edge leaves this board, which is the only case the label qualifies. */
+  onBoard: boolean;
+  label: string;
+  url: string;
+}
+
+/** A comment as it was left. `ticket_actions` also records created/claimed; those are not this. */
+export interface TicketComment {
+  actor: string;
+  session: string | null;
+  body: string;
+  at: string;
+}
+
+/**
+ * One ticket, in full.
+ *
+ * Fetched on demand and deliberately absent from `BoardView`: a body has a median of 2,358
+ * characters and a maximum near 50,000, so putting every body in the view would take the whole
+ * board's payload from 3.6 KB to a couple of hundred, and every SSE push would carry all of it.
+ * The board stays small enough that a change is a cheap full re-render; reading a ticket is a
+ * separate, rarer question, and it pays for itself.
+ */
+export interface TicketDetail {
+  workspace: string;
+  seq: number;
+  title: string;
+  body: string;
+  status: TicketStatus;
+  column: BoardColumn;
+  type: WayfinderType;
+  labels: string[];
+  claim: ClaimView | null;
+  blockedBy: TicketLink[];
+  blocks: TicketLink[];
+  comments: TicketComment[];
+  createdAt: string;
+  updatedAt: string;
+  url: string;
+}
+
+/**
+ * Everything the detail panel shows about one ticket. Null when that board has no such seq.
+ *
+ * Claim state comes from `computeFrontier` for the same reason the cards' does: the PID check has
+ * one owner (ADR-0011 decision 3), and a second "is that session still alive?" here would be free
+ * to disagree with the badge on the card the reader clicked.
+ */
+export function buildTicketDetail(
+  workspace: string,
+  seq: number,
+  opts: BuildViewOptions = {},
+): TicketDetail | null {
+  const ticket = findTicket(workspace, seq);
+  if (!ticket) return null;
+  const now = opts.now ?? new Date().toISOString();
+  const liveness = opts.liveness ?? { known: false };
+
+  const all = listTickets();
+  const byId = new Map(all.map((t) => [t.id, t]));
+  const link = (id: number): TicketLink | null => {
+    const other = byId.get(id);
+    if (!other) return null;
+    return {
+      seq: other.seq,
+      workspace: other.workspace,
+      title: other.title,
+      status: other.status,
+      onBoard: other.workspace === ticket.workspace,
+      label: blockerLabel(other, ticket),
+      url: other.url,
+    };
+  };
+  const links = (ids: readonly number[]): TicketLink[] =>
+    ids
+      .map(link)
+      .filter((l): l is TicketLink => l !== null)
+      .toSorted((a, b) => a.workspace.localeCompare(b.workspace) || a.seq - b.seq);
+
+  const openBlockers = ticket.blockedBy.filter((id) => {
+    const other = byId.get(id);
+    return other !== undefined && isOpenStatus(other.status);
+  });
+
+  return {
+    workspace: ticket.workspace,
+    seq: ticket.seq,
+    title: ticket.title,
+    body: ticket.body,
+    status: ticket.status,
+    column: columnOf(ticket.status, openBlockers.length),
+    type: wayfinderType(ticket.labels),
+    labels: ticket.labels,
+    claim: ticket.claim
+      ? {
+          ...claimView(ticket.claim.session, ticket.claim.at, now),
+          state: claimStates(computeFrontier(all, liveness)).get(ticket.id) ?? "unknown",
+        }
+      : null,
+    blockedBy: links(ticket.blockedBy),
+    blocks: links(ticket.blocks),
+    comments: ticketActions(ticket.id)
+      .filter((action) => action.kind === "comment")
+      .map((action) => ({
+        actor: action.actor,
+        session: action.session,
+        body: action.body,
+        at: action.at,
+      })),
+    createdAt: ticket.createdAt,
+    updatedAt: ticket.updatedAt,
+    url: ticket.url,
+  };
+}
+
+/**
+ * Every claimed ticket's three-state verdict, read straight off the frontier's buckets.
+ *
+ * The frontier owns the PID check (ADR-0011 decision 3), so this is the one place that turns its
+ * buckets into a badge — a card and a detail panel showing the same ticket cannot disagree, and a
+ * fourth state would be one edit rather than a hunt. Anything unclaimed is simply absent; a claim
+ * this host cannot vouch for reads "unknown", which is the safe direction to be wrong in.
+ */
+function claimStates(frontier: Frontier): Map<number, ClaimView["state"]> {
+  const states = new Map<number, ClaimView["state"]>();
+  for (const claimed of frontier.stale) states.set(claimed.ticket.id, "gone");
+  for (const claimed of frontier.inFlight) {
+    states.set(claimed.ticket.id, claimed.liveness === "alive" ? "alive" : "unknown");
+  }
+  return states;
 }
 
 /**
@@ -663,16 +806,7 @@ function toCard(ctx: {
       onBoard: blocker.workspace === ticket.workspace,
     }));
 
-  const column: BoardColumn =
-    ticket.status === "done"
-      ? "done"
-      : ticket.status === "in_review"
-        ? "in_review"
-        : ticket.status === "in_progress"
-          ? "in_progress"
-          : openBlockers.length > 0
-            ? "blocked"
-            : "ready";
+  const column = columnOf(ticket.status, openBlockers.length);
 
   const own = fanColor.get(ticket.id) ?? null;
   const parent = primaryBlocker(ticket);

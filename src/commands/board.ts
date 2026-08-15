@@ -8,7 +8,12 @@ import { defineCommand } from "citty";
 import { createBoardFeed } from "../core/board/feed.ts";
 import { EVERYWHERE, serveBoard } from "../core/board/server.ts";
 import { listBoards } from "../core/board/store.ts";
-import { buildBoardView, buildEverywhereView, listBoardSummaries } from "../core/board/view.ts";
+import {
+  buildBoardView,
+  buildEverywhereView,
+  buildTicketDetail,
+  listBoardSummaries,
+} from "../core/board/view.ts";
 import { openInDefaultApp } from "../core/open.ts";
 import { applyRootOverride, BOARD_VIEWER_PORT } from "../core/paths.ts";
 import { readLiveSessions } from "../core/session-registry.ts";
@@ -125,6 +130,7 @@ export const boardCommand = defineCommand({
         deps: {
           view,
           everywhere,
+          ticket: (name, seq) => buildTicketDetail(name, seq, { liveness: liveness.get() }),
           boards: () => listBoardSummaries(),
           subscribe: (scope, onView) => feed.subscribe(scope, onView),
         },
