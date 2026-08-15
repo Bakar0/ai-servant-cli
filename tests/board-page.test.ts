@@ -200,8 +200,8 @@ describe("the page", () => {
     expect($(".frame .dest")?.textContent).toContain("One board servant owns end to end.");
     expect($(".frame .oos")?.textContent).toContain("Auth and remote access.");
     // Fog renders, and as fog — inside the dashed box, not as a tree column.
-    expect($(".fogbox")?.textContent).toContain("Does dispatch need the workspace?");
-    expect($$(".cols .fogbox")).toHaveLength(0);
+    expect($("details.fog")?.textContent).toContain("Does dispatch need the workspace?");
+    expect($$(".cols details.fog")).toHaveLength(0);
     expect($("details.dec")?.textContent).toContain("Claims live on the board");
 
     expect(columnTitles()).toEqual(["Done", "Now", "Next"]);
@@ -270,6 +270,32 @@ describe("the page", () => {
       "Remote access.",
       "Streaming.",
     ]);
+  });
+
+  test("folds the fog away under the tree, the way the decisions fold", async () => {
+    file("Charted", {
+      labels: ["wayfinder:map"],
+      body:
+        "## Not yet specified\n\n- Does dispatch need the workspace?\n- How do Claims expire?\n" +
+        "\n## Decisions so far\n\n- SQLite is the contract.\n",
+    });
+
+    await mount({ view: view() });
+
+    const fog = $("details.fog") as PageElement;
+    expect(fog.tagName.toLowerCase()).toBe("details");
+    expect(fog.hasAttribute("open")).toBe(false);
+    expect(fog.querySelector("summary")?.textContent).toBe("Not yet specified — 2 unanswered");
+    expect([...fog.querySelectorAll("li")].map((li) => li.textContent)).toEqual([
+      "Does dispatch need the workspace?",
+      "How do Claims expire?",
+    ]);
+    // Beside the decisions in the tree's column, not in the rail — same width, same fold.
+    expect(fog.closest(".rail")).toBeNull();
+    // DOCUMENT_POSITION_FOLLOWING — the tree comes first, then the fog, then the decisions.
+    const tree = $(".treescroll") as PageElement;
+    expect(tree.compareDocumentPosition(fog as never) & 4).toBeTruthy();
+    expect(fog.compareDocumentPosition($("details.dec") as never) & 4).toBeTruthy();
   });
 
   test("renders the map's inline Markdown instead of showing its syntax", async () => {
@@ -966,26 +992,20 @@ describe("folding the rail away", () => {
     expect(shut()).toBe(true);
   });
 
-  test("says the fog folded away with the board, rather than letting it vanish", async () => {
+  test("leaves the fog where it is — folding the board no longer takes it away", async () => {
     mapped();
     file("a ticket");
     await mount({ view: view() });
 
-    // #77 settled where fog lives, and this ticket does not reopen that: it stays in the rail, on
-    // screen at first paint. Folding takes it away, so the strip has to say it is there — otherwise
-    // "not yet specified" quietly reads as "nothing unanswered".
-    expect($(".rail .fogbox")?.textContent).toContain("Does dispatch need the workspace?");
+    // #77 put the fog in the rail; this reverses that. It lives beside the decisions now, under the
+    // tree, so folding the rail is no longer a way to lose it and the strip needs no fog count.
+    expect($(".rail details.fog")).toBeNull();
+    expect($("details.fog")?.textContent).toContain("Does dispatch need the workspace?");
 
-    toggle();
-    expect($(".railstrip .fogcount")?.textContent).toBe("?1");
-  });
-
-  test("shows no fog count on a board whose map has none", async () => {
-    mapped({ body: "## Destination\n\nSomewhere." });
-    await mount({ view: view() });
     toggle();
     expect($(".railstrip")).not.toBeNull();
     expect($(".railstrip .fogcount")).toBeNull();
+    expect($("details.fog")?.textContent).toContain("Does dispatch need the workspace?");
   });
 });
 
@@ -1129,11 +1149,7 @@ describe("a long column", () => {
     expect(legend.compareDocumentPosition(tree as never) & 4).toBeTruthy();
   });
 
-  test("bounds the rail so it can scroll to its own fog instead of overflowing the viewport", async () => {
-    file("map", {
-      labels: ["wayfinder:map"],
-      body: "## Not yet specified\n\n- one open question\n",
-    });
+  test("bounds the rail so a long board scrolls inside it instead of overflowing the viewport", async () => {
     fanOut(26);
     await mount({ view: view() });
     // happy-dom computes no layout, so the declaration is what gets asserted: the rail is capped to
@@ -1143,7 +1159,6 @@ describe("a long column", () => {
     // happy-dom resolves the viewport unit, which is the point: the cap tracks the screen.
     expect(style.maxHeight).toBe(`calc(${win.innerHeight}px - 40px)`);
     expect(style.overflowY).toBe("auto");
-    expect(rail.querySelector(".fogbox")).not.toBeNull();
   });
 });
 
