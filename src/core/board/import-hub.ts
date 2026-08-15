@@ -12,6 +12,7 @@
 import { $ } from "bun";
 import {
   addDependency,
+  carryComment,
   createTicket,
   findTicket,
   isOpenStatus,
@@ -26,7 +27,13 @@ export const WS_LABEL_PREFIX = "ws:";
 /** Stamped on every claim comment the hub-era protocol wrote. */
 export const CLAIM_MARKER = "<!-- servant:claim -->";
 
-/** Injectable `gh issue list` runner (returns raw JSON stdout). Real impl shells out to gh. */
+/**
+ * Injectable `gh issue list` runner (returns raw JSON stdout). Real impl shells out to gh.
+ *
+ * A repo slug is all it takes, which is what makes "the importer never writes to GitHub" a property
+ * of the seam rather than a promise about the call sites: there is no argument here that could name
+ * a mutation.
+ */
 export type HubRunner = (hubRepo: string) => Promise<string>;
 
 const defaultHubRunner: HubRunner = async (hubRepo) => {
@@ -53,6 +60,15 @@ interface HubClaim {
   at: string;
 }
 
+export interface HubComment {
+  /** GitHub's own id for the comment — the only stable identity a re-run can dedupe on. */
+  id: string;
+  /** The login that wrote it. Hub comments have no session; the actor is a person. */
+  author: string;
+  body: string;
+  createdAt: string;
+}
+
 export interface HubIssue {
   number: number;
   title: string;
@@ -65,6 +81,8 @@ export interface HubIssue {
   /** Blockers declared in the body — the inline line and the bulleted section, unioned. */
   blockedBy: number[];
   claim: HubClaim | null;
+  /** Every comment on the issue, in the order the hub returned them. */
+  comments: HubComment[];
 }
 
 const HELD_RE = /\*\*Claim(?: transferred)?:\*\*.*?`([^`]+)`\s*—\s*since\s*(\S+)/s;
@@ -169,6 +187,28 @@ export function parseParentRef(rawBody: string): number | null {
 
 const asString = (v: unknown): string => (typeof v === "string" ? v : "");
 
+/**
+ * The `comments` block of one `gh issue view --json comments` entry.
+ *
+ * The id is kept verbatim rather than parsed out of the url: it is what GitHub calls the comment,
+ * and the whole idempotency story rests on it. A comment that somehow arrives without one is kept
+ * with an empty id so the importer can report it rather than quietly carry it un-deduplicable.
+ */
+function parseComments(raw: unknown): HubComment[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.flatMap((item) => {
+    if (!item || typeof item !== "object") return [];
+    const o = item as { id?: unknown; author?: unknown; body?: unknown; createdAt?: unknown };
+    const author =
+      o.author && typeof o.author === "object"
+        ? asString((o.author as { login?: unknown }).login)
+        : "";
+    return [
+      { id: asString(o.id), author, body: asString(o.body), createdAt: asString(o.createdAt) },
+    ];
+  });
+}
+
 /** Parse `gh issue list --json ...` output into HubIssues. Tolerates missing/extra fields. */
 export function parseGhIssues(json: string): HubIssue[] {
   let raw: unknown;
@@ -188,6 +228,7 @@ export function parseGhIssues(json: string): HubIssue[] {
           .filter(Boolean)
       : [];
     const body = asString(o.body);
+    const comments = parseComments(o.comments);
     issues.push({
       number: typeof o.number === "number" ? o.number : 0,
       title: asString(o.title),
@@ -197,13 +238,8 @@ export function parseGhIssues(json: string): HubIssue[] {
       body,
       workspace: workspaceOf(labels),
       blockedBy: parseBlockedBy(body),
-      claim: parseClaim(
-        Array.isArray(o.comments)
-          ? o.comments.map((c) =>
-              c && typeof c === "object" ? { body: asString((c as { body?: unknown }).body) } : {},
-            )
-          : [],
-      ),
+      claim: parseClaim(comments),
+      comments,
     });
   }
   return issues;
@@ -288,11 +324,51 @@ export interface ImportReport {
   /** Live Claims carried over — a session mid-flight keeps its address. */
   claims: number;
   parents: number;
+  /** Comments carried this run. A comment already on the board is not counted again. */
+  comments: number;
+  /**
+   * Comments that were the hub's claim protocol rather than anything anyone wrote. Counted, not
+   * carried: what they encode arrives as the ticket's Claim, and carrying them too would put the
+   * protocol's own bookkeeping in front of the reasoning this import exists to rescue.
+   */
+  claimComments: number;
   /**
    * Everything the import could not carry over, one line each. Silent loss is the failure mode
    * that matters here, so this is part of the return value rather than a log line.
    */
   skipped: string[];
+}
+
+/**
+ * Carry an issue's comments onto its ticket, counting what was carried and reporting what was not.
+ *
+ * The design reasoning the hub holds is almost entirely in these — the verdicts, the ADR arguments,
+ * the amendments a body was never rewritten to include — and the hub is frozen, so this is the last
+ * chance to move them. They land as plain `comment` rows keyed on GitHub's comment id, which is
+ * what lets a re-run add nothing.
+ */
+function carryComments(issue: HubIssue, ticketId: number, report: ImportReport): void {
+  for (const comment of issue.comments) {
+    if (comment.body.includes(CLAIM_MARKER)) {
+      report.claimComments += 1;
+      continue;
+    }
+    if (!comment.id) {
+      report.skipped.push(
+        `#${issue.number} — a comment by ${comment.author || "someone"} at ${comment.createdAt || "an unknown time"} has no id, so it cannot be carried without risking a duplicate on the next run`,
+      );
+      continue;
+    }
+    const carried = carryComment(ticketId, {
+      externalId: comment.id,
+      // The hub's authors are people, not sessions, so the session column stays null and the actor
+      // is the login. Anything else would invent a servant session that never existed.
+      actor: comment.author || "unknown",
+      body: comment.body,
+      at: comment.createdAt,
+    });
+    if (carried) report.comments += 1;
+  }
 }
 
 export interface ImportOptions {
@@ -309,6 +385,10 @@ export interface ImportOptions {
  * done since: a ticket moved to `in_progress` here stays there while the hub still calls it open,
  * and only open-versus-closed is taken from the hub. Claims already on the board are left alone
  * unless the hub names a different holder.
+ *
+ * Comments are append-only and keyed on the hub's comment id, so they accumulate rather than being
+ * re-applied: a comment written on the board since the last run survives, and one carried by an
+ * earlier run is not carried again.
  */
 export async function importHub(hubRepo: string, opts: ImportOptions = {}): Promise<ImportReport> {
   const now = opts.now ?? new Date().toISOString();
@@ -322,6 +402,8 @@ export async function importHub(hubRepo: string, opts: ImportOptions = {}): Prom
     edges: 0,
     claims: 0,
     parents: 0,
+    comments: 0,
+    claimComments: 0,
     skipped: [],
   };
   // The one loss this import can suffer without noticing: the textual forms are in the bodies we
@@ -373,6 +455,7 @@ export async function importHub(hubRepo: string, opts: ImportOptions = {}): Prom
       );
       report.updated += 1;
       byNumber.set(issue.number, existing.id);
+      carryComments(issue, existing.id, report);
     } else {
       const created = createTicket({
         workspace,
@@ -386,6 +469,7 @@ export async function importHub(hubRepo: string, opts: ImportOptions = {}): Prom
       });
       report.created += 1;
       byNumber.set(issue.number, created.id);
+      carryComments(issue, created.id, report);
     }
     if (!report.boards.includes(workspace)) report.boards.push(workspace);
   }

@@ -72,7 +72,17 @@ function describe(ticket: Ticket, all: readonly Ticket[]): string {
   if (comments.length > 0) {
     lines.push("", "  comments:");
     for (const c of comments) {
-      lines.push(`  — ${c.at}${c.session ? ` (${c.session})` : ""}\n    ${c.body}`);
+      // A session wrote it, or — for anything carried in from the hub, where the authors are
+      // people — the actor did. "servant" is the default actor and names nobody, so it is not shown.
+      const who = c.session ?? (c.actor === "servant" ? "" : c.actor);
+      // Indented as a block: an imported comment can be pages of markdown, and indenting only its
+      // first line leaves the rest flush against the ticket's own body.
+      const body = c.body
+        .trimEnd()
+        .split("\n")
+        .map((line, n) => (n === 0 || !line.trim() ? line : `    ${line}`))
+        .join("\n");
+      lines.push(`  — ${c.at}${who ? ` (${who})` : ""}\n    ${body}`);
     }
   }
   return lines.join("\n");

@@ -6,7 +6,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type ArgsDef, type CommandDef, runCommand } from "citty";
-import { closeBoard, requireTicket, ticketActions } from "../src/core/board/store.ts";
+import { carryComment, closeBoard, requireTicket, ticketActions } from "../src/core/board/store.ts";
 import { claimCommand } from "../src/commands/claim.ts";
 import { tasksCommand } from "../src/commands/tasks.ts";
 import { ticketCommand } from "../src/commands/ticket.ts";
@@ -101,6 +101,19 @@ describe("servant ticket show / comment / label / close", () => {
     const blocker = await run(ticketCommand, "show", String(core.number));
     expect(blocker).toContain(`blocks:`);
     expect(blocker).toContain(`#${tenant.number} tenant`);
+  });
+
+  test("show names a carried comment's author, and indents every line of it", async () => {
+    const t = await newTicket("viewer");
+    carryComment(requireTicket(WS, t.number).id, {
+      externalId: "IC_1",
+      actor: "Barak-Zen",
+      body: "Variant B won.\n\n> the criterion needed refining\n",
+      at: "2026-08-14T09:00:00Z",
+    });
+    const shown = await run(ticketCommand, "show", String(t.number));
+    expect(shown).toContain("— 2026-08-14T09:00:00Z (Barak-Zen)");
+    expect(shown).toContain("    Variant B won.\n\n    > the criterion needed refining");
   });
 
   test("labels are added and removed with no label needing to exist first", async () => {

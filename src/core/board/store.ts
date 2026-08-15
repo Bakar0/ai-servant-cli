@@ -454,6 +454,8 @@ export interface TicketAction {
   kind: string;
   body: string;
   at: string;
+  /** Its identity in the system it was carried from, or null for anything servant wrote itself. */
+  externalId: string | null;
 }
 
 interface ActionRow {
@@ -464,12 +466,13 @@ interface ActionRow {
   kind: string;
   body: string;
   at: string;
+  external_id: string | null;
 }
 
 export function ticketActions(ticketId: number): TicketAction[] {
   return openBoard()
     .query<ActionRow, [number]>(
-      `SELECT id, ticket_id, actor, session, kind, body, at FROM ticket_actions
+      `SELECT id, ticket_id, actor, session, kind, body, at, external_id FROM ticket_actions
        WHERE ticket_id = ? ORDER BY id`,
     )
     .all(ticketId)
@@ -481,6 +484,7 @@ export function ticketActions(ticketId: number): TicketAction[] {
       kind: r.kind,
       body: r.body,
       at: r.at,
+      externalId: r.external_id,
     }));
 }
 
@@ -512,6 +516,25 @@ export function addComment(
     body,
     at: opts.now ?? new Date().toISOString(),
   });
+}
+
+/**
+ * Carry a comment that was written somewhere else, keyed on its identity there.
+ *
+ * Returns false when that comment is already on the board. `ticket_actions` is append-only with no
+ * natural key, so an importer that re-ran would otherwise duplicate everything it had carried; the
+ * unique index makes the second run a no-op rather than a thing the caller has to remember.
+ */
+export function carryComment(
+  ticketId: number,
+  comment: { externalId: string; actor: string; body: string; at: string },
+): boolean {
+  const { changes } = openBoard().run(
+    `INSERT OR IGNORE INTO ticket_actions (ticket_id, actor, session, kind, body, at, external_id)
+     VALUES (?, ?, NULL, 'comment', ?, ?, ?)`,
+    [ticketId, comment.actor, comment.body, comment.at, comment.externalId],
+  );
+  return changes > 0;
 }
 
 export interface SeenSession {

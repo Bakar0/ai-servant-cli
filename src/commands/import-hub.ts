@@ -28,8 +28,13 @@ export const importHubCommand = defineCommand({
     const report = await importHub(hubRepo);
     console.log(
       `servant: ${report.created} created, ${report.updated} updated, ${report.edges} blocking edge(s), ` +
-        `${report.claims} live Claim(s), ${report.parents} map link(s)`,
+        `${report.claims} live Claim(s), ${report.parents} map link(s), ${report.comments} comment(s)`,
     );
+    if (report.claimComments > 0) {
+      console.log(
+        `  ${report.claimComments} claim-protocol comment(s) were left behind — what they say arrives as each ticket's Claim`,
+      );
+    }
     for (const { workspace, tickets } of importedBoardSummary()) {
       console.log(`  ${workspace}  (${tickets})`);
     }
