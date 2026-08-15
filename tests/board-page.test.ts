@@ -275,8 +275,9 @@ describe("the page", () => {
   test("folds the fog away under the tree, the way the decisions fold", async () => {
     file("Charted", {
       labels: ["wayfinder:map"],
-      body: "## Not yet specified\n\n- Does dispatch need the workspace?\n- How do Claims expire?\n"
-        + "\n## Decisions so far\n\n- SQLite is the contract.\n",
+      body:
+        "## Not yet specified\n\n- Does dispatch need the workspace?\n- How do Claims expire?\n" +
+        "\n## Decisions so far\n\n- SQLite is the contract.\n",
     });
 
     await mount({ view: view() });
