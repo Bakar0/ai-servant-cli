@@ -92,7 +92,7 @@
                  max-height:18em;overflow:auto}
   .frame .oos li{margin-bottom:7px;line-height:1.45}
   code{background:var(--panel2);border-radius:4px;padding:1px 4px;font-size:.92em}
-  .frame b,.fogbox b,details.dec b{color:var(--dim);font-weight:600}
+  .frame b,details.fog b,details.dec b{color:var(--dim);font-weight:600}
 
   .card{background:var(--panel2);border:1px solid var(--line);border-left-width:3px;
         border-left-color:var(--line);border-radius:7px;padding:8px 10px;position:relative;
@@ -179,9 +179,8 @@
   .railstrip:hover{border-color:var(--fog);color:var(--ink)}
   .railstrip .lbl{writing-mode:vertical-rl;font-size:10px;letter-spacing:.09em;font-weight:600;
                   text-transform:uppercase;color:var(--faint)}
-  .railstrip .fogcount{font-size:10px;color:var(--fog)}
   /* Scrolls itself. A twenty-card column makes the page far taller than the viewport, and a sticky
-     box taller than the viewport can never show its own bottom — which put the fog out of reach. */
+     box taller than the viewport can never show its own bottom. */
   .rail{position:sticky;top:20px;background:var(--panel);border:1px solid var(--line);
         border-radius:10px;padding:14px;max-height:calc(100vh - 40px);overflow-y:auto}
   .rail .grp{margin-bottom:15px}
@@ -202,19 +201,17 @@
            background:var(--panel2)}
   .barline i{display:block;height:100%}
 
-  .fogbox{border:1px dashed var(--fog);border-radius:10px;padding:13px;background:#171923}
-  .fogbox h3{margin:0 0 3px;font-size:10.5px;letter-spacing:.09em;text-transform:uppercase;
-             color:var(--faint);font-weight:600}
-  .fogbox p{margin:0 0 10px;font-size:10.5px;font-style:italic;color:var(--faint)}
-  .fogbox ul{margin:0;padding-left:16px;color:var(--dim)}
-  .fogbox li{margin-bottom:9px;font-size:12px;line-height:1.4}
-  .fogbox li::marker{color:var(--fog)}
-
-  details.dec{margin-top:22px;border:1px solid var(--line);border-radius:10px;
+  details.fog,details.dec{margin-top:22px;border:1px solid var(--line);border-radius:10px;
               background:var(--panel);padding:11px 17px}
-  details.dec summary{cursor:pointer;color:var(--dim);font-size:12.5px}
+  /* Dashed, still: the one thing the box has ever said on its own is that its edge is not settled. */
+  details.fog{border-style:dashed;border-color:var(--fog)}
+  details.fog summary,details.dec summary{cursor:pointer;color:var(--dim);font-size:12.5px}
+  details.fog p{margin:8px 0 0;font-size:10.5px;font-style:italic;color:var(--faint)}
+  details.fog ul{margin:8px 0 3px;padding-left:20px;color:var(--dim)}
   details.dec ol{margin:10px 0 3px;padding-left:20px;color:var(--dim)}
-  details.dec li{margin-bottom:5px}
+  details.fog li,details.dec li{margin-bottom:5px}
+  details.fog li{line-height:1.45}
+  details.fog li::marker{color:var(--fog)}
 
   .legend{display:flex;gap:16px;flex-wrap:wrap;align-items:center;margin:0 0 11px;
           font-size:11px;color:var(--faint)}
@@ -910,15 +907,21 @@ function frameHtml() {
     </div>`;
 }
 
+/**
+ * The fog reads as prose, and prose wants the tree's width. In the rail it was a 300px column below
+ * every ticket group — reachable only by scrolling past the whole board, and wrapped too narrow to
+ * read. It sits beside the decisions instead: the two halves of what the map knows, both folded
+ * away until asked for.
+ */
 function fogHtml() {
   const fog = view.map ? view.map.fog : [];
   if (!fog.length) return "";
   return html`
-    <div class="fogbox">
-      <h3>Not yet specified</h3>
+    <details class="fog">
+      <summary>Not yet specified — ${fog.length} unanswered</summary>
       <p>the edge of the map</p>
       <ul>${fog.map((q) => html`<li>${inlineMd(q)}</li>`)}</ul>
-    </div>`;
+    </details>`;
 }
 
 function decisionsHtml() {
@@ -960,9 +963,6 @@ function railHtml() {
       <button class="railstrip railtoggle" type="button" title="Show the board (r)">
         <span>‹</span>
         <span class="lbl">Board</span>
-        ${/* The fog is in the rail, so folding takes it away. Say that it is there rather than
-              letting "not yet specified" silently become "nothing unanswered". */
-          fogCount() > 0 ? html`<span class="fogcount" title="unanswered questions">?${fogCount()}</span>` : ""}
       </button>`;
   }
   const bySeq = cardsBySeq();
@@ -985,13 +985,8 @@ function railHtml() {
                 </div>`)
             : html`<div class="empty" style="padding-left:6px">—</div>`}
         </div>`)}
-      ${fogCount() > 0 &&
-        html`<div style="margin-top:16px;padding-top:14px;border-top:1px solid var(--line)">
-               ${fogHtml()}</div>`}
     </div>`;
 }
-
-const fogCount = () => (view && view.map ? view.map.fog.length : 0);
 
 function legendHtml() {
   return html`
@@ -1044,6 +1039,7 @@ function render() {
             ${treeHtml()}
           </div>
         </div>
+        ${fogHtml()}
         ${decisionsHtml()}
       </div>
       ${railHtml()}
