@@ -9,7 +9,7 @@ import { dirname } from "node:path";
 import { Database } from "bun:sqlite";
 import { boardDbPath } from "../paths.ts";
 
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
 
 const SCHEMA = `
 CREATE TABLE boards (
@@ -73,13 +73,26 @@ CREATE TABLE sessions (
 );
 `;
 
+// An action's identity in whatever system it came from — a hub comment's GitHub id, and nothing
+// else so far. Unique so that carrying the same comment twice is refused by the database rather
+// than by a read-then-write the importer would have to get right; NULLs stay distinct in SQLite, so
+// the actions servant writes itself are unconstrained.
+const ADD_EXTERNAL_ID = `
+ALTER TABLE ticket_actions ADD COLUMN external_id TEXT;
+CREATE UNIQUE INDEX ticket_actions_external ON ticket_actions (external_id);
+`;
+
+/** One step per schema version, applied in order. Index N takes the board from version N to N+1. */
+const MIGRATIONS: readonly string[] = [SCHEMA, ADD_EXTERNAL_ID];
+
 let cached: { path: string; db: Database } | null = null;
 
 function migrate(db: Database): void {
   const row = db.query<{ user_version: number }, []>("PRAGMA user_version").get();
-  if ((row?.user_version ?? 0) >= SCHEMA_VERSION) return;
+  const from = row?.user_version ?? 0;
+  if (from >= SCHEMA_VERSION) return;
   db.transaction(() => {
-    db.run(SCHEMA);
+    for (const step of MIGRATIONS.slice(from, SCHEMA_VERSION)) db.run(step);
     db.run(`PRAGMA user_version = ${SCHEMA_VERSION}`);
   })();
 }

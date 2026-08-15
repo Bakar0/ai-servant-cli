@@ -3,9 +3,11 @@ import { existsSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { Database } from "bun:sqlite";
 import {
   addComment,
   addDependency,
+  carryComment,
   closeBoard,
   createTicket,
   dependentsOf,
@@ -40,12 +42,54 @@ const AT = "2026-08-13T10:00:00.000Z";
 const newTicket = (workspace: string, title: string, over = {}) =>
   createTicket({ workspace, title, now: AT, ...over });
 
+const HUB_COMMENT = { actor: "Barak-Zen", body: "the verdict", at: "2026-08-14T09:00:00Z" };
+
 describe("the database itself", () => {
   test("is created at the servant root on first write, in WAL mode", () => {
     expect(existsSync(boardDbPath())).toBe(false);
     newTicket("alpha", "first");
     expect(existsSync(boardDbPath())).toBe(true);
     expect(boardDbPath().startsWith(tmpRoot)).toBe(true);
+  });
+
+  test("a board written before external ids existed is migrated in place, not replaced", () => {
+    // The real board has been carrying tickets since before this column existed, so the upgrade has
+    // to be an ALTER over live rows rather than a fresh CREATE.
+    const v1 = new Database(boardDbPath(), { create: true });
+    v1.run(`
+      CREATE TABLE boards (id INTEGER PRIMARY KEY AUTOINCREMENT, workspace TEXT NOT NULL UNIQUE,
+        created_at TEXT NOT NULL);
+      CREATE TABLE tickets (id INTEGER PRIMARY KEY AUTOINCREMENT, board_id INTEGER NOT NULL
+        REFERENCES boards(id) ON DELETE CASCADE, seq INTEGER NOT NULL CHECK (seq > 0),
+        title TEXT NOT NULL, body TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'todo',
+        labels TEXT NOT NULL DEFAULT '[]', claimed_by TEXT, claimed_at TEXT,
+        parent_id INTEGER REFERENCES tickets(id) ON DELETE SET NULL,
+        input TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+        UNIQUE (board_id, seq));
+      CREATE TABLE ticket_dependencies (ticket_id INTEGER NOT NULL REFERENCES tickets(id)
+        ON DELETE CASCADE, depends_on INTEGER NOT NULL REFERENCES tickets(id) ON DELETE CASCADE,
+        created_at TEXT NOT NULL, PRIMARY KEY (ticket_id, depends_on),
+        CHECK (ticket_id <> depends_on));
+      CREATE TABLE ticket_actions (id INTEGER PRIMARY KEY AUTOINCREMENT, ticket_id INTEGER NOT NULL
+        REFERENCES tickets(id) ON DELETE CASCADE, actor TEXT NOT NULL, session TEXT,
+        kind TEXT NOT NULL, body TEXT NOT NULL DEFAULT '', at TEXT NOT NULL);
+      CREATE TABLE sessions (name TEXT PRIMARY KEY, pid INTEGER, last_seen TEXT NOT NULL);
+      INSERT INTO boards (workspace, created_at) VALUES ('alpha', '${AT}');
+      INSERT INTO tickets (board_id, seq, title, created_at, updated_at)
+        VALUES (1, 76, 'store', '${AT}', '${AT}');
+      INSERT INTO ticket_actions (ticket_id, actor, kind, body, at)
+        VALUES (1, 'servant', 'comment', 'written before the column existed', '${AT}');
+      PRAGMA user_version = 1;
+    `);
+    v1.close();
+
+    const ticket = findTicket("alpha", 76);
+    expect(ticket?.title).toBe("store");
+    const existing = ticketActions(ticket?.id ?? 0);
+    expect(existing.map((a) => [a.body, a.externalId])).toEqual([
+      ["written before the column existed", null],
+    ]);
+    expect(carryComment(ticket?.id ?? 0, { externalId: "IC_1", ...HUB_COMMENT })).toBe(true);
   });
 });
 
@@ -253,6 +297,23 @@ describe("actions", () => {
       ["comment", "found the cause", "alpha-t1"],
       ["comment", "and the fix", null],
     ]);
+    expect(actions.every((a) => a.externalId === null)).toBe(true);
+  });
+
+  test("a carried comment lands once, however many times it is carried", () => {
+    const t = newTicket("alpha", "one");
+    expect(carryComment(t.id, { externalId: "IC_1", ...HUB_COMMENT })).toBe(true);
+    expect(carryComment(t.id, { externalId: "IC_1", ...HUB_COMMENT })).toBe(false);
+    const carried = ticketActions(t.id).filter((a) => a.kind === "comment");
+    expect(carried).toHaveLength(1);
+    expect(carried[0]).toMatchObject({ actor: "Barak-Zen", session: null, externalId: "IC_1" });
+  });
+
+  test("the same comment cannot be carried onto two tickets, because its identity is its own", () => {
+    const a = newTicket("alpha", "one");
+    const b = newTicket("alpha", "two");
+    expect(carryComment(a.id, { externalId: "IC_1", ...HUB_COMMENT })).toBe(true);
+    expect(carryComment(b.id, { externalId: "IC_1", ...HUB_COMMENT })).toBe(false);
   });
 });
 

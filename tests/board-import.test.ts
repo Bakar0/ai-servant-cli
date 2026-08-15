@@ -11,6 +11,7 @@ import {
   parseParentRef,
 } from "../src/core/board/import-hub.ts";
 import {
+  addComment,
   closeBoard,
   findTicket,
   listBoards,
@@ -37,14 +38,32 @@ afterEach(async () => {
 
 const AT = "2026-08-13T10:00:00.000Z";
 
+interface FakeComment {
+  body: string;
+  id?: string | undefined;
+  author?: string;
+  createdAt?: string;
+}
+
 interface FakeIssue {
   number: number;
   title: string;
   state?: string;
   labels?: string[];
   body?: string;
-  comments?: string[];
+  comments?: (string | FakeComment)[];
 }
+
+/** Ids are per-issue and stable across runs, exactly as GitHub's are. */
+const asComment = (issue: number, raw: string | FakeComment, index: number) => {
+  const c: FakeComment = typeof raw === "string" ? { body: raw } : raw;
+  return {
+    id: c.id === undefined ? `IC_${issue}_${index}` : c.id,
+    author: { login: c.author ?? "Barak-Zen" },
+    body: c.body,
+    createdAt: c.createdAt ?? "2026-08-13T08:00:00Z",
+  };
+};
 
 const listing = (issues: FakeIssue[]) =>
   JSON.stringify(
@@ -55,7 +74,7 @@ const listing = (issues: FakeIssue[]) =>
       url: `https://github.com/acme/hub/issues/${i.number}`,
       labels: (i.labels ?? []).map((name) => ({ name })),
       body: i.body ?? "",
-      comments: (i.comments ?? []).map((body) => ({ body })),
+      comments: (i.comments ?? []).map((c, n) => asComment(i.number, c, n)),
     })),
   );
 
@@ -342,6 +361,131 @@ describe("importing the hub", () => {
     expect(f.ready.map((t) => t.seq)).toEqual([75, 76]);
     expect(f.blocked.map((b) => b.ticket.seq)).toEqual([77]);
     expect(findTicket("kanban", 77)?.url).toBe("http://127.0.0.1:7787/w/kanban/t/77");
+  });
+
+  test("comments come over with their author and their timestamp", async () => {
+    const report = await runImport([
+      {
+        number: 77,
+        title: "viewer",
+        labels: ["ws:kanban"],
+        comments: [
+          { body: "Variant B won: the rail reads as a map.", createdAt: "2026-08-14T09:00:00Z" },
+          { body: "One criterion needed refining.", author: "someone-else" },
+        ],
+      },
+    ]);
+    expect(report.comments).toBe(2);
+    const carried = ticketActions(requireTicket("kanban", 77).id).filter(
+      (a) => a.kind === "comment",
+    );
+    expect(carried.map((c) => [c.actor, c.body, c.at])).toEqual([
+      ["Barak-Zen", "Variant B won: the rail reads as a map.", "2026-08-14T09:00:00Z"],
+      ["someone-else", "One criterion needed refining.", "2026-08-13T08:00:00Z"],
+    ]);
+    // A hub author is a person, not a servant session — nothing may be invented in that column.
+    expect(carried.every((c) => c.session === null)).toBe(true);
+  });
+
+  test("a re-run carries no comment twice, and leaves what was written here alone", async () => {
+    const issues: FakeIssue[] = [
+      { number: 77, title: "viewer", labels: ["ws:kanban"], comments: ["the verdict"] },
+    ];
+    const first = await runImport(issues);
+    expect(first.comments).toBe(1);
+
+    const ticketId = requireTicket("kanban", 77).id;
+    addComment(ticketId, "and a note written on the board since", { session: "kanban-t77" });
+
+    // The hub gained one comment between the runs, which is the case that must still work.
+    issues[0]?.comments?.push("a later thought");
+    const second = await runImport(issues);
+    expect(second.comments).toBe(1);
+
+    const bodies = ticketActions(ticketId)
+      .filter((a) => a.kind === "comment")
+      .map((c) => c.body);
+    expect(bodies).toEqual([
+      "the verdict",
+      "and a note written on the board since",
+      "a later thought",
+    ]);
+
+    // A third run, with nothing new on the hub, is a no-op.
+    expect((await runImport(issues)).comments).toBe(0);
+    expect(ticketActions(ticketId).filter((a) => a.kind === "comment")).toHaveLength(3);
+  });
+
+  test("claim-protocol comments are counted rather than carried as comments", async () => {
+    const report = await runImport([
+      {
+        number: 76,
+        title: "store",
+        labels: ["ws:kanban"],
+        comments: [
+          "<!-- servant:claim -->\n**Claim:** `kanban-t76` — since 2026-08-13T09:00:00.000Z",
+          "the reasoning worth keeping",
+          "<!-- servant:claim -->\n**Claim released:** `kanban-t76` — at 2026-08-13T10:00:00.000Z",
+        ],
+      },
+    ]);
+    expect(report).toMatchObject({ comments: 1, claimComments: 2 });
+    expect(ticketActions(requireTicket("kanban", 76).id).map((a) => a.kind)).toEqual([
+      "created",
+      "comment",
+    ]);
+  });
+
+  test("a comment with no id is reported rather than carried un-deduplicable", async () => {
+    const report = await runImport([
+      {
+        number: 5,
+        title: "odd one",
+        labels: ["ws:kanban"],
+        comments: [{ body: "no id here", id: "", createdAt: "2026-08-14T09:00:00Z" }],
+      },
+    ]);
+    expect(report.comments).toBe(0);
+    expect(report.skipped).toEqual([
+      "#5 — a comment by Barak-Zen at 2026-08-14T09:00:00Z has no id, so it cannot be carried without risking a duplicate on the next run",
+    ]);
+  });
+
+  test("two hub issues may carry identically worded comments", async () => {
+    const report = await runImport([
+      { number: 1, title: "a", labels: ["ws:k"], comments: ["done"] },
+      { number: 2, title: "b", labels: ["ws:k"], comments: ["done"] },
+    ]);
+    expect(report.comments).toBe(2);
+  });
+
+  test("the import only ever reads GitHub — no call it makes can mutate the hub", async () => {
+    const apiCalls: (readonly string[])[] = [];
+    const hubArgs: string[] = [];
+    await importHub("acme/hub", {
+      runner: async (repo) => {
+        hubArgs.push(repo);
+        return listing([
+          { number: 1, title: "core", labels: ["ws:k"], comments: ["a verdict"] },
+          { number: 2, title: "waits", labels: ["ws:k"], body: "Blocked by: #1" },
+        ]);
+      },
+      apiRunner: async (args) => {
+        apiCalls.push(args);
+        return fakeNative({ 2: [1] })(args);
+      },
+      now: AT,
+    });
+    // The issue read is handed a repo slug and nothing else, so it has no way to name a mutation.
+    expect(hubArgs).toEqual(["acme/hub"]);
+    expect(apiCalls.length).toBeGreaterThan(0);
+    for (const args of apiCalls) {
+      // `gh api` defaults to GET; a write needs one of these, and none is ever passed.
+      for (const flag of ["-X", "--method", "-f", "-F", "--field", "--input"]) {
+        expect(args).not.toContain(flag);
+      }
+      expect(args[0]).toMatch(/^repos\/acme\/hub\//);
+    }
   });
 
   test("native dependencies that cannot be read degrade to the textual forms", async () => {
