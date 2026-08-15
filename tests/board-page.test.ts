@@ -59,6 +59,12 @@ async function mount(payload: {
   focus?: number | null;
   /** Board names, in the order the server would send them — most recently touched first. */
   boards?: string[];
+  /**
+   * Runs against the fresh window before the page script does. The only way to assert what the page
+   * does *on load* with state it remembered from a previous visit — a second `mount` is a new
+   * window with empty storage, so toggling after it proves nothing about the read-back path.
+   */
+  seed?: (w: Window) => void;
 }): Promise<void> {
   const html = fillDataSlot(BOARD_TEMPLATE, BOARD_DATA_SLOT, {
     boards: (payload.boards ?? [WS]).map((workspace) => ({
@@ -84,6 +90,7 @@ async function mount(payload: {
   // Nothing is listening in these tests, and 127.0.0.1:7787 may well be a real board on the
   // developer's machine. Every request fails until a test says what it should answer.
   stubFetch(() => Promise.reject(new Error("no server")));
+  payload.seed?.(win);
   win.document.write(html);
   await win.happyDOM.waitUntilComplete();
 }
@@ -844,6 +851,141 @@ describe("Markdown at block level", () => {
     expect($$("#panel .md > p").map((p) => p.textContent)).toEqual(["one", "two", "after"]);
     expect(md.querySelector("blockquote")?.textContent).toBe("quoted");
     expect(md.querySelector("hr")).not.toBeNull();
+  });
+});
+
+// The tree and the rail want the same 300px. Following a chain is when the tree wants it most.
+describe("folding the rail away", () => {
+  const shut = () => body().classList.contains("railshut");
+  const toggle = () => click($(".railtoggle") as PageElement);
+
+  const mapped = (over: Record<string, unknown> = {}) =>
+    file("Replace the tracker", {
+      labels: ["wayfinder:map"],
+      body: "## Not yet specified\n\n- Does dispatch need the workspace?",
+      ...over,
+    });
+
+  test("opens showing the board, and folds to a strip that can bring it back", async () => {
+    file("a ticket");
+    await mount({ view: view() });
+
+    expect(shut()).toBe(false);
+    expect($(".rail")).not.toBeNull();
+
+    toggle();
+    expect(shut()).toBe(true);
+    expect($(".rail")).toBeNull();
+    // The way back has to survive the fold: a toggle that goes with what it toggles is unfindable.
+    // The whole strip is the button, so a click on its label reopens rather than falling through to
+    // the "click away" branch and dropping a locked chain.
+    expect($(".railstrip.railtoggle")).not.toBeNull();
+
+    toggle();
+    expect(shut()).toBe(false);
+    expect($$(".rail .item")).toHaveLength(1);
+  });
+
+  test("stays folded through a live view push", async () => {
+    const t = file("a ticket");
+    await mount({ view: view() });
+    toggle();
+
+    updateTicket(t.id, { status: "in_progress" }, { now: NOW });
+    (win as unknown as { applyBoardView: (v: BoardView) => void }).applyBoardView(view());
+
+    // The state is a variable, not a class on a node inside #app — which the push just replaced.
+    expect(shut()).toBe(true);
+    expect($(".rail")).toBeNull();
+  });
+
+  test("redraws the wires, so a locked chain still traces at the new width", async () => {
+    const blocker = file("blocker");
+    const waiting = file("waiting");
+    addDependency(waiting.id, blocker.id, { now: AT });
+    await mount({ view: view() });
+    click(cardEl(blocker.seq));
+    expect(body().classList.contains("lock")).toBe(true);
+
+    toggle();
+
+    // Folding changes the width the tree is laid out in and fires no resize event. The lock and its
+    // wires must come back from the re-render, or the edges keep their old geometry.
+    expect(shut()).toBe(true);
+    expect(body().classList.contains("lock")).toBe(true);
+    expect($$("#wires path").length).toBeGreaterThan(0);
+  });
+
+  test("the r key folds it too", async () => {
+    file("a ticket");
+    await mount({ view: view() });
+    press("r");
+    expect(shut()).toBe(true);
+    press("r");
+    expect(shut()).toBe(false);
+  });
+
+  test("writes the choice down", async () => {
+    file("a ticket");
+    await mount({ view: view() });
+    toggle();
+    expect(win.localStorage.getItem("servant-board-rail")).toBe("closed");
+    toggle();
+    expect(win.localStorage.getItem("servant-board-rail")).toBe("open");
+  });
+
+  test("opens folded when a previous visit folded it", async () => {
+    file("a ticket");
+    // Seeded before the page script runs — a second mount is a new window with empty storage, so
+    // toggling after it would prove nothing about the read-back path.
+    await mount({
+      view: view(),
+      seed: (w) => w.localStorage.setItem("servant-board-rail", "closed"),
+    });
+    expect(shut()).toBe(true);
+    expect($(".rail")).toBeNull();
+  });
+
+  test("still folds where storage is refused outright", async () => {
+    file("a ticket");
+    // A locked-down profile throws on read as well as on write.
+    await mount({
+      view: view(),
+      seed: (w) => {
+        const store = w.localStorage as unknown as Record<string, unknown>;
+        store.getItem = () => {
+          throw new Error("denied");
+        };
+        store.setItem = () => {
+          throw new Error("denied");
+        };
+      },
+    });
+    expect(shut()).toBe(false);
+    toggle();
+    expect(shut()).toBe(true);
+  });
+
+  test("says the fog folded away with the board, rather than letting it vanish", async () => {
+    mapped();
+    file("a ticket");
+    await mount({ view: view() });
+
+    // #77 settled where fog lives, and this ticket does not reopen that: it stays in the rail, on
+    // screen at first paint. Folding takes it away, so the strip has to say it is there — otherwise
+    // "not yet specified" quietly reads as "nothing unanswered".
+    expect($(".rail .fogbox")?.textContent).toContain("Does dispatch need the workspace?");
+
+    toggle();
+    expect($(".railstrip .fogcount")?.textContent).toBe("?1");
+  });
+
+  test("shows no fog count on a board whose map has none", async () => {
+    mapped({ body: "## Destination\n\nSomewhere." });
+    await mount({ view: view() });
+    toggle();
+    expect($(".railstrip")).not.toBeNull();
+    expect($(".railstrip .fogcount")).toBeNull();
   });
 });
 

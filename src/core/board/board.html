@@ -161,6 +161,25 @@
   .donecol .card .r2{display:none}
 
   .split{display:grid;grid-template-columns:minmax(0,1fr) 300px;gap:22px;align-items:start}
+  /* Shut, the rail keeps a 26px strip rather than disappearing: the tree takes the other 274px, and
+     the way back is still on screen. A toggle that vanishes with the thing it toggles cannot be
+     found again. */
+  body.railshut .split{grid-template-columns:minmax(0,1fr) 26px}
+  .rail>h2.sec{display:flex;align-items:center;justify-content:space-between;gap:8px}
+  .railtoggle{border:1px solid var(--line);border-radius:6px;background:var(--panel);
+              color:var(--dim);font:inherit;font-size:12px;line-height:1;padding:2px 6px;
+              cursor:pointer}
+  .railtoggle:hover{color:var(--ink);border-color:var(--fog)}
+  /* The whole strip is the button. A click anywhere on it must reopen the rail — landing on the
+     label instead would fall through to the click handler's "click away" branch and drop the
+     reader's locked chain. */
+  .railstrip{position:sticky;top:20px;width:100%;display:flex;flex-direction:column;
+             align-items:center;gap:11px;background:var(--panel);border:1px solid var(--line);
+             border-radius:10px;padding:7px 0;color:var(--dim);font:inherit;cursor:pointer}
+  .railstrip:hover{border-color:var(--fog);color:var(--ink)}
+  .railstrip .lbl{writing-mode:vertical-rl;font-size:10px;letter-spacing:.09em;font-weight:600;
+                  text-transform:uppercase;color:var(--faint)}
+  .railstrip .fogcount{font-size:10px;color:var(--fog)}
   /* Scrolls itself. A twenty-card column makes the page far taller than the viewport, and a sticky
      box taller than the viewport can never show its own bottom — which put the fog out of reach. */
   .rail{position:sticky;top:20px;background:var(--panel);border:1px solid var(--line);
@@ -268,8 +287,11 @@
   /* Last, so it wins on source order over the rules it overrides. Below this width the rail is
      too narrow to read a ticket title in, so it goes under the tree instead of beside it. */
   @media (max-width:1000px){
-    .split{grid-template-columns:minmax(0,1fr)}
-    .rail{position:static}
+    /* `body.railshut .split` outranks a bare `.split` on specificity, not source order, so the
+       stacked layout has to be restated at the same weight or a shut rail leaves a dead 26px
+       column here. */
+    .split,body.railshut .split{grid-template-columns:minmax(0,1fr)}
+    .rail,.railstrip{position:static}
   }
 </style>
 </head>
@@ -304,15 +326,58 @@ let workspace = DATA.workspace;
 let filter = "";
 let drawerOpen = readDrawerState();
 
-function readDrawerState() {
-  // Open by default only when there is a choice to make.
+/**
+ * Open by default, on every board — deliberately not "folded once the tree is wide enough to want
+ * the space". The fold is a reader's choice about what they are doing right now (following a chain
+ * versus reading state), and no board measurement predicts that; a viewer that opened with the
+ * board already hidden, on exactly the busiest boards, would be the worse surprise.
+ */
+let railOpen = readOpenFlag("rail", true);
+
+/**
+ * A remembered open/closed choice. Both of the page's two are the same envelope: a locked-down
+ * profile throws on read as well as on write, and the answer to either is the default rather than
+ * a broken page.
+ */
+function readOpenFlag(key, fallback) {
   try {
-    const saved = localStorage.getItem("servant-board-drawer");
+    const saved = localStorage.getItem("servant-board-" + key);
     if (saved) return saved === "open";
   } catch {
-    // No storage available; fall through to the default.
+    // No storage available, or reading it is refused.
   }
-  return (DATA.boards || []).length > 1;
+  return fallback;
+}
+
+function writeOpenFlag(key, open) {
+  try {
+    localStorage.setItem("servant-board-" + key, open ? "open" : "closed");
+  } catch {
+    // Private browsing, or a locked-down profile. The choice still applies, it just forgets.
+  }
+}
+
+function setRail(open) {
+  railOpen = open;
+  writeOpenFlag("rail", open);
+  applyRailState();
+  // Folding changes the width the tree is laid out in and no resize event fires for that, so the
+  // wires would keep their old geometry and point at nothing. `render` ends in `applyHighlight`,
+  // which redraws them — which is why this is a full render rather than a class toggle.
+  render();
+}
+
+/**
+ * `railshut` rather than `rail`, opposite to `body.drawer`: each class marks the state its feature
+ * is *not* usually in, so neither is on the body most of the time.
+ */
+function applyRailState() {
+  document.body.classList.toggle("railshut", !railOpen);
+}
+
+function readDrawerState() {
+  // Open by default only when there is a choice to make.
+  return readOpenFlag("drawer", (DATA.boards || []).length > 1);
 }
 /** The traced chain, held across pointer moves. Seeded from a /t/<seq> deep link. */
 let locked = null;
@@ -612,11 +677,7 @@ function renderDrawer() {
 
 function setDrawer(open, options) {
   drawerOpen = open;
-  try {
-    localStorage.setItem("servant-board-drawer", open ? "open" : "closed");
-  } catch {
-    // Private browsing, or a locked-down profile. The drawer still works, it just forgets.
-  }
+  writeOpenFlag("drawer", open);
   renderDrawer();
   // The drawer changes the width the tree is laid out in, and no resize event fires for that.
   if (view) applyHighlight(locked);
@@ -883,11 +944,32 @@ function treeHtml() {
     </div>`);
 }
 
+/**
+ * The board as a rail — and the option of putting it away.
+ *
+ * The tree and the rail answer different questions: the tree is what order the work happens in, the
+ * rail is what state it is all in. Following a chain wants width, and while you are doing that the
+ * rail is 300px the edges could have used. So it folds to a strip.
+ *
+ * `railOpen` is a variable rather than a class on a node inside `#app`, because a view push rebuilds
+ * `#app` — reading the state back off the DOM would reopen a rail the reader had just shut.
+ */
 function railHtml() {
+  if (!railOpen) {
+    return html`
+      <button class="railstrip railtoggle" type="button" title="Show the board (r)">
+        <span>‹</span>
+        <span class="lbl">Board</span>
+        ${/* The fog is in the rail, so folding takes it away. Say that it is there rather than
+              letting "not yet specified" silently become "nothing unanswered". */
+          fogCount() > 0 ? html`<span class="fogcount" title="unanswered questions">?${fogCount()}</span>` : ""}
+      </button>`;
+  }
   const bySeq = cardsBySeq();
   return html`
     <div class="rail scrolls">
-      <h2 class="sec">Board</h2>
+      <h2 class="sec">Board
+        <button class="railtoggle" type="button" title="Hide the board (r)">›</button></h2>
       <div class="barline">
         ${view.columns.map((col) => col.seqs.length === 0 ? "" :
           html`<i style="background:var(--c-${col.key});flex:${col.seqs.length}"
@@ -903,11 +985,13 @@ function railHtml() {
                 </div>`)
             : html`<div class="empty" style="padding-left:6px">—</div>`}
         </div>`)}
-      ${view.map && view.map.fog.length > 0 &&
+      ${fogCount() > 0 &&
         html`<div style="margin-top:16px;padding-top:14px;border-top:1px solid var(--line)">
                ${fogHtml()}</div>`}
     </div>`;
 }
+
+const fogCount = () => (view && view.map ? view.map.fog.length : 0);
 
 function legendHtml() {
   return html`
@@ -1085,6 +1169,8 @@ addEventListener("click", (e) => {
   }
   const copy = e.target.closest && e.target.closest(".copy");
   if (copy) { copyDispatch(copy); return; }
+  const railToggle = e.target.closest && e.target.closest(".railtoggle");
+  if (railToggle) { setRail(!railOpen); return; }
   // A click inside the panel is never a click away — that is the whole point of a panel you can
   // select text in. Only its own close button and its own links do anything.
   const panel = e.target.closest && e.target.closest("#panel");
@@ -1118,6 +1204,11 @@ addEventListener("keydown", (e) => {
   if (!typing && (e.key === "b" || e.key === "/") && !e.metaKey && !e.ctrlKey && !e.altKey) {
     e.preventDefault();
     setDrawer(true, { focus: true });
+    return;
+  }
+  if (!typing && e.key === "r" && !e.metaKey && !e.ctrlKey && !e.altKey) {
+    e.preventDefault();
+    setRail(!railOpen);
   }
 });
 
@@ -1272,6 +1363,7 @@ addEventListener("popstate", () => {
 
 addEventListener("resize", () => { if (view) applyHighlight(locked); });
 
+applyRailState();
 renderDrawer();
 render();
 // The deep link is the same gesture as a click on the card, so it goes through the same path — and
