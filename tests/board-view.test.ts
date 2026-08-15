@@ -83,6 +83,85 @@ describe("board columns", () => {
     expect(card(view(), t.seq).column).toBe("in_review");
   });
 
+  test("a live Claim is in progress, because that is what a working session writes", () => {
+    const t = file("claimed but never restatused");
+    updateClaim(t.id, { session: "s-alive", at: AT });
+
+    // `servant claim` never touches status, so reading status alone left this in Ready while a
+    // session was demonstrably carrying it — and In progress read empty.
+    expect(t.status).toBe("todo");
+    expect(card(view({ liveness: { known: true, liveSessions: ["s-alive"] } }), t.seq).column).toBe(
+      "in_progress",
+    );
+  });
+
+  test("a stale Claim falls back to ready, so it still reads as reclaimable", () => {
+    const t = file("claimed by a session that died");
+    updateClaim(t.id, { session: "s-gone", at: AT });
+
+    const v = view({ liveness: { known: true, liveSessions: [] } });
+    expect(card(v, t.seq).claim?.state).toBe("gone");
+    expect(card(v, t.seq).column).toBe("ready");
+  });
+
+  test("a Claim this host cannot vouch for still reads as in progress, never as free", () => {
+    const t = file("claimed");
+    updateClaim(t.id, { session: "s-unknown", at: AT });
+
+    const v = view();
+    expect(v.livenessKnown).toBe(false);
+    expect(card(v, t.seq).claim?.state).toBe("unknown");
+    expect(card(v, t.seq).column).toBe("in_progress");
+  });
+
+  test("blocked wins over a Claim — the prerequisite still does not exist", () => {
+    const store = file("store");
+    const viewer = file("viewer");
+    blocks(store, viewer);
+    updateClaim(viewer.id, { session: "s-alive", at: AT });
+
+    const v = view({ liveness: { known: true, liveSessions: ["s-alive"] } });
+    expect(card(v, viewer.seq).column).toBe("blocked");
+  });
+
+  test("the columns agree with the frontier's buckets, ticket for ticket", () => {
+    const blocker = file("blocker");
+    const held = file("held");
+    const dropped = file("dropped");
+    const free = file("free");
+    const waiting = file("waiting");
+    blocks(blocker, waiting);
+    updateClaim(held.id, { session: "s-alive", at: AT });
+    updateClaim(dropped.id, { session: "s-gone", at: AT });
+
+    const liveness = { known: true, liveSessions: ["s-alive"] };
+    const v = view({ liveness });
+    const frontier = computeFrontier(listTickets(), liveness, { workspace: WS });
+    const column = (seq: number) => card(v, seq).column;
+
+    expect(frontier.inFlight.map((f) => f.ticket.seq)).toEqual([held.seq]);
+    expect(column(held.seq)).toBe("in_progress");
+    // Stale and ready both dispatch, so both read ready; blocked reads blocked.
+    expect(frontier.stale.map((s) => s.ticket.seq)).toEqual([dropped.seq]);
+    expect(column(dropped.seq)).toBe("ready");
+    expect(frontier.ready.map((t) => t.seq).toSorted(byNumber)).toEqual(
+      [blocker.seq, free.seq].toSorted(byNumber),
+    );
+    expect(column(free.seq)).toBe("ready");
+    expect(frontier.blocked.map((b) => b.ticket.seq)).toEqual([waiting.seq]);
+    expect(column(waiting.seq)).toBe("blocked");
+  });
+
+  test("a stored status still wins over the Claim", () => {
+    const t = file("claimed and reviewed");
+    updateClaim(t.id, { session: "s-alive", at: AT });
+    updateTicket(t.id, { status: "in_review" }, { now: NOW });
+
+    expect(card(view({ liveness: { known: true, liveSessions: ["s-alive"] } }), t.seq).column).toBe(
+      "in_review",
+    );
+  });
+
   test("every card lands in exactly one column", () => {
     const a = file("a");
     const b = file("b");
