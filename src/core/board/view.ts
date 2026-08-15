@@ -238,15 +238,29 @@ function depthLabel(depth: number): string {
 }
 
 /**
- * Which column a ticket sits in. `blocked` and `ready` are not stored — they are this, over the
- * open-blocker count — so the card and the detail panel cannot say different things about the same
- * ticket.
+ * Which column a ticket sits in. `blocked`, `ready` and a claimed ticket's `in_progress` are not
+ * stored — they are this, over the open-blocker count and the Claim — so the card and the detail
+ * panel cannot say different things about the same ticket.
+ *
+ * A Claim counts as in-progress because it is the only thing a working session actually writes:
+ * `servant claim` never touches `status`, so reading status alone left a ticket a session was
+ * demonstrably carrying sitting in Ready while In progress read empty. The buckets line up with
+ * the frontier's exactly — in-flight is in-progress, a stale Claim falls back to ready so it still
+ * reads as reclaimable, and blocked wins over any Claim, for the frontier's own reason: whoever is
+ * carrying it, the prerequisite still does not exist.
  */
-function columnOf(status: TicketStatus, openBlockers: number): BoardColumn {
+function columnOf(
+  status: TicketStatus,
+  openBlockers: number,
+  claimState: ClaimView["state"] | null,
+): BoardColumn {
   if (status === "done") return "done";
   if (status === "in_review") return "in_review";
   if (status === "in_progress") return "in_progress";
-  return openBlockers > 0 ? "blocked" : "ready";
+  if (openBlockers > 0) return "blocked";
+  // "unknown" joins "alive": a Claim this host cannot vouch for must never read as free, which is
+  // the same call the frontier makes when it cannot read the session registry.
+  return claimState === "alive" || claimState === "unknown" ? "in_progress" : "ready";
 }
 
 function wayfinderType(labels: readonly string[]): WayfinderType {
@@ -430,6 +444,9 @@ export function buildBoardView(workspace: string, opts: BuildViewOptions = {}): 
   // re-deriving "unblocked and free" — that second derivation is exactly the drift the derived
   // columns exist to prevent.
   const readySeqs = new Set(frontier.ready.map((t) => t.seq));
+  // Before the cards, not after them: the column a claimed ticket lands in is derived from this, so
+  // patching it on afterwards would have left `columns` and the tree built from the pre-patch state.
+  const states = claimStates(frontier);
 
   const cards = mine
     .map((ticket) =>
@@ -443,6 +460,7 @@ export function buildBoardView(workspace: string, opts: BuildViewOptions = {}): 
         edgeColor,
         primaryBlocker,
         readySeqs,
+        claimStates: states,
         now,
       }),
     )
@@ -480,12 +498,6 @@ export function buildBoardView(workspace: string, opts: BuildViewOptions = {}): 
     .toSorted((a, b) => b.count - a.count || a.seq - b.seq);
 
   const mapTicket = mine.find((t) => t.labels.includes(MAP_LABEL));
-
-  const states = claimStates(frontier);
-  for (const ticket of mine) {
-    const card = cardsBySeq.get(ticket.seq);
-    if (card?.claim) card.claim.state = states.get(ticket.id) ?? "unknown";
-  }
 
   return {
     workspace,
@@ -651,21 +663,23 @@ export function buildTicketDetail(
     return other !== undefined && isOpenStatus(other.status);
   });
 
+  const claim = ticket.claim
+    ? {
+        ...claimView(ticket.claim.session, ticket.claim.at, now),
+        state: claimStates(computeFrontier(all, liveness)).get(ticket.id) ?? "unknown",
+      }
+    : null;
+
   return {
     workspace: ticket.workspace,
     seq: ticket.seq,
     title: ticket.title,
     body: ticket.body,
     status: ticket.status,
-    column: columnOf(ticket.status, openBlockers.length),
+    column: columnOf(ticket.status, openBlockers.length, claim?.state ?? null),
     type: wayfinderType(ticket.labels),
     labels: ticket.labels,
-    claim: ticket.claim
-      ? {
-          ...claimView(ticket.claim.session, ticket.claim.at, now),
-          state: claimStates(computeFrontier(all, liveness)).get(ticket.id) ?? "unknown",
-        }
-      : null,
+    claim,
     blockedBy: links(ticket.blockedBy),
     blocks: links(ticket.blocks),
     comments: ticketActions(ticket.id)
@@ -792,6 +806,7 @@ function toCard(ctx: {
   edgeColor: (id: number) => string;
   primaryBlocker: (t: Ticket) => number | undefined;
   readySeqs: Set<number>;
+  claimStates: Map<number, ClaimView["state"]>;
   now: string;
 }): CardView {
   const { ticket, byId, openIds, depths, order, fanColor, edgeColor, primaryBlocker } = ctx;
@@ -806,7 +821,13 @@ function toCard(ctx: {
       onBoard: blocker.workspace === ticket.workspace,
     }));
 
-  const column = columnOf(ticket.status, openBlockers.length);
+  const claim = ticket.claim
+    ? {
+        ...claimView(ticket.claim.session, ticket.claim.at, ctx.now),
+        state: ctx.claimStates.get(ticket.id) ?? "unknown",
+      }
+    : null;
+  const column = columnOf(ticket.status, openBlockers.length, claim?.state ?? null);
 
   const own = fanColor.get(ticket.id) ?? null;
   const parent = primaryBlocker(ticket);
@@ -819,7 +840,7 @@ function toCard(ctx: {
     type: wayfinderType(ticket.labels),
     depth: depths.get(ticket.id) ?? null,
     order: order.get(ticket.id) ?? 0,
-    claim: ticket.claim ? claimView(ticket.claim.session, ticket.claim.at, ctx.now) : null,
+    claim,
     openBlockers,
     blocks: ticket.blocks
       .map((id) => byId.get(id))
