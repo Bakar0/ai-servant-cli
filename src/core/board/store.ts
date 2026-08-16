@@ -5,6 +5,7 @@
 // indirection with one implementation, and it would hide the schema from the tests that most need
 // to see it.
 
+import type { Database } from "bun:sqlite";
 import { ticketUrl } from "../paths.ts";
 import { openBoard } from "./db.ts";
 
@@ -206,26 +207,28 @@ export function createTicket(spec: CreateTicketInput): Ticket {
   if (!Number.isInteger(seq) || seq <= 0) {
     throw new Error(`Ticket seq must be a positive integer, got ${seq}.`);
   }
-  db.run(
-    `INSERT INTO tickets (board_id, seq, title, body, status, labels, parent_id, input,
-       created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [
-      boardId,
-      seq,
-      spec.title,
-      spec.body ?? "",
-      status,
-      JSON.stringify([...(spec.labels ?? [])]),
-      parentId,
-      JSON.stringify(spec.input ?? {}),
-      now,
-      now,
-    ],
-  );
-  const created = requireTicket(spec.workspace, seq);
-  recordAction(created.id, { kind: "created", actor: "servant", at: now });
-  return created;
+  return db.transaction(() => {
+    db.run(
+      `INSERT INTO tickets (board_id, seq, title, body, status, labels, parent_id, input,
+         created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        boardId,
+        seq,
+        spec.title,
+        spec.body ?? "",
+        status,
+        JSON.stringify([...(spec.labels ?? [])]),
+        parentId,
+        JSON.stringify(spec.input ?? {}),
+        now,
+        now,
+      ],
+    );
+    const created = requireTicket(spec.workspace, seq);
+    recordAction(created.id, { kind: "created", actor: "servant", at: now });
+    return created;
+  })();
 }
 
 function nextSeq(boardId: number): number {
@@ -286,6 +289,18 @@ export function listTickets(
   return rows.map((row) => hydrate(row, edges));
 }
 
+/**
+ * Who a write is attributed to, and when. Every write that changes board state records its own
+ * action row from these, inside the same transaction as the field change — `ticket_actions` is
+ * only the complete history db.ts claims it is if recording it is not a thing a caller can forget,
+ * and a transfer is only auditable if the row cannot be lost to a crash between two statements.
+ */
+export interface WriteOptions {
+  /** Anything that is not servant writing on its own behalf — the hub importer, so far. */
+  actor?: string;
+  now?: string;
+}
+
 export interface TicketPatch {
   title?: string;
   body?: string;
@@ -297,7 +312,16 @@ export interface TicketPatch {
   seq?: number;
 }
 
-export function updateTicket(id: number, patch: TicketPatch, opts: { now?: string } = {}): Ticket {
+/**
+ * Only status and labels earn an action row: they are what the columns and the triage vocabulary
+ * are read from, so a reader asking "how did this get here?" is asking about those two. A
+ * retitling or a rewritten body is content, already dated by `updated_at`, and logging it would
+ * bury the transitions under the importer restating every field it re-read.
+ *
+ * A patch that sets a field to what it already holds records nothing — the trail is transitions,
+ * and the importer re-reads every field on every run.
+ */
+export function updateTicket(id: number, patch: TicketPatch, opts: WriteOptions = {}): Ticket {
   const db = openBoard();
   const sets: string[] = [];
   const params: (string | number | null)[] = [];
@@ -305,10 +329,14 @@ export function updateTicket(id: number, patch: TicketPatch, opts: { now?: strin
     sets.push(`${column} = ?`);
     params.push(value);
   };
+  const next: Partial<BoardState> = {
+    ...(patch.status === undefined ? {} : { status: assertStatus(patch.status) }),
+    ...(patch.labels === undefined ? {} : { labels: JSON.stringify([...patch.labels]) }),
+  };
   if (patch.title !== undefined) push("title", patch.title);
   if (patch.body !== undefined) push("body", patch.body);
-  if (patch.status !== undefined) push("status", assertStatus(patch.status));
-  if (patch.labels !== undefined) push("labels", JSON.stringify([...patch.labels]));
+  if (next.status !== undefined) push("status", next.status);
+  if (next.labels !== undefined) push("labels", next.labels);
   if (patch.parentId !== undefined) push("parent_id", patch.parentId);
   if (patch.input !== undefined) push("input", JSON.stringify(patch.input));
   if (patch.seq !== undefined) push("seq", patch.seq);
@@ -317,24 +345,89 @@ export function updateTicket(id: number, patch: TicketPatch, opts: { now?: strin
     if (!unchanged) throw new Error(`No ticket with id ${id}.`);
     return unchanged;
   }
-  push("updated_at", opts.now ?? new Date().toISOString());
+  const at = opts.now ?? new Date().toISOString();
+  push("updated_at", at);
   params.push(id);
-  db.run(`UPDATE tickets SET ${sets.join(", ")} WHERE id = ?`, params);
+  db.transaction(() => {
+    const before = requireBoardState(db, id);
+    for (const action of boardStateChanges(before, next)) {
+      recordAction(id, { ...action, actor: opts.actor, at });
+    }
+    db.run(`UPDATE tickets SET ${sets.join(", ")} WHERE id = ?`, params);
+  }).immediate();
   const updated = readTicket(id);
   if (!updated) throw new Error(`No ticket with id ${id}.`);
   return updated;
 }
 
+/** The columns an action row is written about, as the table stores them. */
+interface BoardState {
+  status: string;
+  labels: string;
+  claimedBy: string | null;
+}
+
+// Immediate, and read inside the transaction, for the same reason addDependency is: the row a
+// write logs is decided by comparing against the row it replaces, and a decision made against a
+// snapshot taken before the write lock can describe a transition that never happened — a transfer
+// logged as a first claim.
+function requireBoardState(db: Database, id: number): BoardState {
+  const row = db
+    .query<{ status: string; labels: string; claimed_by: string | null }, [number]>(
+      "SELECT status, labels, claimed_by FROM tickets WHERE id = ?",
+    )
+    .get(id);
+  if (!row) throw new Error(`No ticket with id ${id}.`);
+  return { status: row.status, labels: row.labels, claimedBy: row.claimed_by };
+}
+
+function boardStateChanges(
+  before: BoardState,
+  next: Partial<BoardState>,
+): { kind: string; body: string }[] {
+  const changes: { kind: string; body: string }[] = [];
+  if (next.status !== undefined && next.status !== before.status) {
+    changes.push({ kind: "status", body: next.status });
+  }
+  if (next.labels !== undefined && next.labels !== before.labels) {
+    changes.push({ kind: "labels", body: jsonOr<string[]>(next.labels, []).join(", ") });
+  }
+  return changes;
+}
+
 /**
- * Set or clear the assignment half of a Claim. The append-only half is a `ticket_actions` row —
- * see `claims.ts`, which owns the protocol; this is only the field write.
+ * Take, transfer or release the Claim on a ticket. Which of the three it is, the board reads off
+ * the holder it is replacing, so no caller has to work it out and then be trusted to log it.
+ *
+ * A release is always recorded, even of a ticket nobody held: `servant claim --release` is
+ * something a session did, and "there was nothing to let go of" is worth being able to see.
  */
-export function updateClaim(id: number, claim: Claim | null): void {
-  openBoard().run("UPDATE tickets SET claimed_by = ?, claimed_at = ? WHERE id = ?", [
-    claim?.session ?? null,
-    claim?.at ?? null,
-    id,
-  ]);
+export function updateClaim(
+  id: number,
+  claim: Claim | null,
+  opts: WriteOptions & { session?: string } = {},
+): void {
+  const db = openBoard();
+  const at = opts.now ?? claim?.at ?? new Date().toISOString();
+  db.transaction(() => {
+    const held = requireBoardState(db, id).claimedBy;
+    if (claim === null) {
+      recordAction(id, { kind: "released", actor: opts.actor, session: opts.session ?? held, at });
+    } else if (claim.session !== held) {
+      recordAction(id, {
+        kind: held ? "transferred" : "claimed",
+        actor: opts.actor,
+        session: claim.session,
+        body: held ?? "",
+        at,
+      });
+    }
+    db.run("UPDATE tickets SET claimed_by = ?, claimed_at = ? WHERE id = ?", [
+      claim?.session ?? null,
+      claim?.at ?? null,
+      id,
+    ]);
+  }).immediate();
 }
 
 /**
@@ -488,9 +581,17 @@ export function ticketActions(ticketId: number): TicketAction[] {
     }));
 }
 
-export function recordAction(
+// Deliberately not exported: an audit row a caller can write is one a caller can forget to write,
+// which is how the label change went unlogged.
+function recordAction(
   ticketId: number,
-  action: { kind: string; actor?: string; session?: string | null; body?: string; at?: string },
+  action: {
+    kind: string;
+    actor?: string | undefined;
+    session?: string | null;
+    body?: string;
+    at?: string;
+  },
 ): void {
   openBoard().run(
     "INSERT INTO ticket_actions (ticket_id, actor, session, kind, body, at) VALUES (?, ?, ?, ?, ?, ?)",

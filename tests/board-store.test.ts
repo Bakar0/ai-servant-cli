@@ -20,8 +20,10 @@ import {
   removeDependency,
   sessionLastSeen,
   ticketActions,
+  updateClaim,
   updateTicket,
 } from "../src/core/board/store.ts";
+import { openBoard } from "../src/core/board/db.ts";
 import { boardDbPath, setRootOverride } from "../src/core/paths.ts";
 
 let tmpRoot: string;
@@ -314,6 +316,77 @@ describe("actions", () => {
     const b = newTicket("alpha", "two");
     expect(carryComment(a.id, { externalId: "IC_1", ...HUB_COMMENT })).toBe(true);
     expect(carryComment(b.id, { externalId: "IC_1", ...HUB_COMMENT })).toBe(false);
+  });
+});
+
+describe("a write and the audit row that belongs to it", () => {
+  test("a board-state change records itself — including the label change nobody logged", () => {
+    const t = newTicket("alpha", "one", { labels: ["ticket"] });
+    updateTicket(t.id, { labels: ["ticket", "needs-info"] }, { now: AT });
+    updateTicket(t.id, { status: "in_progress" }, { now: AT });
+    expect(ticketActions(t.id).map((a) => [a.kind, a.body])).toEqual([
+      ["created", ""],
+      ["labels", "ticket, needs-info"],
+      ["status", "in_progress"],
+    ]);
+  });
+
+  test("a patch that leaves the board state alone leaves the trail alone too", () => {
+    const t = newTicket("alpha", "one", { labels: ["ticket"] });
+    updateTicket(t.id, { title: "renamed", labels: ["ticket"], status: "todo" }, { now: AT });
+    expect(ticketActions(t.id).map((a) => a.kind)).toEqual(["created"]);
+  });
+
+  test("a rejected write leaves neither the field change nor its action row", () => {
+    newTicket("alpha", "already at five", { seq: 5 });
+    const t = newTicket("alpha", "moving");
+    expect(() => updateTicket(t.id, { seq: 5, status: "done" }, { now: AT })).toThrow();
+    expect(readTicket(t.id)).toMatchObject({ seq: t.seq, status: "todo" });
+    expect(ticketActions(t.id).map((a) => a.kind)).toEqual(["created"]);
+  });
+
+  test("a rejected claim takes its action row down with it", () => {
+    const t = newTicket("alpha", "one");
+    // Nothing in the schema can reject a claim, so the rejection is installed here: what is under
+    // test is that the field and its row share one transaction, not what made the write fail.
+    openBoard().run(
+      `CREATE TRIGGER refuse_claim BEFORE UPDATE OF claimed_by ON tickets
+       WHEN NEW.claimed_by = 'refused' BEGIN SELECT RAISE(ABORT, 'refused'); END`,
+    );
+    expect(() => updateClaim(t.id, { session: "refused", at: AT })).toThrow();
+    expect(readTicket(t.id)?.claim).toBeNull();
+    expect(ticketActions(t.id).map((a) => a.kind)).toEqual(["created"]);
+  });
+
+  test("a claim, a transfer and a release each record themselves", () => {
+    const t = newTicket("alpha", "one");
+    updateClaim(t.id, { session: "alpha-t1", at: AT });
+    updateClaim(t.id, { session: "alpha-t1-again", at: AT });
+    updateClaim(t.id, null, { session: "alpha-t1-again", now: AT });
+    expect(ticketActions(t.id).map((a) => [a.kind, a.session, a.body])).toEqual([
+      ["created", null, ""],
+      ["claimed", "alpha-t1", ""],
+      ["transferred", "alpha-t1-again", "alpha-t1"],
+      ["released", "alpha-t1-again", ""],
+    ]);
+  });
+
+  test("re-stamping the session already holding a ticket is not a transfer", () => {
+    const t = newTicket("alpha", "one");
+    updateClaim(t.id, { session: "alpha-t1", at: AT });
+    updateClaim(t.id, { session: "alpha-t1", at: "2026-08-13T12:00:00.000Z" });
+    expect(ticketActions(t.id).map((a) => a.kind)).toEqual(["created", "claimed"]);
+  });
+
+  test("a foreign actor is carried onto the row, so an import does not read as servant", () => {
+    const t = newTicket("alpha", "one");
+    updateClaim(t.id, { session: "alpha-t1", at: AT }, { actor: "import" });
+    updateTicket(t.id, { status: "done" }, { now: AT, actor: "import" });
+    expect(ticketActions(t.id).map((a) => [a.actor, a.kind])).toEqual([
+      ["servant", "created"],
+      ["import", "claimed"],
+      ["import", "status"],
+    ]);
   });
 });
 
