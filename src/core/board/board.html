@@ -252,8 +252,8 @@
   #panel .pcomment{border-left:2px solid var(--line);padding-left:11px;margin-bottom:14px}
   #panel .pwho{font-size:10.5px;color:var(--faint);margin-bottom:2px}
 
-  /* Rendered Markdown — see blockMd. Every rule here is a block the renderer can emit, and only
-     those: nothing else can reach the page, because escaping runs before either renderer. */
+  /* Rendered Markdown — see markdown.ts. Every rule here is a block the renderer can emit, and
+     only those: nothing else can reach the page, because escaping runs before either renderer. */
   .md{font-size:13px;line-height:1.6;color:var(--dim);overflow-wrap:anywhere}
   .md>*:first-child{margin-top:0}
   .md h3,.md h4,.md h5,.md h6{color:var(--ink);margin:18px 0 7px;line-height:1.35}
@@ -408,139 +408,11 @@ function flatten(value) {
 }
 
 /**
- * The map's prose is Markdown, because it is written to be read in the ticket as well as here. The
- * page renders the inline part of it — code, bold, italic — and nothing else: no links, no headings,
- * no HTML passed through. Escaping runs *first*, so the tags this adds are the only tags that can
- * reach the page, and a map that contains markup still renders as text.
- *
- * Without this the section reads as its own source: `- **A capability** — the right fix…`.
+ * The one way markup reaches the page without being escaped, and the only thing allowed through it
+ * is a `…Html` field of the view model. Markdown is rendered in `markdown.ts`, where escaping runs
+ * before the tags are added; nothing else the page interpolates is exempt from `html`'s default.
  */
-function inlineMd(text) {
-  return { __html: esc(text)
-    .replace(/``(.+?)``/g, "<code>$1</code>")
-    .replace(/`([^`]+)`/g, "<code>$1</code>")
-    // Bold before italic, and lazily: a bold run routinely contains an italic one, which a
-    // `[^*]+` body would refuse to match and leave on the page as its own asterisks.
-    .replace(/\*\*([\s\S]+?)\*\*/g, "<b>$1</b>")
-    .replace(/(^|[\s(])\*([^*\s][^*]*)\*/g, "$1<i>$2</i>") };
-}
-
-/**
- * The block half of the same deal. A ticket body is a whole document — the map's prose was a line
- * at a time — so it needs headings, lists, fenced code and paragraphs, or it reads as its own
- * source: a wall of `##` and `-` with no shape.
- *
- * Escaping still runs first, inside `inlineMd`, and the tags emitted here come from this function's
- * own literals rather than from the text. So a body containing `<script>` or `<b>` renders as the
- * characters a reader typed, and there is no path by which a ticket body becomes markup (ADR-0012).
- *
- * Deliberately not a Markdown implementation: no links, no images, no nesting. Those would each be
- * a rule to get subtly wrong, and none of them is what makes a body unreadable.
- */
-function blockMd(text) {
-  const lines = String(text === null || text === undefined ? "" : text).split(/\r?\n/);
-  const out = [];
-  let para = [];
-  let list = null;
-  let quote = [];
-  let code = null;
-  let table = null;
-
-  const flushPara = () => {
-    if (para.length === 0) return;
-    out.push(html`<p>${inlineMd(para.join("\n"))}</p>`);
-    para = [];
-  };
-  const flushList = () => {
-    if (list === null) return;
-    const items = list.items.map((item) => html`<li>${inlineMd(item)}</li>`);
-    out.push(list.ordered ? html`<ol>${items}</ol>` : html`<ul>${items}</ul>`);
-    list = null;
-  };
-  const flushQuote = () => {
-    if (quote.length === 0) return;
-    out.push(html`<blockquote>${inlineMd(quote.join("\n"))}</blockquote>`);
-    quote = [];
-  };
-  /**
-   * A pipe table. Real bodies use them for exactly what a table is for — a requirement against what
-   * it now means — and as a run of paragraphs they are the least readable thing on the page.
-   * The alignment row is a separator, not data: its presence is what makes the first row a header.
-   */
-  const flushTable = () => {
-    if (table === null) return;
-    const isRule = (row) => /^[\s|:-]+$/.test(row) && row.includes("-");
-    const cells = (row) => row.split("|").map((c) => c.trim());
-    const headed = table.length > 1 && isRule(table[1]);
-    const head = headed
-      ? html`<thead><tr>${cells(table[0]).map((c) => html`<th>${inlineMd(c)}</th>`)}</tr></thead>`
-      : "";
-    const rows = table
-      .filter((row, i) => !isRule(row) && !(headed && i === 0))
-      .map((row) => html`<tr>${cells(row).map((c) => html`<td>${inlineMd(c)}</td>`)}</tr>`);
-    // No whitespace inside <table>: the parser fosters a stray text node out of the element.
-    out.push(html`<div class="tablewrap scrolls"><table>${head}<tbody>${rows}</tbody></table></div>`);
-    table = null;
-  };
-  const flushText = () => { flushPara(); flushList(); flushQuote(); };
-  const flush = () => { flushText(); flushTable(); };
-
-  for (const line of lines) {
-    // Inside a fence nothing is Markdown, not even the blank line that ends every other block.
-    if (code !== null) {
-      if (/^\s*```/.test(line)) {
-        out.push(html`<pre class="scrolls"><code>${code.join("\n")}</code></pre>`);
-        code = null;
-      } else code.push(line);
-      continue;
-    }
-    if (/^\s*```/.test(line)) { flush(); code = []; continue; }
-
-    const row = /^\s*\|(.*)\|\s*$/.exec(line);
-    if (row) { flushText(); (table = table || []).push(row[1]); continue; }
-    flushTable();
-
-    if (line.trim() === "") { flush(); continue; }
-    if (/^\s*(-{3,}|\*{3,}|_{3,})\s*$/.test(line)) { flush(); out.push(html`<hr>`); continue; }
-
-    const heading = /^(#{1,6})\s+(.*)$/.exec(line);
-    if (heading) { flush(); out.push(headingHtml(heading[1].length, heading[2])); continue; }
-
-    const quoted = /^\s*>\s?(.*)$/.exec(line);
-    if (quoted) { flushPara(); flushList(); quote.push(quoted[1]); continue; }
-
-    const bullet = /^\s*[-*+]\s+(.*)$/.exec(line);
-    const numbered = /^\s*\d+[.)]\s+(.*)$/.exec(line);
-    if (bullet || numbered) {
-      flushPara();
-      flushQuote();
-      const ordered = bullet === null;
-      if (list === null || list.ordered !== ordered) { flushList(); list = { ordered, items: [] }; }
-      list.items.push((bullet || numbered)[1]);
-      continue;
-    }
-    // A line under an open list is that item wrapping, not a paragraph of its own.
-    if (list !== null) { list.items[list.items.length - 1] += "\n" + line.trim(); continue; }
-    if (quote.length > 0) { quote.push(line.trim()); continue; }
-    para.push(line);
-  }
-  if (code !== null) out.push(html`<pre class="scrolls"><code>${code.join("\n")}</code></pre>`);
-  flush();
-  return out;
-}
-
-/**
- * A body's headings start at h3 — the panel's own `<h1>` is the ticket's title, and a body that
- * opened with an h1 of its own would outrank it. Written as four branches rather than one
- * interpolated tag name so every tag this can emit is visible in the source.
- */
-function headingHtml(level, text) {
-  const inner = inlineMd(text);
-  if (level <= 1) return html`<h3>${inner}</h3>`;
-  if (level === 2) return html`<h4>${inner}</h4>`;
-  if (level === 3) return html`<h5>${inner}</h5>`;
-  return html`<h6>${inner}</h6>`;
-}
+const raw = (markup) => ({ __html: markup });
 
 const cardsBySeq = () => new Map((view ? view.cards : []).map((c) => [c.seq, c]));
 
@@ -725,7 +597,7 @@ function panelHtml() {
     ${panelError && html`<p class="perr">${panelError}</p>`}
     ${!t && !panelError && html`<p class="ploading">reading #${panelSeq}…</p>`}
     ${t && edgesHtml(t)}
-    ${t && html`<div class="md">${t.body.trim() ? blockMd(t.body) : html`<p class="pempty">No body.</p>`}</div>`}
+    ${t && html`<div class="md">${t.bodyHtml ? raw(t.bodyHtml) : html`<p class="pempty">No body.</p>`}</div>`}
     ${t && commentsHtml(t)}`;
 }
 
@@ -754,7 +626,7 @@ function commentsHtml(t) {
       ${t.comments.map((c) => html`
         <div class="pcomment">
           <div class="pwho">${c.session || c.actor} · ${ago(c.at)}</div>
-          <div class="md">${blockMd(c.body)}</div>
+          <div class="md">${raw(c.bodyHtml)}</div>
         </div>`)}
     </div>`;
 }
@@ -896,13 +768,13 @@ function frameHtml() {
     <div class="frame">
       <div class="kick">Destination</div>
       <h1>${map.title}</h1>
-      <div class="dest scrolls">${inlineMd(map.destination)}</div>
-      ${map.outOfScope.length > 0 &&
+      <div class="dest scrolls">${raw(map.destinationHtml)}</div>
+      ${map.outOfScopeHtml.length > 0 &&
         html`
           <details class="oos">
-            <summary><b>Out of scope</b> — ${map.outOfScope.length} ${
-              map.outOfScope.length === 1 ? "note" : "exclusions"}</summary>
-            <ul class="scrolls">${map.outOfScope.map((o) => html`<li>${inlineMd(o)}</li>`)}</ul>
+            <summary><b>Out of scope</b> — ${map.outOfScopeHtml.length} ${
+              map.outOfScopeHtml.length === 1 ? "note" : "exclusions"}</summary>
+            <ul class="scrolls">${map.outOfScopeHtml.map((o) => html`<li>${raw(o)}</li>`)}</ul>
           </details>`}
     </div>`;
 }
@@ -914,23 +786,23 @@ function frameHtml() {
  * away until asked for.
  */
 function fogHtml() {
-  const fog = view.map ? view.map.fog : [];
+  const fog = view.map ? view.map.fogHtml : [];
   if (!fog.length) return "";
   return html`
     <details class="fog">
       <summary>Not yet specified — ${fog.length} unanswered</summary>
       <p>the edge of the map</p>
-      <ul>${fog.map((q) => html`<li>${inlineMd(q)}</li>`)}</ul>
+      <ul>${fog.map((q) => html`<li>${raw(q)}</li>`)}</ul>
     </details>`;
 }
 
 function decisionsHtml() {
-  const decisions = view.map ? view.map.decisions : [];
+  const decisions = view.map ? view.map.decisionsHtml : [];
   if (!decisions.length) return "";
   return html`
     <details class="dec">
       <summary>Decisions so far — ${decisions.length} settled</summary>
-      <ol>${decisions.map((d) => html`<li>${inlineMd(d)}</li>`)}</ol>
+      <ol>${decisions.map((d) => html`<li>${raw(d)}</li>`)}</ol>
     </details>`;
 }
 
