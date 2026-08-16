@@ -165,12 +165,18 @@ describe("reading one ticket", () => {
     const detail = (await res.json()) as TicketDetail;
 
     expect(detail.title).toBe("read me");
-    expect(detail.body).toContain("Because it is stored and unreadable.");
+    // Rendered, not raw: the page holds no Markdown parser (#86).
+    expect(detail.bodyHtml).toBe("<h4>Why</h4><p>Because it is stored and unreadable.</p>");
     expect(detail.column).toBe("blocked");
     expect(detail.blockedBy.map((b) => b.seq)).toEqual([blocker.seq]);
     expect(detail.blocks.map((b) => b.seq)).toEqual([waiting.seq]);
     expect(detail.comments).toEqual([
-      { actor: "servant", session: "kanban-t82", body: "the analysis is in #78", at: AT },
+      {
+        actor: "servant",
+        session: "kanban-t82",
+        bodyHtml: "<p>the analysis is in #78</p>",
+        at: AT,
+      },
     ]);
   });
 

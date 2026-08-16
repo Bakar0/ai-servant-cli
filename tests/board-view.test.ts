@@ -523,13 +523,13 @@ Live agent-activity streaming · forking agent-kanban · auth and remote access
     });
     const map = view().map;
     expect(map?.title).toBe("Replace the GitHub tracker with a local board");
-    expect(map?.destination).toBe("One board that servant owns end to end.");
-    expect(map?.outOfScope).toEqual([
+    expect(map?.destinationHtml).toBe("One board that servant owns end to end.");
+    expect(map?.outOfScopeHtml).toEqual([
       "Live agent-activity streaming · forking agent-kanban · auth and remote access",
     ]);
-    expect(map?.fog).toHaveLength(2);
-    expect(map?.fog[0]).toContain("dispatch command");
-    expect(map?.decisions).toHaveLength(2);
+    expect(map?.fogHtml).toHaveLength(2);
+    expect(map?.fogHtml[0]).toContain("dispatch command");
+    expect(map?.decisionsHtml).toHaveLength(2);
   });
 
   // The section a real map writes as a list, which is the case that pushed the tickets off the
@@ -539,7 +539,8 @@ Live agent-activity streaming · forking agent-kanban · auth and remote access
       labels: ["wayfinder:map"],
       body: "## Out of scope\n\n- **Auth** — single user.\n- Remote access.\n",
     });
-    expect(view().map?.outOfScope).toEqual(["**Auth** — single user.", "Remote access."]);
+    // Rendered here rather than on the page, which holds no Markdown parser (#86).
+    expect(view().map?.outOfScopeHtml).toEqual(["<b>Auth</b> — single user.", "Remote access."]);
   });
 
   test("keeps the fog visible when it was written as a paragraph rather than a list", () => {
@@ -547,7 +548,7 @@ Live agent-activity streaming · forking agent-kanban · auth and remote access
       labels: ["wayfinder:map"],
       body: "## Not yet specified\n\nWhatever happens to a claim mid-write.\n",
     });
-    expect(view().map?.fog).toEqual(["Whatever happens to a claim mid-write."]);
+    expect(view().map?.fogHtml).toEqual(["Whatever happens to a claim mid-write."]);
   });
 
   test("is absent, not fatal, on a board that was never charted", () => {

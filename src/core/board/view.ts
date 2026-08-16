@@ -12,6 +12,7 @@
 import { blockerLabel } from "../tasks.ts";
 import type { ClaimLiveness, Frontier } from "../tasks.ts";
 import { computeFrontier } from "../tasks.ts";
+import { renderInlineMarkdown, renderMarkdown } from "./markdown.ts";
 import type { Ticket, TicketStatus } from "./store.ts";
 import {
   findTicket,
@@ -116,16 +117,21 @@ export interface FanView {
   count: number;
 }
 
-/** The wayfinder map's prose, which frames the canvas rather than sitting in it. */
+/**
+ * The wayfinder map's prose, which frames the canvas rather than sitting in it.
+ *
+ * The prose arrives as rendered markup rather than as Markdown: the page holds no parser (#86), so
+ * every `Html` field here is the output of `renderInlineMarkdown` and is interpolated verbatim.
+ */
 export interface MapView {
   seq: number;
   title: string;
-  destination: string;
+  destinationHtml: string;
   /** Kept as written — a list stays a list, so the page can lay it out as one. */
-  outOfScope: string[];
+  outOfScopeHtml: string[];
   /** "Not yet specified" — the edge of the map, rendered as fog. */
-  fog: string[];
-  decisions: string[];
+  fogHtml: string[];
+  decisionsHtml: string[];
   url: string;
 }
 
@@ -382,10 +388,10 @@ function toMapView(ticket: Ticket): MapView {
   return {
     seq: ticket.seq,
     title: ticket.title,
-    destination: prose(sections.get("destination")),
-    outOfScope: bulletsOrProse(sections.get("out of scope")),
-    fog: bulletsOrProse(sections.get("not yet specified")),
-    decisions: bullets(sections.get("decisions so far")),
+    destinationHtml: renderInlineMarkdown(prose(sections.get("destination"))),
+    outOfScopeHtml: bulletsOrProse(sections.get("out of scope")).map(renderInlineMarkdown),
+    fogHtml: bulletsOrProse(sections.get("not yet specified")).map(renderInlineMarkdown),
+    decisionsHtml: bullets(sections.get("decisions so far")).map(renderInlineMarkdown),
     url: ticket.url,
   };
 }
@@ -589,7 +595,8 @@ export interface TicketLink {
 export interface TicketComment {
   actor: string;
   session: string | null;
-  body: string;
+  /** Rendered, like the body it sits under. */
+  bodyHtml: string;
   at: string;
 }
 
@@ -601,12 +608,15 @@ export interface TicketComment {
  * board's payload from 3.6 KB to a couple of hundred, and every SSE push would carry all of it.
  * The board stays small enough that a change is a cheap full re-render; reading a ticket is a
  * separate, rarer question, and it pays for itself.
+ *
+ * The body arrives rendered rather than as Markdown — the parser lives here now (#86), and shipping
+ * both would double the one field that is measured in tens of kilobytes.
  */
 export interface TicketDetail {
   workspace: string;
   seq: number;
   title: string;
-  body: string;
+  bodyHtml: string;
   status: TicketStatus;
   column: BoardColumn;
   type: WayfinderType;
@@ -674,7 +684,7 @@ export function buildTicketDetail(
     workspace: ticket.workspace,
     seq: ticket.seq,
     title: ticket.title,
-    body: ticket.body,
+    bodyHtml: renderMarkdown(ticket.body),
     status: ticket.status,
     column: columnOf(ticket.status, openBlockers.length, claim?.state ?? null),
     type: wayfinderType(ticket.labels),
@@ -687,7 +697,7 @@ export function buildTicketDetail(
       .map((action) => ({
         actor: action.actor,
         session: action.session,
-        body: action.body,
+        bodyHtml: renderMarkdown(action.body),
         at: action.at,
       })),
     createdAt: ticket.createdAt,
