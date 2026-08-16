@@ -17,7 +17,6 @@ import {
   findTicket,
   isOpenStatus,
   listTickets,
-  recordAction,
   updateClaim,
   updateTicket,
 } from "./store.ts";
@@ -451,7 +450,7 @@ export async function importHub(hubRepo: string, opts: ImportOptions = {}): Prom
           status,
           input: { ...existing.input, hub: { number: issue.number, url: issue.url } },
         },
-        { now },
+        { now, actor: "import" },
       );
       report.updated += 1;
       byNumber.set(issue.number, existing.id);
@@ -489,7 +488,7 @@ export async function importHub(hubRepo: string, opts: ImportOptions = {}): Prom
       if (parentId === undefined) {
         report.skipped.push(`#${issue.number} — parent #${parentRef} was not imported`);
       } else if (before?.parentId !== parentId) {
-        updateTicket(id, { parentId }, { now });
+        updateTicket(id, { parentId }, { now, actor: "import" });
         report.parents += 1;
       }
     }
@@ -521,14 +520,7 @@ export async function importHub(hubRepo: string, opts: ImportOptions = {}): Prom
     if (issue.claim?.kind === "held") {
       const current = before?.claim ?? null;
       if (current?.session !== issue.claim.session) {
-        updateClaim(id, { session: issue.claim.session, at: issue.claim.at });
-        recordAction(id, {
-          kind: current ? "transferred" : "claimed",
-          actor: "import",
-          session: issue.claim.session,
-          body: current?.session ?? "",
-          at: issue.claim.at,
-        });
+        updateClaim(id, { session: issue.claim.session, at: issue.claim.at }, { actor: "import" });
         report.claims += 1;
       }
     }

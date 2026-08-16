@@ -13,7 +13,6 @@ import {
   createTicket,
   isOpenStatus,
   listTickets,
-  recordAction,
   removeDependency,
   requireTicket,
   ticketActions,
@@ -229,7 +228,6 @@ const statusCommand = defineCommand({
     const ticket = requireTicket(workspace, seq);
     const status = assertStatus(String(args.status));
     updateTicket(ticket.id, { status });
-    recordAction(ticket.id, { kind: "status", body: status });
     console.log(`servant: ${workspace}#${seq} → ${status}`);
   },
 });
@@ -252,7 +250,6 @@ const closeCommand = defineCommand({
     const ticket = requireTicket(workspace, seq);
     if (args.comment) addComment(ticket.id, String(args.comment));
     updateTicket(ticket.id, { status: "done" });
-    recordAction(ticket.id, { kind: "status", body: "done" });
     console.log(`servant: closed ${workspace}#${seq}`);
   },
 });

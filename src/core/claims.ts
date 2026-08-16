@@ -13,7 +13,6 @@
 import {
   type Claim,
   findTicket,
-  recordAction,
   requireTicket,
   ticketActions,
   updateClaim,
@@ -78,12 +77,6 @@ export async function claimTicket(
   if (ticket.claim?.session === session) return { transferredFrom: null, alreadyHeld: true };
   const previous = ticket.claim?.session ?? null;
   updateClaim(ticket.id, { session, at });
-  recordAction(ticket.id, {
-    kind: previous ? "transferred" : "claimed",
-    session,
-    body: previous ?? "",
-    at,
-  });
   return { transferredFrom: previous, alreadyHeld: false };
 }
 
@@ -96,8 +89,7 @@ export async function releaseTicketClaim(
 ): Promise<void> {
   const ticket = requireTicket(workspace, seq);
   const at = opts.now ?? new Date().toISOString();
-  updateClaim(ticket.id, null);
-  recordAction(ticket.id, { kind: "released", session, at });
+  updateClaim(ticket.id, null, { session, now: at });
 }
 
 export interface ClaimRecord {
