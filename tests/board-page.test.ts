@@ -817,9 +817,11 @@ describe("reading a ticket", () => {
   });
 });
 
-describe("Markdown at block level", () => {
-  /** The panel's rendering of a ticket body written as `source`. */
-  const rendered = async (source: string): Promise<PageElement> => {
+// What the parser does with each block is `tests/board-markdown.test.ts`, where it can be asked
+// directly. What is left for the page is the seam: `raw()` is the one interpolation that skips
+// escaping, so these assert it is pointed at the rendered field and hands the markup through whole.
+describe("the rendered body reaches the page as markup", () => {
+  const openWith = async (source: string): Promise<PageElement> => {
     const t = file("md", { body: source });
     await mount({ view: view() });
     stubFetch(() =>
@@ -834,49 +836,23 @@ describe("Markdown at block level", () => {
     return $("#panel .md") as PageElement;
   };
 
-  test("headings start below the panel's own title, so a body cannot outrank it", async () => {
-    const md = await rendered("# Top\n\n## Second\n\n### Third\n\n#### Fourth");
-    expect([...md.children].map((c) => c.tagName)).toEqual(["H3", "H4", "H5", "H6"]);
-  });
-
-  test("a bullet list is a list, and a numbered one is ordered", async () => {
-    const md = await rendered("- one\n- two\n\n1. first\n2. second");
-    expect(md.querySelector("ul")?.children.length).toBe(2);
-    expect([...(md.querySelector("ol")?.children ?? [])].map((li) => li.textContent)).toEqual([
-      "first",
-      "second",
-    ]);
-  });
-
-  test("a wrapped bullet stays one item rather than becoming a paragraph", async () => {
-    const md = await rendered("- one line\n  and its continuation\n- two");
-    expect(md.querySelectorAll("li")).toHaveLength(2);
-    expect(md.querySelector("li")?.textContent).toContain("and its continuation");
-    expect(md.querySelector("p")).toBeNull();
-  });
-
-  test("a fenced block keeps its lines, and nothing inside it is Markdown", async () => {
-    const md = await rendered("```\nservant ticket show 82\n- not a bullet\n```");
-    expect(md.querySelector("pre code")?.textContent).toBe(
-      "servant ticket show 82\n- not a bullet",
+  test("every block the server emitted is an element, and none of the source survives", async () => {
+    const md = await openWith(
+      "## Why\n\n- one\n- two\n\n| req | effect |\n|---|---|\n| 4 | window |",
     );
-    expect(md.querySelector("ul")).toBeNull();
-  });
 
-  test("a pipe table is a table, with its alignment row read as a header rule", async () => {
-    const md = await rendered("| req | effect |\n|---|---|\n| **4** | the window |\n| 6 | retry |");
+    expect([...md.children].map((c) => c.tagName)).toEqual(["H4", "UL", "DIV"]);
+    expect(md.querySelectorAll("li")).toHaveLength(2);
     expect($$("#panel .md th").map((th) => th.textContent)).toEqual(["req", "effect"]);
-    expect($$("#panel .md tbody tr").map((tr) => tr.children.length)).toEqual([2, 2]);
-    expect(md.querySelector("td b")?.textContent).toBe("4");
-    // The rule itself is a separator, never a row.
+    // Nothing arrived as its own source — no `##` heading, no `|` cell wall, no alignment rule.
+    expect(md.textContent).not.toContain("#");
+    expect(md.textContent).not.toContain("|");
     expect(md.textContent).not.toContain("---");
   });
 
-  test("a blank line separates paragraphs, and a blockquote is its own block", async () => {
-    const md = await rendered("one\n\ntwo\n\n> quoted\n\n---\n\nafter");
-    expect($$("#panel .md > p").map((p) => p.textContent)).toEqual(["one", "two", "after"]);
-    expect(md.querySelector("blockquote")?.textContent).toBe("quoted");
-    expect(md.querySelector("hr")).not.toBeNull();
+  test("a body with nothing in it says so rather than rendering an empty block", async () => {
+    const md = await openWith("   \n");
+    expect(md.querySelector(".pempty")?.textContent).toBe("No body.");
   });
 });
 
