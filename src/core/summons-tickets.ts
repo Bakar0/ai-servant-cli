@@ -5,7 +5,7 @@
 // as the delegation and hands seams. There is no runner to inject any more: the board is a local
 // file, and the test seam is the servant-root override (ADR-0011).
 
-import { addComment, createTicket, requireTicket } from "./board/store.ts";
+import { addComment, createTicket } from "./board/store.ts";
 import { readClaimResult } from "./claims.ts";
 import type { TicketFilingPort, TicketsPort } from "./summons.ts";
 
@@ -48,7 +48,7 @@ export function createSummonsTickets(deps: SummonsTicketsDeps): TicketsPort & Ti
     },
 
     async comment(ticket, body) {
-      addComment(requireTicket(deps.workspace, ticket).id, body);
+      addComment({ workspace: deps.workspace, seq: ticket }, body);
     },
   };
 }

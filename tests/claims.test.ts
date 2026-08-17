@@ -127,7 +127,7 @@ describe("releasing a Claim", () => {
     await claimTicket("ai-servant", seq, "ai-servant-t17", { now: AT });
     await releaseTicketClaim("ai-servant", seq, "ai-servant-t17", { now: LATER });
     // Keyed on the global id, as every stored thing is.
-    const kinds = ticketActions(requireTicket("ai-servant", seq).id).map((a) => a.kind);
+    const kinds = ticketActions(requireTicket("ai-servant", seq)).map((a) => a.kind);
     expect(kinds).toEqual(["created", "claimed", "released"]);
   });
 });

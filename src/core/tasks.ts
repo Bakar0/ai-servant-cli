@@ -4,7 +4,7 @@
 // no cache tier — an offline snapshot only ever existed because `gh` might not answer. The bucket
 // logic below is unchanged from the hub era; only where blockers come from changed.
 
-import type { Claim, Ticket, TicketState } from "./board/store.ts";
+import type { Claim, Ticket, TicketRef, TicketState } from "./board/store.ts";
 import { isOpenStatus, listTickets, recordSessionsSeen } from "./board/store.ts";
 import { readLiveSessions } from "./session-registry.ts";
 
@@ -140,7 +140,7 @@ export function computeFrontier(
  * How a blocker is named to a human. Qualified with its board whenever the edge crosses one, so a
  * bare number is never ambiguous; bare inside a single board, where a number is the address.
  */
-export function blockerLabel(blocker: Ticket, from: Ticket): string {
+export function blockerLabel(blocker: TicketRef, from: TicketRef): string {
   return blocker.workspace === from.workspace
     ? `#${blocker.seq}`
     : `${blocker.workspace}#${blocker.seq}`;

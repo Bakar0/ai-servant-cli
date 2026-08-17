@@ -76,7 +76,7 @@ export async function claimTicket(
   const at = opts.now ?? new Date().toISOString();
   if (ticket.claim?.session === session) return { transferredFrom: null, alreadyHeld: true };
   const previous = ticket.claim?.session ?? null;
-  updateClaim(ticket.id, { session, at });
+  updateClaim(ticket, { session, at });
   return { transferredFrom: previous, alreadyHeld: false };
 }
 
@@ -87,9 +87,8 @@ export async function releaseTicketClaim(
   session: string,
   opts: ClaimOptions = {},
 ): Promise<void> {
-  const ticket = requireTicket(workspace, seq);
   const at = opts.now ?? new Date().toISOString();
-  updateClaim(ticket.id, null, { session, now: at });
+  updateClaim({ workspace, seq }, null, { session, now: at });
 }
 
 export interface ClaimRecord {
@@ -104,9 +103,11 @@ const CLAIM_KINDS = new Set(["claimed", "transferred", "released"]);
 
 /** The full claim history — who held it, when, and what happened to it. */
 export async function claimHistory(workspace: string, seq: number): Promise<ClaimRecord[]> {
+  // findTicket, not an address: this is asked speculatively, of numbers a caller may have typed,
+  // and a ticket that is not there is no history rather than an error.
   const ticket = findTicket(workspace, seq);
   if (!ticket) return [];
-  return ticketActions(ticket.id)
+  return ticketActions(ticket)
     .filter((action) => CLAIM_KINDS.has(action.kind))
     .map((action) => ({
       kind: action.kind as ClaimRecord["kind"],

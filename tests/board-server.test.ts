@@ -155,9 +155,9 @@ describe("reading one ticket", () => {
     const blocker = file("the blocker");
     const t = file("read me", { body: "## Why\n\nBecause it is stored and unreadable." });
     const waiting = file("waits on me");
-    addDependency(t.id, blocker.id, { now: AT });
-    addDependency(waiting.id, t.id, { now: AT });
-    addComment(t.id, "the analysis is in #78", { session: "kanban-t82", now: AT });
+    addDependency(t, blocker, { now: AT });
+    addDependency(waiting, t, { now: AT });
+    addComment(t, "the analysis is in #78", { session: "kanban-t82", now: AT });
 
     const res = get(`/api/w/${WS}/t/${t.seq}`);
     expect(res.status).toBe(200);
@@ -258,7 +258,7 @@ describe("the live feed", () => {
   test("a change written by a real servant command reaches an open page with no reload", async () => {
     const blocker = file("blocker");
     const waiting = file("waiting");
-    addDependency(waiting.id, blocker.id, { now: AT });
+    addDependency(waiting, blocker, { now: AT });
 
     const feed = createBoardFeed({
       view: (ws) => (listBoards().includes(ws) ? buildBoardView(ws) : null),

@@ -194,13 +194,13 @@ describe("reading the board", () => {
     const core = createTicket({ workspace: "alpha", title: "core", now: AT });
     const tenant = createTicket({ workspace: "alpha", title: "tenant", now: AT });
     createTicket({ workspace: "beta", title: "elsewhere", now: AT });
-    addDependency(tenant.id, core.id, { now: AT });
+    addDependency(tenant, core, { now: AT });
 
     const f = computeFrontier(readTasks(), { known: false }, { workspace: "alpha" });
     expect(f.ready.map((t) => t.title)).toEqual(["core"]);
     expect(f.blocked.map((b) => b.ticket.title)).toEqual(["tenant"]);
 
-    updateTicket(core.id, { status: "done" }, { now: AT });
+    updateTicket(core, { status: "done" }, { now: AT });
     const after = computeFrontier(readTasks(), { known: false }, { workspace: "alpha" });
     expect(after.ready.map((t) => t.title)).toEqual(["tenant"]);
   });

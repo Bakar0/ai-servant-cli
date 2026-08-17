@@ -44,8 +44,7 @@ const WS = "kanban";
 const file = (title: string, over: Record<string, unknown> = {}): Ticket =>
   createTicket({ workspace: WS, title, now: AT, ...over });
 
-const blocks = (blocker: Ticket, waiting: Ticket) =>
-  addDependency(waiting.id, blocker.id, { now: AT });
+const blocks = (blocker: Ticket, waiting: Ticket) => addDependency(waiting, blocker, { now: AT });
 
 const view = (over: Parameters<typeof buildBoardView>[1] = {}) =>
   buildBoardView(WS, { now: NOW, ...over });
@@ -68,7 +67,7 @@ describe("board columns", () => {
     expect(card(view(), viewer.seq).column).toBe("blocked");
     expect(card(view(), store.seq).column).toBe("ready");
 
-    updateTicket(store.id, { status: "done" }, { now: NOW });
+    updateTicket(store, { status: "done" }, { now: NOW });
 
     // Nothing was written to the viewer ticket; its column moved because the graph did.
     expect(card(view(), viewer.seq).column).toBe("ready");
@@ -77,15 +76,15 @@ describe("board columns", () => {
 
   test("an explicit status wins over the derived pair", () => {
     const t = file("in flight");
-    updateTicket(t.id, { status: "in_progress" }, { now: NOW });
+    updateTicket(t, { status: "in_progress" }, { now: NOW });
     expect(card(view(), t.seq).column).toBe("in_progress");
-    updateTicket(t.id, { status: "in_review" }, { now: NOW });
+    updateTicket(t, { status: "in_review" }, { now: NOW });
     expect(card(view(), t.seq).column).toBe("in_review");
   });
 
   test("a live Claim is in progress, because that is what a working session writes", () => {
     const t = file("claimed but never restatused");
-    updateClaim(t.id, { session: "s-alive", at: AT });
+    updateClaim(t, { session: "s-alive", at: AT });
 
     // `servant claim` never touches status, so reading status alone left this in Ready while a
     // session was demonstrably carrying it — and In progress read empty.
@@ -97,7 +96,7 @@ describe("board columns", () => {
 
   test("a stale Claim falls back to ready, so it still reads as reclaimable", () => {
     const t = file("claimed by a session that died");
-    updateClaim(t.id, { session: "s-gone", at: AT });
+    updateClaim(t, { session: "s-gone", at: AT });
 
     const v = view({ liveness: { known: true, liveSessions: [] } });
     expect(card(v, t.seq).claim?.state).toBe("gone");
@@ -106,7 +105,7 @@ describe("board columns", () => {
 
   test("a Claim this host cannot vouch for still reads as in progress, never as free", () => {
     const t = file("claimed");
-    updateClaim(t.id, { session: "s-unknown", at: AT });
+    updateClaim(t, { session: "s-unknown", at: AT });
 
     const v = view();
     expect(v.livenessKnown).toBe(false);
@@ -118,7 +117,7 @@ describe("board columns", () => {
     const store = file("store");
     const viewer = file("viewer");
     blocks(store, viewer);
-    updateClaim(viewer.id, { session: "s-alive", at: AT });
+    updateClaim(viewer, { session: "s-alive", at: AT });
 
     const v = view({ liveness: { known: true, liveSessions: ["s-alive"] } });
     expect(card(v, viewer.seq).column).toBe("blocked");
@@ -131,8 +130,8 @@ describe("board columns", () => {
     const free = file("free");
     const waiting = file("waiting");
     blocks(blocker, waiting);
-    updateClaim(held.id, { session: "s-alive", at: AT });
-    updateClaim(dropped.id, { session: "s-gone", at: AT });
+    updateClaim(held, { session: "s-alive", at: AT });
+    updateClaim(dropped, { session: "s-gone", at: AT });
 
     const liveness = { known: true, liveSessions: ["s-alive"] };
     const v = view({ liveness });
@@ -154,8 +153,8 @@ describe("board columns", () => {
 
   test("a stored status still wins over the Claim", () => {
     const t = file("claimed and reviewed");
-    updateClaim(t.id, { session: "s-alive", at: AT });
-    updateTicket(t.id, { status: "in_review" }, { now: NOW });
+    updateClaim(t, { session: "s-alive", at: AT });
+    updateTicket(t, { status: "in_review" }, { now: NOW });
 
     expect(card(view({ liveness: { known: true, liveSessions: ["s-alive"] } }), t.seq).column).toBe(
       "in_review",
@@ -166,7 +165,7 @@ describe("board columns", () => {
     const a = file("a");
     const b = file("b");
     blocks(a, b);
-    updateTicket(a.id, { status: "in_progress" }, { now: NOW });
+    updateTicket(a, { status: "in_progress" }, { now: NOW });
     const v = view();
     const counted = v.columns.flatMap((c) => c.seqs);
     expect(counted.toSorted(byNumber)).toEqual(v.cards.map((c) => c.seq).toSorted(byNumber));
@@ -177,7 +176,7 @@ describe("board columns", () => {
 describe("the card", () => {
   test("shows its holding session with a last-seen age", () => {
     const t = file("claimed");
-    updateClaim(t.id, { session: `${WS}-t${t.seq}`, at: AT });
+    updateClaim(t, { session: `${WS}-t${t.seq}`, at: AT });
     recordSessionsSeen([{ name: `${WS}-t${t.seq}`, pid: 4242 }], {
       now: "2026-08-14T11:45:00.000Z",
     });
@@ -189,7 +188,7 @@ describe("the card", () => {
 
   test("falls back to the claim's own timestamp when the session was never seen", () => {
     const t = file("claimed");
-    updateClaim(t.id, { session: "ghost", at: AT });
+    updateClaim(t, { session: "ghost", at: AT });
     const claim = card(view(), t.seq).claim;
     expect(claim?.lastSeen).toBeNull();
     expect(claim?.age).toBe("2h ago");
@@ -198,8 +197,8 @@ describe("the card", () => {
   test("reads liveness from the frontier rather than repeating the PID check", () => {
     const alive = file("alive");
     const gone = file("gone");
-    updateClaim(alive.id, { session: "s-alive", at: AT });
-    updateClaim(gone.id, { session: "s-gone", at: AT });
+    updateClaim(alive, { session: "s-alive", at: AT });
+    updateClaim(gone, { session: "s-gone", at: AT });
 
     const known = view({ liveness: { known: true, liveSessions: ["s-alive"] } });
     expect(card(known, alive.seq).claim?.state).toBe("alive");
@@ -223,14 +222,14 @@ describe("the card", () => {
       `#${two.seq}`,
     ]);
 
-    updateTicket(one.id, { status: "done" }, { now: NOW });
+    updateTicket(one, { status: "done" }, { now: NOW });
     expect(card(view(), waiting.seq).openBlockers.map((b) => b.label)).toEqual([`#${two.seq}`]);
   });
 
   test("qualifies a blocker that lives on another board, and draws no edge for it", () => {
     const elsewhere = createTicket({ workspace: "other", title: "cross-board", now: AT });
     const waiting = file("waiting");
-    addDependency(waiting.id, elsewhere.id, { now: AT });
+    addDependency(waiting, elsewhere, { now: AT });
 
     const v = view();
     const blocker = card(v, waiting.seq).openBlockers[0];
@@ -256,8 +255,8 @@ describe("the copy-dispatch command", () => {
     const ready = file("ready");
     const claimed = file("claimed");
     const blocked = file("blocked");
-    updateTicket(done.id, { status: "done" }, { now: NOW });
-    updateClaim(claimed.id, { session: "someone", at: AT });
+    updateTicket(done, { status: "done" }, { now: NOW });
+    updateClaim(claimed, { session: "someone", at: AT });
     blocks(ready, blocked);
 
     const v = view({ liveness: { known: true, liveSessions: ["someone"] } });
@@ -276,7 +275,7 @@ describe("the copy-dispatch command", () => {
     // in_review is neither blocked nor claimed, so the frontier reports it ready and the button
     // appears. Faithful to the frontier by construction — the card never decides this itself.
     const t = file("under review");
-    updateTicket(t.id, { status: "in_review" }, { now: NOW });
+    updateTicket(t, { status: "in_review" }, { now: NOW });
     const v = view({ liveness: { known: true, liveSessions: [] } });
     expect(card(v, t.seq).column).toBe("in_review");
     expect(card(v, t.seq).dispatch).not.toBeNull();
@@ -284,7 +283,7 @@ describe("the copy-dispatch command", () => {
 
   test("is suppressed on a stale claim too — reclaiming is a decision, not a copy", () => {
     const t = file("stale");
-    updateClaim(t.id, { session: "ghost", at: AT });
+    updateClaim(t, { session: "ghost", at: AT });
     const v = view({ liveness: { known: true, liveSessions: [] } });
     expect(card(v, t.seq).claim?.state).toBe("gone");
     expect(card(v, t.seq).dispatch).toBeNull();
@@ -331,9 +330,9 @@ describe("the tree", () => {
     blocks(b, c);
 
     expect(card(view(), c.seq).depth).toBe(2);
-    updateTicket(a.id, { status: "done" }, { now: NOW });
+    updateTicket(a, { status: "done" }, { now: NOW });
     expect(card(view(), c.seq).depth).toBe(1);
-    updateTicket(b.id, { status: "done" }, { now: NOW });
+    updateTicket(b, { status: "done" }, { now: NOW });
     expect(card(view(), c.seq).depth).toBe(0);
     expect(seqsInColumn(view(), "Now")).toEqual([c.seq]);
   });
@@ -342,7 +341,7 @@ describe("the tree", () => {
     const a = file("a");
     const b = file("b");
     blocks(a, b);
-    updateTicket(a.id, { status: "done" }, { now: NOW });
+    updateTicket(a, { status: "done" }, { now: NOW });
 
     const v = view();
     expect(card(v, a.seq).depth).toBeNull();
@@ -359,8 +358,8 @@ describe("the tree", () => {
     const shipped = file("shipped");
     blocks(root, mid);
     blocks(mid, leaf);
-    updateClaim(held.id, { session: "s-held", at: AT });
-    updateTicket(shipped.id, { status: "done" }, { now: NOW });
+    updateClaim(held, { session: "s-held", at: AT });
+    updateTicket(shipped, { status: "done" }, { now: NOW });
 
     const liveness = { known: true, liveSessions: ["s-held"] } as const;
     const v = view({ liveness });
@@ -586,9 +585,9 @@ describe("every board's frontier", () => {
     const blocked = file("blocked here");
     blocks(blocker, blocked);
     const held = file("held here");
-    updateClaim(held.id, { session: "s-alive", at: AT });
+    updateClaim(held, { session: "s-alive", at: AT });
     const abandoned = file("abandoned here");
-    updateClaim(abandoned.id, { session: "s-gone", at: AT });
+    updateClaim(abandoned, { session: "s-gone", at: AT });
     const there = elsewhere("ready there");
 
     const v = everywhere({ liveness: { known: true, liveSessions: ["s-alive"] } });
@@ -613,7 +612,7 @@ describe("every board's frontier", () => {
     const two = elsewhere("two");
     const waiting = elsewhere("waiting");
     blocks(one, waiting);
-    updateClaim(two.id, { session: "s-gone", at: AT });
+    updateClaim(two, { session: "s-gone", at: AT });
     const liveness = { known: true, liveSessions: [] as string[] };
 
     const frontier = computeFrontier(listTickets(), liveness);
@@ -642,7 +641,7 @@ describe("every board's frontier", () => {
 
   test("marks a dead session's ticket as reclaimable, and still offers the command", () => {
     const t = file("abandoned");
-    updateClaim(t.id, { session: "s-gone", at: AT });
+    updateClaim(t, { session: "s-gone", at: AT });
 
     const v = everywhere({ liveness: { known: true, liveSessions: [] } });
     const listed = v.boards[0]?.cards[0];

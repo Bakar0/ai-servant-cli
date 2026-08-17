@@ -85,9 +85,7 @@ describe("noting a change on a ticket", () => {
   test("writes the note onto the ticket's own history", async () => {
     const seq = seed();
     await tickets().comment(seq, "the criteria changed");
-    const comments = ticketActions(requireTicket("demo", seq).id).filter(
-      (a) => a.kind === "comment",
-    );
+    const comments = ticketActions(requireTicket("demo", seq)).filter((a) => a.kind === "comment");
     expect(comments.map((c) => c.body)).toEqual(["the criteria changed"]);
   });
 
