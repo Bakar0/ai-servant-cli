@@ -67,7 +67,7 @@ function describe(ticket: Ticket, all: readonly Ticket[]): string {
     if (parent) lines.push(`  part of:  #${parent.seq} ${parent.title}`);
   }
   if (ticket.body.trim()) lines.push("", ticket.body.trimEnd());
-  const comments = ticketActions(ticket.id).filter((a) => a.kind === "comment");
+  const comments = ticketActions(ticket).filter((a) => a.kind === "comment");
   if (comments.length > 0) {
     lines.push("", "  comments:");
     for (const c of comments) {
@@ -120,7 +120,9 @@ const newCommand = defineCommand({
       body: args.body ? String(args.body) : "",
       labels: splitList(args.labels),
       ...(args.status ? { status: String(args.status) } : {}),
-      ...(args.parent ? { parentSeq: parseSeq(args.parent, "servant ticket new --parent") } : {}),
+      ...(args.parent
+        ? { parent: { workspace, seq: parseSeq(args.parent, "servant ticket new --parent") } }
+        : {}),
     });
     if (args.json) {
       console.log(
@@ -155,7 +157,7 @@ const showCommand = defineCommand({
         JSON.stringify({
           ...ticket,
           number: ticket.seq,
-          comments: ticketActions(ticket.id).filter((a) => a.kind === "comment"),
+          comments: ticketActions(ticket).filter((a) => a.kind === "comment"),
         }),
       );
       return;
@@ -180,8 +182,7 @@ const commentCommand = defineCommand({
     applyRootOverride(args.root);
     const seq = parseSeq(args.ticket, "servant ticket comment");
     const workspace = await resolveBoardWorkspace({ ws: args.ws, session: args.session, seq });
-    const ticket = requireTicket(workspace, seq);
-    addComment(ticket.id, String(args.body), { session: args.session });
+    addComment({ workspace, seq }, String(args.body), { session: args.session });
     console.log(`servant: commented on ${workspace}#${seq}`);
   },
 });
@@ -199,12 +200,13 @@ const labelCommand = defineCommand({
     applyRootOverride(args.root);
     const seq = parseSeq(args.ticket, "servant ticket label");
     const workspace = await resolveBoardWorkspace({ ws: args.ws, seq });
+    // Read first because this patch is relative: the new label set is the old one plus and minus.
     const ticket = requireTicket(workspace, seq);
     const remove = new Set(splitList(args.remove));
     const labels = [...new Set([...ticket.labels, ...splitList(args.add)])].filter(
       (l) => !remove.has(l),
     );
-    updateTicket(ticket.id, { labels });
+    updateTicket(ticket, { labels });
     console.log(`servant: ${workspace}#${seq} labels: ${labels.join(", ") || "—"}`);
   },
 });
@@ -225,9 +227,8 @@ const statusCommand = defineCommand({
     applyRootOverride(args.root);
     const seq = parseSeq(args.ticket, "servant ticket status");
     const workspace = await resolveBoardWorkspace({ ws: args.ws, seq });
-    const ticket = requireTicket(workspace, seq);
     const status = assertStatus(String(args.status));
-    updateTicket(ticket.id, { status });
+    updateTicket({ workspace, seq }, { status });
     console.log(`servant: ${workspace}#${seq} → ${status}`);
   },
 });
@@ -247,9 +248,8 @@ const closeCommand = defineCommand({
     applyRootOverride(args.root);
     const seq = parseSeq(args.ticket, "servant ticket close");
     const workspace = await resolveBoardWorkspace({ ws: args.ws, seq });
-    const ticket = requireTicket(workspace, seq);
-    if (args.comment) addComment(ticket.id, String(args.comment));
-    updateTicket(ticket.id, { status: "done" });
+    if (args.comment) addComment({ workspace, seq }, String(args.comment));
+    updateTicket({ workspace, seq }, { status: "done" });
     console.log(`servant: closed ${workspace}#${seq}`);
   },
 });
@@ -276,11 +276,11 @@ const blockCommand = defineCommand({
     const workspace = await resolveBoardWorkspace({ ws: args.ws, seq });
     const blockerSeq = parseSeq(args.on, "servant ticket block --on");
     const blockerWs = args["on-ws"] ? String(args["on-ws"]) : workspace;
-    const ticket = requireTicket(workspace, seq);
+    // Read for its title, which the confirmation line names.
     const blocker = requireTicket(blockerWs, blockerSeq);
-    addDependency(ticket.id, blocker.id);
+    addDependency({ workspace, seq }, blocker);
     console.log(
-      `servant: ${workspace}#${seq} is blocked by ${blockerLabel(blocker, ticket)} ${blocker.title}`,
+      `servant: ${workspace}#${seq} is blocked by ${blockerLabel(blocker, { workspace, seq })} ${blocker.title}`,
     );
   },
 });
@@ -300,9 +300,7 @@ const unblockCommand = defineCommand({
     const workspace = await resolveBoardWorkspace({ ws: args.ws, seq });
     const blockerSeq = parseSeq(args.on, "servant ticket unblock --on");
     const blockerWs = args["on-ws"] ? String(args["on-ws"]) : workspace;
-    const ticket = requireTicket(workspace, seq);
-    const blocker = requireTicket(blockerWs, blockerSeq);
-    removeDependency(ticket.id, blocker.id);
+    removeDependency({ workspace, seq }, { workspace: blockerWs, seq: blockerSeq });
     console.log(`servant: ${workspace}#${seq} no longer waits on ${blockerWs}#${blockerSeq}`);
   },
 });

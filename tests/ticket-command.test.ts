@@ -105,7 +105,7 @@ describe("servant ticket show / comment / label / close", () => {
 
   test("show names a carried comment's author, and indents every line of it", async () => {
     const t = await newTicket("viewer");
-    carryComment(requireTicket(WS, t.number).id, {
+    carryComment(requireTicket(WS, t.number), {
       externalId: "IC_1",
       actor: "Barak-Zen",
       body: "Variant B won.\n\n> the criterion needed refining\n",
@@ -130,7 +130,7 @@ describe("servant ticket show / comment / label / close", () => {
     await run(ticketCommand, "close", String(core.number), "--comment", "shipped");
 
     expect(requireTicket(WS, core.number).status).toBe("done");
-    expect(ticketActions(requireTicket(WS, core.number).id).map((a) => a.kind)).toEqual([
+    expect(ticketActions(requireTicket(WS, core.number)).map((a) => a.kind)).toEqual([
       "created",
       "comment",
       "status",

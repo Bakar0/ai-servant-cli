@@ -20,6 +20,7 @@ import {
   updateClaim,
   updateTicket,
 } from "./store.ts";
+import type { Ticket, TicketRef } from "./store.ts";
 
 export const WS_LABEL_PREFIX = "ws:";
 
@@ -346,7 +347,7 @@ export interface ImportReport {
  * chance to move them. They land as plain `comment` rows keyed on GitHub's comment id, which is
  * what lets a re-run add nothing.
  */
-function carryComments(issue: HubIssue, ticketId: number, report: ImportReport): void {
+function carryComments(issue: HubIssue, ticket: TicketRef, report: ImportReport): void {
   for (const comment of issue.comments) {
     if (comment.body.includes(CLAIM_MARKER)) {
       report.claimComments += 1;
@@ -358,7 +359,7 @@ function carryComments(issue: HubIssue, ticketId: number, report: ImportReport):
       );
       continue;
     }
-    const carried = carryComment(ticketId, {
+    const carried = carryComment(ticket, {
       externalId: comment.id,
       // The hub's authors are people, not sessions, so the session column stays null and the actor
       // is the login. Anything else would invent a servant session that never existed.
@@ -429,7 +430,11 @@ export async function importHub(hubRepo: string, opts: ImportOptions = {}): Prom
 
   // Pass 1 — tickets. Numbers are preserved as seqs, so existing session names and every
   // cross-reference written anywhere stay valid (ADR-0011 decision 4).
-  const byNumber = new Map<number, number>();
+  //
+  // Keyed on the hub's issue number, which is unique across the hub but not across boards, so the
+  // ticket rather than its address is what the map has to hold: pass 2 resolves a blocker from a
+  // bare number and needs to learn which board it landed on.
+  const byNumber = new Map<number, Ticket>();
   for (const issue of mine) {
     const workspace = issue.workspace as string;
     const labels = issue.labels.filter((l) => !l.startsWith(WS_LABEL_PREFIX));
@@ -442,7 +447,7 @@ export async function importHub(hubRepo: string, opts: ImportOptions = {}): Prom
           ? existing.status
           : ("todo" as const);
       updateTicket(
-        existing.id,
+        existing,
         {
           title: issue.title,
           body: issue.body,
@@ -453,8 +458,8 @@ export async function importHub(hubRepo: string, opts: ImportOptions = {}): Prom
         { now, actor: "import" },
       );
       report.updated += 1;
-      byNumber.set(issue.number, existing.id);
-      carryComments(issue, existing.id, report);
+      byNumber.set(issue.number, existing);
+      carryComments(issue, existing, report);
     } else {
       const created = createTicket({
         workspace,
@@ -467,8 +472,8 @@ export async function importHub(hubRepo: string, opts: ImportOptions = {}): Prom
         now,
       });
       report.created += 1;
-      byNumber.set(issue.number, created.id);
-      carryComments(issue, created.id, report);
+      byNumber.set(issue.number, created);
+      carryComments(issue, created, report);
     }
     if (!report.boards.includes(workspace)) report.boards.push(workspace);
   }
@@ -476,19 +481,19 @@ export async function importHub(hubRepo: string, opts: ImportOptions = {}): Prom
 
   // Pass 2 — everything that references another ticket, once every ticket exists.
   for (const issue of mine) {
-    const id = byNumber.get(issue.number);
-    if (id === undefined) continue;
+    const ticket = byNumber.get(issue.number);
+    if (ticket === undefined) continue;
     // One read per issue: every ticket read pulls the whole edge table, so re-reading it per
     // blocker turned a 77-issue import into hundreds of full-table scans.
     const before = findTicket(issue.workspace as string, issue.number);
 
     const parentRef = parseParentRef(issue.body);
     if (parentRef !== null) {
-      const parentId = byNumber.get(parentRef);
-      if (parentId === undefined) {
+      const parent = byNumber.get(parentRef);
+      if (parent === undefined) {
         report.skipped.push(`#${issue.number} — parent #${parentRef} was not imported`);
-      } else if (before?.parentId !== parentId) {
-        updateTicket(id, { parentId }, { now, actor: "import" });
+      } else if (before?.parentId !== parent.id) {
+        updateTicket(ticket, { parent }, { now, actor: "import" });
         report.parents += 1;
       }
     }
@@ -497,16 +502,16 @@ export async function importHub(hubRepo: string, opts: ImportOptions = {}): Prom
     // prerequisite, so the union is the safe reading even where the forms overlap.
     const blockers = new Set([...issue.blockedBy, ...(native.edges?.get(issue.number) ?? [])]);
     for (const blocker of blockers) {
-      const blockerId = byNumber.get(blocker);
-      if (blockerId === undefined) {
+      const blockerTicket = byNumber.get(blocker);
+      if (blockerTicket === undefined) {
         report.skipped.push(
           `#${issue.number} — blocker #${blocker} was not imported, so that edge is lost`,
         );
         continue;
       }
-      if (before?.blockedBy.includes(blockerId)) continue;
+      if (before?.blockedBy.includes(blockerTicket.id)) continue;
       try {
-        addDependency(id, blockerId, { now });
+        addDependency(ticket, blockerTicket, { now });
         report.edges += 1;
       } catch (err) {
         report.skipped.push(
@@ -520,7 +525,11 @@ export async function importHub(hubRepo: string, opts: ImportOptions = {}): Prom
     if (issue.claim?.kind === "held") {
       const current = before?.claim ?? null;
       if (current?.session !== issue.claim.session) {
-        updateClaim(id, { session: issue.claim.session, at: issue.claim.at }, { actor: "import" });
+        updateClaim(
+          ticket,
+          { session: issue.claim.session, at: issue.claim.at },
+          { actor: "import" },
+        );
         report.claims += 1;
       }
     }

@@ -259,7 +259,7 @@ describe("importing the hub", () => {
     const consumer = requireTicket("app", 31);
     expect(consumer.blockedBy).toEqual([shared.id]);
     // Renumbering the blocker's seq cannot break the edge.
-    updateTicket(shared.id, { seq: 5 }, { now: AT });
+    updateTicket(shared, { seq: 5 }, { now: AT });
     expect(requireTicket("app", 31).blockedBy).toEqual([shared.id]);
     expect(
       computeFrontier(readTasks(), { known: false }, { workspace: "app" }).blocked,
@@ -293,7 +293,7 @@ describe("importing the hub", () => {
     });
     // A released Claim is nobody's — there is nothing to carry over.
     expect(requireTicket("kanban", 75).claim).toBeNull();
-    expect(ticketActions(requireTicket("kanban", 76).id).map((a) => a.kind)).toEqual([
+    expect(ticketActions(requireTicket("kanban", 76)).map((a) => a.kind)).toEqual([
       "created",
       "claimed",
     ]);
@@ -330,14 +330,14 @@ describe("importing the hub", () => {
     expect(first).toMatchObject({ created: 3, updated: 0, edges: 1, claims: 1 });
 
     // Local progress the hub knows nothing about.
-    updateTicket(requireTicket("k", 10).id, { status: "in_progress" }, { now: AT });
+    updateTicket(requireTicket("k", 10), { status: "in_progress" }, { now: AT });
 
     const second = await runImport(issues);
     expect(second).toMatchObject({ created: 0, updated: 3, edges: 0, claims: 0, parents: 0 });
     expect(second.skipped).toEqual([]);
     expect(requireTicket("k", 10).status).toBe("in_progress");
     expect(requireTicket("k", 11).blockedBy).toHaveLength(1);
-    expect(ticketActions(requireTicket("k", 12).id).map((a) => a.kind)).toEqual([
+    expect(ticketActions(requireTicket("k", 12)).map((a) => a.kind)).toEqual([
       "created",
       "claimed",
     ]);
@@ -376,9 +376,7 @@ describe("importing the hub", () => {
       },
     ]);
     expect(report.comments).toBe(2);
-    const carried = ticketActions(requireTicket("kanban", 77).id).filter(
-      (a) => a.kind === "comment",
-    );
+    const carried = ticketActions(requireTicket("kanban", 77)).filter((a) => a.kind === "comment");
     expect(carried.map((c) => [c.actor, c.body, c.at])).toEqual([
       ["Barak-Zen", "Variant B won: the rail reads as a map.", "2026-08-14T09:00:00Z"],
       ["someone-else", "One criterion needed refining.", "2026-08-13T08:00:00Z"],
@@ -394,15 +392,15 @@ describe("importing the hub", () => {
     const first = await runImport(issues);
     expect(first.comments).toBe(1);
 
-    const ticketId = requireTicket("kanban", 77).id;
-    addComment(ticketId, "and a note written on the board since", { session: "kanban-t77" });
+    const ticket = { workspace: "kanban", seq: 77 };
+    addComment(ticket, "and a note written on the board since", { session: "kanban-t77" });
 
     // The hub gained one comment between the runs, which is the case that must still work.
     issues[0]?.comments?.push("a later thought");
     const second = await runImport(issues);
     expect(second.comments).toBe(1);
 
-    const bodies = ticketActions(ticketId)
+    const bodies = ticketActions(ticket)
       .filter((a) => a.kind === "comment")
       .map((c) => c.body);
     expect(bodies).toEqual([
@@ -413,7 +411,7 @@ describe("importing the hub", () => {
 
     // A third run, with nothing new on the hub, is a no-op.
     expect((await runImport(issues)).comments).toBe(0);
-    expect(ticketActions(ticketId).filter((a) => a.kind === "comment")).toHaveLength(3);
+    expect(ticketActions(ticket).filter((a) => a.kind === "comment")).toHaveLength(3);
   });
 
   test("claim-protocol comments are counted rather than carried as comments", async () => {
@@ -430,7 +428,7 @@ describe("importing the hub", () => {
       },
     ]);
     expect(report).toMatchObject({ comments: 1, claimComments: 2 });
-    expect(ticketActions(requireTicket("kanban", 76).id).map((a) => a.kind)).toEqual([
+    expect(ticketActions(requireTicket("kanban", 76)).map((a) => a.kind)).toEqual([
       "created",
       "comment",
     ]);

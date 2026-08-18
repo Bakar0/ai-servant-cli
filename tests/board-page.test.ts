@@ -192,7 +192,7 @@ describe("the page", () => {
     });
     const blocker = file("blocker");
     const waiting = file("waiting");
-    addDependency(waiting.id, blocker.id, { now: AT });
+    addDependency(waiting, blocker, { now: AT });
 
     await mount({ view: view() });
 
@@ -218,8 +218,8 @@ describe("the page", () => {
   test("a card shows its column, its holding session with an age, and its open blockers", async () => {
     const blocker = file("blocker");
     const waiting = file("waiting");
-    addDependency(waiting.id, blocker.id, { now: AT });
-    updateClaim(blocker.id, { session: "kanban-t1", at: "2026-08-14T11:30:00.000Z" });
+    addDependency(waiting, blocker, { now: AT });
+    updateClaim(blocker, { session: "kanban-t1", at: "2026-08-14T11:30:00.000Z" });
 
     await mount({ view: view() });
 
@@ -235,9 +235,9 @@ describe("the page", () => {
     const claimed = file("claimed");
     const blocked = file("blocked");
     const done = file("done");
-    addDependency(blocked.id, ready.id, { now: AT });
-    updateClaim(claimed.id, { session: "someone", at: AT });
-    updateTicket(done.id, { status: "done" }, { now: NOW });
+    addDependency(blocked, ready, { now: AT });
+    updateClaim(claimed, { session: "someone", at: AT });
+    updateTicket(done, { status: "done" }, { now: NOW });
 
     await mount({ view: view() });
 
@@ -334,7 +334,7 @@ describe("the page", () => {
       labels: ["wayfinder:map"],
       body: `## Destination\n\n${payload}\n\n## Out of scope\n\n${payload}`,
     });
-    updateClaim(nasty.id, { session: payload, at: AT });
+    updateClaim(nasty, { session: payload, at: AT });
 
     await mount({ view: view() });
 
@@ -354,8 +354,8 @@ describe("tracing a chain", () => {
     const mid = file("mid");
     const leaf = file("leaf");
     const loose = file("unrelated");
-    addDependency(mid.id, root.id, { now: AT });
-    addDependency(leaf.id, mid.id, { now: AT });
+    addDependency(mid, root, { now: AT });
+    addDependency(leaf, mid, { now: AT });
     return { root, mid, leaf, loose };
   };
 
@@ -437,13 +437,13 @@ describe("a pushed change", () => {
   test("moves a card toward the frontier with no reload, keeping the traced chain", async () => {
     const blocker = file("blocker");
     const waiting = file("waiting");
-    addDependency(waiting.id, blocker.id, { now: AT });
+    addDependency(waiting, blocker, { now: AT });
     await mount({ view: view(), focus: waiting.seq });
 
     expect(seqsUnder("Next")).toEqual([waiting.seq]);
     expect(body().classList.contains("lock")).toBe(true);
 
-    updateTicket(blocker.id, { status: "done" }, { now: NOW });
+    updateTicket(blocker, { status: "done" }, { now: NOW });
     (win as unknown as { applyBoardView: (v: BoardView) => void }).applyBoardView(view());
 
     expect(seqsUnder("Now")).toEqual([waiting.seq]);
@@ -706,8 +706,8 @@ describe("reading a ticket", () => {
     const blocker = file("the blocker");
     const t = file("read me");
     const waiting = file("waits on me");
-    addDependency(t.id, blocker.id, { now: AT });
-    addDependency(waiting.id, t.id, { now: AT });
+    addDependency(t, blocker, { now: AT });
+    addDependency(waiting, t, { now: AT });
     await mount({ view: view() });
     const { asked } = servePanel();
 
@@ -727,7 +727,7 @@ describe("reading a ticket", () => {
 
   test("shows the comments left on it", async () => {
     const t = file("read me");
-    addComment(t.id, "the analysis is in #78", { session: "kanban-t82", now: AT });
+    addComment(t, "the analysis is in #78", { session: "kanban-t82", now: AT });
     await mount({ view: view() });
     servePanel();
 
@@ -767,7 +767,7 @@ describe("reading a ticket", () => {
     await settle();
     expect(isOpen()).toBe(true);
 
-    updateTicket(t.id, { status: "in_progress" }, { now: NOW });
+    updateTicket(t, { status: "in_progress" }, { now: NOW });
     (win as unknown as { applyBoardView: (v: BoardView) => void }).applyBoardView(view());
     await settle();
 
@@ -790,14 +790,14 @@ describe("reading a ticket", () => {
     const marked = panel()?.querySelector(".md") as PageElement;
     marked.setAttribute("data-was-here", "1");
 
-    updateTicket(other.id, { status: "in_progress" }, { now: NOW });
+    updateTicket(other, { status: "in_progress" }, { now: NOW });
     (win as unknown as { applyBoardView: (v: BoardView) => void }).applyBoardView(view());
     await settle();
 
     expect(panel()?.querySelector(".md")?.getAttribute("data-was-here")).toBe("1");
 
     // A change to this ticket does rebuild it — that is the whole reason it re-reads.
-    updateTicket(t.id, { title: "renamed" }, { now: NOW });
+    updateTicket(t, { title: "renamed" }, { now: NOW });
     (win as unknown as { applyBoardView: (v: BoardView) => void }).applyBoardView(view());
     await settle();
 
@@ -893,7 +893,7 @@ describe("folding the rail away", () => {
     await mount({ view: view() });
     toggle();
 
-    updateTicket(t.id, { status: "in_progress" }, { now: NOW });
+    updateTicket(t, { status: "in_progress" }, { now: NOW });
     (win as unknown as { applyBoardView: (v: BoardView) => void }).applyBoardView(view());
 
     // The state is a variable, not a class on a node inside #app — which the push just replaced.
@@ -904,7 +904,7 @@ describe("folding the rail away", () => {
   test("redraws the wires, so a locked chain still traces at the new width", async () => {
     const blocker = file("blocker");
     const waiting = file("waiting");
-    addDependency(waiting.id, blocker.id, { now: AT });
+    addDependency(waiting, blocker, { now: AT });
     await mount({ view: view() });
     click(cardEl(blocker.seq));
     expect(body().classList.contains("lock")).toBe(true);
@@ -1042,7 +1042,7 @@ describe("wiring the tree", () => {
   test("runs an ordinary edge left to right, from one card's right into the next card's left", async () => {
     const blocker = file("blocker");
     const waiting = file("waiting");
-    addDependency(waiting.id, blocker.id, { now: AT });
+    addDependency(waiting, blocker, { now: AT });
     await mount({ view: view() });
     stubGeometry();
     redraw();
@@ -1060,9 +1060,9 @@ describe("wiring the tree", () => {
     // between them has nowhere rightward to go.
     const first = file("first");
     const second = file("second");
-    addDependency(second.id, first.id, { now: AT });
-    updateTicket(first.id, { status: "done" }, { now: NOW });
-    updateTicket(second.id, { status: "done" }, { now: NOW });
+    addDependency(second, first, { now: AT });
+    updateTicket(first, { status: "done" }, { now: NOW });
+    updateTicket(second, { status: "done" }, { now: NOW });
     await mount({ view: view() });
     stubGeometry();
     redraw();
@@ -1084,7 +1084,7 @@ describe("a long column", () => {
     const fan = file("the fan");
     for (let i = 1; i <= count; i++) {
       const kid = file(`ticket ${i}`);
-      addDependency(kid.id, fan.id, { now: AT });
+      addDependency(kid, fan, { now: AT });
     }
     return fan;
   };
@@ -1103,7 +1103,7 @@ describe("a long column", () => {
     // A second, unrelated root whose child would otherwise interleave by seq.
     const other = file("other root");
     const otherKid = file("other kid");
-    addDependency(otherKid.id, other.id, { now: AT });
+    addDependency(otherKid, other, { now: AT });
     await mount({ view: view() });
 
     const next = seqsUnder("Next");
@@ -1176,7 +1176,7 @@ describe("every board on one surface", () => {
 
   test("marks a ticket whose session is gone, and still offers its command", async () => {
     const abandoned = file("abandoned");
-    updateClaim(abandoned.id, { session: "s-gone", at: AT });
+    updateClaim(abandoned, { session: "s-gone", at: AT });
 
     await mount({ view: null, everywhere: everywhere(), boards: ["kanban"] });
 
@@ -1188,8 +1188,8 @@ describe("every board on one surface", () => {
   test("says so rather than showing an empty page when nothing is dispatchable", async () => {
     const blocker = file("blocker");
     const waiting = file("waiting");
-    addDependency(waiting.id, blocker.id, { now: AT });
-    updateClaim(blocker.id, { session: "s-alive", at: AT });
+    addDependency(waiting, blocker, { now: AT });
+    updateClaim(blocker, { session: "s-alive", at: AT });
     const held = buildEverywhereView({
       now: NOW,
       liveness: { known: true, liveSessions: ["s-alive"] },

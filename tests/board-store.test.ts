@@ -15,7 +15,6 @@ import {
   listBoards,
   listTickets,
   openBlockerDepths,
-  readTicket,
   recordSessionsSeen,
   removeDependency,
   sessionLastSeen,
@@ -23,6 +22,7 @@ import {
   updateClaim,
   updateTicket,
 } from "../src/core/board/store.ts";
+import type { Ticket } from "../src/core/board/store.ts";
 import { openBoard } from "../src/core/board/db.ts";
 import { boardDbPath, setRootOverride } from "../src/core/paths.ts";
 
@@ -43,6 +43,9 @@ const AT = "2026-08-13T10:00:00.000Z";
 
 const newTicket = (workspace: string, title: string, over = {}) =>
   createTicket({ workspace, title, now: AT, ...over });
+
+/** Read a ticket back the only way the store offers: by the address it answers to. */
+const reread = (t: Ticket) => findTicket(t.workspace, t.seq);
 
 const HUB_COMMENT = { actor: "Barak-Zen", body: "the verdict", at: "2026-08-14T09:00:00Z" };
 
@@ -87,11 +90,13 @@ describe("the database itself", () => {
 
     const ticket = findTicket("alpha", 76);
     expect(ticket?.title).toBe("store");
-    const existing = ticketActions(ticket?.id ?? 0);
+    const existing = ticketActions({ workspace: "alpha", seq: 76 });
     expect(existing.map((a) => [a.body, a.externalId])).toEqual([
       ["written before the column existed", null],
     ]);
-    expect(carryComment(ticket?.id ?? 0, { externalId: "IC_1", ...HUB_COMMENT })).toBe(true);
+    expect(
+      carryComment({ workspace: "alpha", seq: 76 }, { externalId: "IC_1", ...HUB_COMMENT }),
+    ).toBe(true);
   });
 });
 
@@ -117,10 +122,10 @@ describe("tickets", () => {
       body: "why",
       labels: ["wayfinder:research", "ticket"],
       status: "in_progress",
-      parentSeq: map.seq,
+      parent: { workspace: "alpha", seq: map.seq },
       input: { fog: ["what about auth?"] },
     });
-    const read = readTicket(child.id);
+    const read = reread(child);
     expect(read).toMatchObject({
       workspace: "alpha",
       seq: 2,
@@ -153,8 +158,8 @@ describe("tickets", () => {
 
   test("updateTicket patches only what it is given, and stamps updatedAt", () => {
     const t = newTicket("alpha", "one", { labels: ["ticket"] });
-    updateTicket(t.id, { status: "done", title: "renamed" }, { now: "2026-08-14T00:00:00.000Z" });
-    const read = readTicket(t.id);
+    updateTicket(t, { status: "done", title: "renamed" }, { now: "2026-08-14T00:00:00.000Z" });
+    const read = reread(t);
     expect(read).toMatchObject({ status: "done", title: "renamed", labels: ["ticket"] });
     expect(read?.updatedAt).toBe("2026-08-14T00:00:00.000Z");
   });
@@ -174,51 +179,102 @@ describe("tickets", () => {
   });
 });
 
+describe("the address a write is aimed at", () => {
+  test("a seq is only an address on its own board, and a write respects that", () => {
+    const a = newTicket("alpha", "one");
+    const b = newTicket("beta", "one");
+    expect(a.seq).toBe(b.seq);
+
+    // No lookup first: the address *is* the reference, and it has to reach one board only.
+    updateTicket({ workspace: "beta", seq: 1 }, { status: "done" }, { now: AT });
+    addComment({ workspace: "beta", seq: 1 }, "on beta", { now: AT });
+    updateClaim({ workspace: "beta", seq: 1 }, { session: "beta-t1", at: AT });
+
+    expect(reread(b)).toMatchObject({ status: "done", claim: { session: "beta-t1" } });
+    expect(reread(a)).toMatchObject({ status: "todo", claim: null });
+    expect(ticketActions(a).map((x) => x.kind)).toEqual(["created"]);
+  });
+
+  test("a ticket already in hand is its own reference", () => {
+    const t = newTicket("alpha", "one");
+    updateTicket(t, { status: "in_progress" }, { now: AT });
+    expect(reread(t)?.status).toBe("in_progress");
+  });
+
+  test("an address nothing answers to is refused, and nothing is written", () => {
+    const t = newTicket("alpha", "one");
+    expect(() => updateTicket({ workspace: "alpha", seq: 9 }, { status: "done" })).toThrow(
+      /#9 on the "alpha" board/,
+    );
+    expect(() => updateClaim({ workspace: "nope", seq: 1 }, { session: "s", at: AT })).toThrow(
+      /#1 on the "nope" board/,
+    );
+    expect(() => addComment({ workspace: "alpha", seq: 9 }, "into the void")).toThrow(/#9/);
+    expect(() => ticketActions({ workspace: "alpha", seq: 9 })).toThrow(/#9/);
+    expect(ticketActions(t).map((x) => x.kind)).toEqual(["created"]);
+  });
+
+  test("a write that renumbers its own target still returns the row it wrote", () => {
+    const t = newTicket("alpha", "one");
+    // The address it was reached by no longer exists by the time the write returns, so the row is
+    // read back by the id resolved under the write lock — not by re-running the caller's address.
+    const moved = updateTicket(t, { seq: 4000 }, { now: AT });
+    expect(moved).toMatchObject({ id: t.id, seq: 4000 });
+    expect(findTicket("alpha", t.seq)).toBeNull();
+  });
+});
+
 describe("dependencies", () => {
   test("blockedBy and the reverse edge both read back", () => {
     const core = newTicket("alpha", "core");
     const tenant = newTicket("alpha", "tenant");
-    addDependency(tenant.id, core.id, { now: AT });
-    expect(readTicket(tenant.id)?.blockedBy).toEqual([core.id]);
+    addDependency(tenant, core, { now: AT });
+    expect(reread(tenant)?.blockedBy).toEqual([core.id]);
     // "what does this block" — the question the hub could never answer.
-    expect(dependentsOf(core.id).map((t) => t.id)).toEqual([tenant.id]);
-    expect(readTicket(core.id)?.blocks).toEqual([tenant.id]);
+    expect(dependentsOf(core).map((t) => t.id)).toEqual([tenant.id]);
+    expect(reread(core)?.blocks).toEqual([tenant.id]);
   });
 
   test("adding the same edge twice is a no-op", () => {
     const a = newTicket("alpha", "a");
     const b = newTicket("alpha", "b");
-    addDependency(b.id, a.id, { now: AT });
-    addDependency(b.id, a.id, { now: AT });
-    expect(readTicket(b.id)?.blockedBy).toEqual([a.id]);
+    addDependency(b, a, { now: AT });
+    addDependency(b, a, { now: AT });
+    expect(reread(b)?.blockedBy).toEqual([a.id]);
   });
 
   test("removeDependency drops just that edge", () => {
     const a = newTicket("alpha", "a");
     const b = newTicket("alpha", "b");
     const c = newTicket("alpha", "c");
-    addDependency(c.id, a.id, { now: AT });
-    addDependency(c.id, b.id, { now: AT });
-    removeDependency(c.id, a.id);
-    expect(readTicket(c.id)?.blockedBy).toEqual([b.id]);
+    addDependency(c, a, { now: AT });
+    addDependency(c, b, { now: AT });
+    removeDependency(c, a);
+    expect(reread(c)?.blockedBy).toEqual([b.id]);
+  });
+
+  test("dropping an edge between tickets that are not both there is refused, not shrugged off", () => {
+    const a = newTicket("alpha", "a");
+    // Deleting a row that is not there is harmless; reporting success for a mistyped number is not.
+    expect(() => removeDependency(a, { workspace: "alpha", seq: 9999 })).toThrow(/#9999/);
   });
 
   test("a self-reference is rejected", () => {
     const a = newTicket("alpha", "a");
-    expect(() => addDependency(a.id, a.id, { now: AT })).toThrow(/itself/i);
+    expect(() => addDependency(a, a, { now: AT })).toThrow(/itself/i);
   });
 
   test("a cycle is rejected at write time, direct and transitive", () => {
     const a = newTicket("alpha", "a");
     const b = newTicket("alpha", "b");
     const c = newTicket("alpha", "c");
-    addDependency(b.id, a.id, { now: AT });
-    expect(() => addDependency(a.id, b.id, { now: AT })).toThrow(/cycle/i);
-    addDependency(c.id, b.id, { now: AT });
+    addDependency(b, a, { now: AT });
+    expect(() => addDependency(a, b, { now: AT })).toThrow(/cycle/i);
+    addDependency(c, b, { now: AT });
     // a ← b ← c, so c blocking a would close the loop three edges out.
-    expect(() => addDependency(a.id, c.id, { now: AT })).toThrow(/cycle/i);
+    expect(() => addDependency(a, c, { now: AT })).toThrow(/cycle/i);
     // The rejected edges left nothing behind.
-    expect(readTicket(a.id)?.blockedBy).toEqual([]);
+    expect(reread(a)?.blockedBy).toEqual([]);
   });
 
   test("a diamond is not a cycle", () => {
@@ -226,26 +282,34 @@ describe("dependencies", () => {
     const left = newTicket("alpha", "left");
     const right = newTicket("alpha", "right");
     const join_ = newTicket("alpha", "join");
-    addDependency(left.id, root.id, { now: AT });
-    addDependency(right.id, root.id, { now: AT });
-    addDependency(join_.id, left.id, { now: AT });
-    addDependency(join_.id, right.id, { now: AT });
-    expect(readTicket(join_.id)?.blockedBy).toEqual([left.id, right.id]);
+    addDependency(left, root, { now: AT });
+    addDependency(right, root, { now: AT });
+    addDependency(join_, left, { now: AT });
+    addDependency(join_, right, { now: AT });
+    expect(reread(join_)?.blockedBy).toEqual([left.id, right.id]);
   });
 
   test("an edge may cross boards, and it survives the seq being renumbered", () => {
     const shared = newTicket("platform", "shared prerequisite");
     const consumer = newTicket("alpha", "consumer");
-    addDependency(consumer.id, shared.id, { now: AT });
+    addDependency(consumer, shared, { now: AT });
     // Edges reference the global id, so renumbering the blocker cannot break them.
-    updateTicket(shared.id, { seq: 4000 }, { now: AT });
-    expect(readTicket(consumer.id)?.blockedBy).toEqual([shared.id]);
-    expect(readTicket(shared.id)?.seq).toBe(4000);
+    updateTicket(shared, { seq: 4000 }, { now: AT });
+    expect(reread(consumer)?.blockedBy).toEqual([shared.id]);
+    expect(findTicket("platform", 4000)?.id).toBe(shared.id);
   });
 
   test("an unknown ticket cannot be depended on", () => {
     const a = newTicket("alpha", "a");
-    expect(() => addDependency(a.id, 9999, { now: AT })).toThrow();
+    expect(() => addDependency(a, { workspace: "alpha", seq: 9999 }, { now: AT })).toThrow(
+      /#9999 on the "alpha" board/,
+    );
+    // Not "a ticket cannot block itself": with two numbers that name nothing, what the user needs
+    // to hear is that the ticket they were blocking does not exist.
+    const nowhere = { workspace: "alpha", seq: 9999 };
+    expect(() => addDependency(nowhere, nowhere, { now: AT })).toThrow(
+      /#9999 on the "alpha" board/,
+    );
   });
 });
 
@@ -253,9 +317,9 @@ describe("depth over open blockers only", () => {
   test("a ticket collapses to depth 0 as its blockers close", () => {
     const core = newTicket("alpha", "core");
     const tenant = newTicket("alpha", "tenant");
-    addDependency(tenant.id, core.id, { now: AT });
+    addDependency(tenant, core, { now: AT });
     expect(openBlockerDepths("alpha").get(tenant.id)).toBe(1);
-    updateTicket(core.id, { status: "done" }, { now: AT });
+    updateTicket(core, { status: "done" }, { now: AT });
     // The whole point: depth is what is still in the way, not the static longest path.
     expect(openBlockerDepths("alpha").get(tenant.id)).toBe(0);
   });
@@ -265,15 +329,15 @@ describe("depth over open blockers only", () => {
     const b = newTicket("alpha", "b");
     const c = newTicket("alpha", "c");
     const shortcut = newTicket("alpha", "shortcut");
-    addDependency(b.id, a.id, { now: AT });
-    addDependency(c.id, b.id, { now: AT });
-    addDependency(c.id, shortcut.id, { now: AT });
+    addDependency(b, a, { now: AT });
+    addDependency(c, b, { now: AT });
+    addDependency(c, shortcut, { now: AT });
     const depths = openBlockerDepths("alpha");
     expect(depths.get(a.id)).toBe(0);
     expect(depths.get(shortcut.id)).toBe(0);
     expect(depths.get(b.id)).toBe(1);
     expect(depths.get(c.id)).toBe(2);
-    updateTicket(a.id, { status: "done" }, { now: AT });
+    updateTicket(a, { status: "done" }, { now: AT });
     const after = openBlockerDepths("alpha");
     expect(after.get(a.id)).toBeNull();
     expect(after.get(b.id)).toBe(0);
@@ -283,7 +347,7 @@ describe("depth over open blockers only", () => {
   test("a cross-board blocker still counts toward depth", () => {
     const shared = newTicket("platform", "shared");
     const consumer = newTicket("alpha", "consumer");
-    addDependency(consumer.id, shared.id, { now: AT });
+    addDependency(consumer, shared, { now: AT });
     expect(openBlockerDepths("alpha").get(consumer.id)).toBe(1);
   });
 });
@@ -291,9 +355,9 @@ describe("depth over open blockers only", () => {
 describe("actions", () => {
   test("a comment is an action row, and the history reads back in order", () => {
     const t = newTicket("alpha", "one");
-    addComment(t.id, "found the cause", { session: "alpha-t1", now: AT });
-    addComment(t.id, "and the fix", { now: "2026-08-13T11:00:00.000Z" });
-    const actions = ticketActions(t.id);
+    addComment(t, "found the cause", { session: "alpha-t1", now: AT });
+    addComment(t, "and the fix", { now: "2026-08-13T11:00:00.000Z" });
+    const actions = ticketActions(t);
     expect(actions.map((a) => [a.kind, a.body, a.session])).toEqual([
       ["created", "", null],
       ["comment", "found the cause", "alpha-t1"],
@@ -304,9 +368,9 @@ describe("actions", () => {
 
   test("a carried comment lands once, however many times it is carried", () => {
     const t = newTicket("alpha", "one");
-    expect(carryComment(t.id, { externalId: "IC_1", ...HUB_COMMENT })).toBe(true);
-    expect(carryComment(t.id, { externalId: "IC_1", ...HUB_COMMENT })).toBe(false);
-    const carried = ticketActions(t.id).filter((a) => a.kind === "comment");
+    expect(carryComment(t, { externalId: "IC_1", ...HUB_COMMENT })).toBe(true);
+    expect(carryComment(t, { externalId: "IC_1", ...HUB_COMMENT })).toBe(false);
+    const carried = ticketActions(t).filter((a) => a.kind === "comment");
     expect(carried).toHaveLength(1);
     expect(carried[0]).toMatchObject({ actor: "Barak-Zen", session: null, externalId: "IC_1" });
   });
@@ -314,17 +378,17 @@ describe("actions", () => {
   test("the same comment cannot be carried onto two tickets, because its identity is its own", () => {
     const a = newTicket("alpha", "one");
     const b = newTicket("alpha", "two");
-    expect(carryComment(a.id, { externalId: "IC_1", ...HUB_COMMENT })).toBe(true);
-    expect(carryComment(b.id, { externalId: "IC_1", ...HUB_COMMENT })).toBe(false);
+    expect(carryComment(a, { externalId: "IC_1", ...HUB_COMMENT })).toBe(true);
+    expect(carryComment(b, { externalId: "IC_1", ...HUB_COMMENT })).toBe(false);
   });
 });
 
 describe("a write and the audit row that belongs to it", () => {
   test("a board-state change records itself — including the label change nobody logged", () => {
     const t = newTicket("alpha", "one", { labels: ["ticket"] });
-    updateTicket(t.id, { labels: ["ticket", "needs-info"] }, { now: AT });
-    updateTicket(t.id, { status: "in_progress" }, { now: AT });
-    expect(ticketActions(t.id).map((a) => [a.kind, a.body])).toEqual([
+    updateTicket(t, { labels: ["ticket", "needs-info"] }, { now: AT });
+    updateTicket(t, { status: "in_progress" }, { now: AT });
+    expect(ticketActions(t).map((a) => [a.kind, a.body])).toEqual([
       ["created", ""],
       ["labels", "ticket, needs-info"],
       ["status", "in_progress"],
@@ -333,16 +397,16 @@ describe("a write and the audit row that belongs to it", () => {
 
   test("a patch that leaves the board state alone leaves the trail alone too", () => {
     const t = newTicket("alpha", "one", { labels: ["ticket"] });
-    updateTicket(t.id, { title: "renamed", labels: ["ticket"], status: "todo" }, { now: AT });
-    expect(ticketActions(t.id).map((a) => a.kind)).toEqual(["created"]);
+    updateTicket(t, { title: "renamed", labels: ["ticket"], status: "todo" }, { now: AT });
+    expect(ticketActions(t).map((a) => a.kind)).toEqual(["created"]);
   });
 
   test("a rejected write leaves neither the field change nor its action row", () => {
     newTicket("alpha", "already at five", { seq: 5 });
     const t = newTicket("alpha", "moving");
-    expect(() => updateTicket(t.id, { seq: 5, status: "done" }, { now: AT })).toThrow();
-    expect(readTicket(t.id)).toMatchObject({ seq: t.seq, status: "todo" });
-    expect(ticketActions(t.id).map((a) => a.kind)).toEqual(["created"]);
+    expect(() => updateTicket(t, { seq: 5, status: "done" }, { now: AT })).toThrow();
+    expect(reread(t)).toMatchObject({ seq: t.seq, status: "todo" });
+    expect(ticketActions(t).map((a) => a.kind)).toEqual(["created"]);
   });
 
   test("a rejected claim takes its action row down with it", () => {
@@ -353,17 +417,17 @@ describe("a write and the audit row that belongs to it", () => {
       `CREATE TRIGGER refuse_claim BEFORE UPDATE OF claimed_by ON tickets
        WHEN NEW.claimed_by = 'refused' BEGIN SELECT RAISE(ABORT, 'refused'); END`,
     );
-    expect(() => updateClaim(t.id, { session: "refused", at: AT })).toThrow();
-    expect(readTicket(t.id)?.claim).toBeNull();
-    expect(ticketActions(t.id).map((a) => a.kind)).toEqual(["created"]);
+    expect(() => updateClaim(t, { session: "refused", at: AT })).toThrow();
+    expect(reread(t)?.claim).toBeNull();
+    expect(ticketActions(t).map((a) => a.kind)).toEqual(["created"]);
   });
 
   test("a claim, a transfer and a release each record themselves", () => {
     const t = newTicket("alpha", "one");
-    updateClaim(t.id, { session: "alpha-t1", at: AT });
-    updateClaim(t.id, { session: "alpha-t1-again", at: AT });
-    updateClaim(t.id, null, { session: "alpha-t1-again", now: AT });
-    expect(ticketActions(t.id).map((a) => [a.kind, a.session, a.body])).toEqual([
+    updateClaim(t, { session: "alpha-t1", at: AT });
+    updateClaim(t, { session: "alpha-t1-again", at: AT });
+    updateClaim(t, null, { session: "alpha-t1-again", now: AT });
+    expect(ticketActions(t).map((a) => [a.kind, a.session, a.body])).toEqual([
       ["created", null, ""],
       ["claimed", "alpha-t1", ""],
       ["transferred", "alpha-t1-again", "alpha-t1"],
@@ -373,16 +437,16 @@ describe("a write and the audit row that belongs to it", () => {
 
   test("re-stamping the session already holding a ticket is not a transfer", () => {
     const t = newTicket("alpha", "one");
-    updateClaim(t.id, { session: "alpha-t1", at: AT });
-    updateClaim(t.id, { session: "alpha-t1", at: "2026-08-13T12:00:00.000Z" });
-    expect(ticketActions(t.id).map((a) => a.kind)).toEqual(["created", "claimed"]);
+    updateClaim(t, { session: "alpha-t1", at: AT });
+    updateClaim(t, { session: "alpha-t1", at: "2026-08-13T12:00:00.000Z" });
+    expect(ticketActions(t).map((a) => a.kind)).toEqual(["created", "claimed"]);
   });
 
   test("a foreign actor is carried onto the row, so an import does not read as servant", () => {
     const t = newTicket("alpha", "one");
-    updateClaim(t.id, { session: "alpha-t1", at: AT }, { actor: "import" });
-    updateTicket(t.id, { status: "done" }, { now: AT, actor: "import" });
-    expect(ticketActions(t.id).map((a) => [a.actor, a.kind])).toEqual([
+    updateClaim(t, { session: "alpha-t1", at: AT }, { actor: "import" });
+    updateTicket(t, { status: "done" }, { now: AT, actor: "import" });
+    expect(ticketActions(t).map((a) => [a.actor, a.kind])).toEqual([
       ["servant", "created"],
       ["import", "claimed"],
       ["import", "status"],

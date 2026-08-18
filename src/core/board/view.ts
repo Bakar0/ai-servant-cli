@@ -692,7 +692,7 @@ export function buildTicketDetail(
     claim,
     blockedBy: links(ticket.blockedBy),
     blocks: links(ticket.blocks),
-    comments: ticketActions(ticket.id)
+    comments: ticketActions(ticket)
       .filter((action) => action.kind === "comment")
       .map((action) => ({
         actor: action.actor,

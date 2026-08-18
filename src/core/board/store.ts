@@ -61,6 +61,47 @@ export interface Ticket {
   url: string;
 }
 
+/**
+ * How every function here names a ticket: the address a human uses, never the row's global id.
+ *
+ * The schema keeps both identifiers on purpose (db.ts), but only one of them belongs in a
+ * signature. When the split reached the interface too, a caller had to know which of ~23 functions
+ * spoke which, and the ones that spoke id could only be reached through a lookup — a
+ * `requireTicket(…).id` preamble in front of nearly every write.
+ *
+ * A `Ticket` satisfies this structurally, so a caller already holding one passes it straight
+ * through; a caller holding only an address writes the literal and performs no read at all.
+ */
+export interface TicketRef {
+  workspace: string;
+  seq: number;
+}
+
+function noSuchTicket(ref: TicketRef): Error {
+  return new Error(`No ticket #${ref.seq} on the "${ref.workspace}" board.`);
+}
+
+/**
+ * An address to the id the rows are keyed on.
+ *
+ * Deliberately not `findTicket().id`: that hydrates the ticket and reads the whole edge table to do
+ * it, which is what made the old lookup-then-write preamble expensive. Resolution needs neither.
+ */
+function findId(db: Database, ref: TicketRef): number | null {
+  const row = db
+    .query<{ id: number }, [string, number]>(
+      "SELECT t.id FROM tickets t JOIN boards b ON b.id = t.board_id WHERE b.workspace = ? AND t.seq = ?",
+    )
+    .get(ref.workspace, ref.seq);
+  return row?.id ?? null;
+}
+
+function requireId(db: Database, ref: TicketRef): number {
+  const id = findId(db, ref);
+  if (id === null) throw noSuchTicket(ref);
+  return id;
+}
+
 export type TicketState = "open" | "closed" | "all";
 
 interface TicketRow {
@@ -188,8 +229,8 @@ export interface CreateTicketInput {
   body?: string;
   labels?: readonly string[];
   status?: string;
-  /** The map this is a child of, by seq on the same board. */
-  parentSeq?: number;
+  /** The map this is a child of. */
+  parent?: TicketRef;
   input?: Record<string, unknown>;
   /** Forced seq — the importer preserving a hub issue number. Otherwise the next free one. */
   seq?: number;
@@ -201,8 +242,7 @@ export function createTicket(spec: CreateTicketInput): Ticket {
   const now = spec.now ?? new Date().toISOString();
   const status = assertStatus(spec.status ?? "todo");
   const boardId = ensureBoard(spec.workspace, { now });
-  const parentId =
-    spec.parentSeq === undefined ? null : requireTicket(spec.workspace, spec.parentSeq).id;
+  const parentId = spec.parent === undefined ? null : requireId(db, spec.parent);
   const seq = spec.seq ?? nextSeq(boardId);
   if (!Number.isInteger(seq) || seq <= 0) {
     throw new Error(`Ticket seq must be a positive integer, got ${seq}.`);
@@ -240,7 +280,10 @@ function nextSeq(boardId: number): number {
   return row?.next ?? 1;
 }
 
-export function readTicket(id: number): Ticket | null {
+// Not exported: `findTicket` is the one way in from outside, so an id never has to be carried
+// around to read a row back. Kept internally because a write already holds the id it just wrote,
+// and re-addressing by seq would miss a row the same write had renumbered.
+function readById(id: number): Ticket | null {
   const row = openBoard()
     .query<TicketRow, [number]>(
       `SELECT ${TICKET_COLUMNS} FROM tickets t JOIN boards b ON b.id = t.board_id WHERE t.id = ?`,
@@ -262,7 +305,7 @@ export function findTicket(workspace: string, seq: number): Ticket | null {
 
 export function requireTicket(workspace: string, seq: number): Ticket {
   const ticket = findTicket(workspace, seq);
-  if (!ticket) throw new Error(`No ticket #${seq} on the "${workspace}" board.`);
+  if (!ticket) throw noSuchTicket({ workspace, seq });
   return ticket;
 }
 
@@ -306,7 +349,7 @@ export interface TicketPatch {
   body?: string;
   status?: string;
   labels?: readonly string[];
-  parentId?: number | null;
+  parent?: TicketRef | null;
   input?: Record<string, unknown>;
   /** Renumbering. Safe by construction: edges reference the global id, never this. */
   seq?: number;
@@ -321,47 +364,52 @@ export interface TicketPatch {
  * A patch that sets a field to what it already holds records nothing — the trail is transitions,
  * and the importer re-reads every field on every run.
  */
-export function updateTicket(id: number, patch: TicketPatch, opts: WriteOptions = {}): Ticket {
+export function updateTicket(ref: TicketRef, patch: TicketPatch, opts: WriteOptions = {}): Ticket {
   const db = openBoard();
-  const sets: string[] = [];
-  const params: (string | number | null)[] = [];
-  const push = (column: string, value: string | number | null) => {
-    sets.push(`${column} = ?`);
-    params.push(value);
-  };
+  if (!Object.values(patch).some((field) => field !== undefined)) {
+    return requireTicket(ref.workspace, ref.seq);
+  }
+  // Validated before the write lock is taken, so a bad status costs nobody a blocked transaction.
   const next: Partial<BoardState> = {
     ...(patch.status === undefined ? {} : { status: assertStatus(patch.status) }),
     ...(patch.labels === undefined ? {} : { labels: JSON.stringify([...patch.labels]) }),
   };
-  if (patch.title !== undefined) push("title", patch.title);
-  if (patch.body !== undefined) push("body", patch.body);
-  if (next.status !== undefined) push("status", next.status);
-  if (next.labels !== undefined) push("labels", next.labels);
-  if (patch.parentId !== undefined) push("parent_id", patch.parentId);
-  if (patch.input !== undefined) push("input", JSON.stringify(patch.input));
-  if (patch.seq !== undefined) push("seq", patch.seq);
-  if (sets.length === 0) {
-    const unchanged = readTicket(id);
-    if (!unchanged) throw new Error(`No ticket with id ${id}.`);
-    return unchanged;
-  }
   const at = opts.now ?? new Date().toISOString();
-  push("updated_at", at);
-  params.push(id);
-  db.transaction(() => {
-    const before = requireBoardState(db, id);
-    for (const action of boardStateChanges(before, next)) {
-      recordAction(id, { ...action, actor: opts.actor, at });
-    }
-    db.run(`UPDATE tickets SET ${sets.join(", ")} WHERE id = ?`, params);
-  }).immediate();
-  const updated = readTicket(id);
-  if (!updated) throw new Error(`No ticket with id ${id}.`);
+  const id = db
+    .transaction(() => {
+      const before = requireBoardState(db, ref);
+      const sets: string[] = [];
+      const params: (string | number | null)[] = [];
+      const push = (column: string, value: string | number | null) => {
+        sets.push(`${column} = ?`);
+        params.push(value);
+      };
+      if (patch.title !== undefined) push("title", patch.title);
+      if (patch.body !== undefined) push("body", patch.body);
+      if (next.status !== undefined) push("status", next.status);
+      if (next.labels !== undefined) push("labels", next.labels);
+      if (patch.parent !== undefined) {
+        push("parent_id", patch.parent === null ? null : requireId(db, patch.parent));
+      }
+      if (patch.input !== undefined) push("input", JSON.stringify(patch.input));
+      if (patch.seq !== undefined) push("seq", patch.seq);
+      push("updated_at", at);
+      for (const action of boardStateChanges(before, next)) {
+        recordAction(before.id, { ...action, actor: opts.actor, at });
+      }
+      db.run(`UPDATE tickets SET ${sets.join(", ")} WHERE id = ?`, [...params, before.id]);
+      return before.id;
+    })
+    .immediate();
+  // By id rather than by the address that came in: this write may have been the renumbering.
+  const updated = readById(id);
+  if (!updated) throw noSuchTicket(ref);
   return updated;
 }
 
-/** The columns an action row is written about, as the table stores them. */
+/** The columns an action row is written about, as the table stores them, and the row they are on. */
 interface BoardState {
+  id: number;
   status: string;
   labels: string;
   claimedBy: string | null;
@@ -370,15 +418,21 @@ interface BoardState {
 // Immediate, and read inside the transaction, for the same reason addDependency is: the row a
 // write logs is decided by comparing against the row it replaces, and a decision made against a
 // snapshot taken before the write lock can describe a transition that never happened — a transfer
-// logged as a first claim.
-function requireBoardState(db: Database, id: number): BoardState {
+// logged as a first claim. Resolving the address is part of that same read, so a concurrent
+// renumbering cannot land the write on a row the caller never named.
+function requireBoardState(db: Database, ref: TicketRef): BoardState {
   const row = db
-    .query<{ status: string; labels: string; claimed_by: string | null }, [number]>(
-      "SELECT status, labels, claimed_by FROM tickets WHERE id = ?",
+    .query<
+      { id: number; status: string; labels: string; claimed_by: string | null },
+      [string, number]
+    >(
+      `SELECT t.id, t.status, t.labels, t.claimed_by FROM tickets t
+         JOIN boards b ON b.id = t.board_id
+       WHERE b.workspace = ? AND t.seq = ?`,
     )
-    .get(id);
-  if (!row) throw new Error(`No ticket with id ${id}.`);
-  return { status: row.status, labels: row.labels, claimedBy: row.claimed_by };
+    .get(ref.workspace, ref.seq);
+  if (!row) throw noSuchTicket(ref);
+  return { id: row.id, status: row.status, labels: row.labels, claimedBy: row.claimed_by };
 }
 
 function boardStateChanges(
@@ -403,14 +457,14 @@ function boardStateChanges(
  * something a session did, and "there was nothing to let go of" is worth being able to see.
  */
 export function updateClaim(
-  id: number,
+  ref: TicketRef,
   claim: Claim | null,
   opts: WriteOptions & { session?: string } = {},
 ): void {
   const db = openBoard();
   const at = opts.now ?? claim?.at ?? new Date().toISOString();
   db.transaction(() => {
-    const held = requireBoardState(db, id).claimedBy;
+    const { id, claimedBy: held } = requireBoardState(db, ref);
     if (claim === null) {
       recordAction(id, { kind: "released", actor: opts.actor, session: opts.session ?? held, at });
     } else if (claim.session !== held) {
@@ -438,30 +492,30 @@ export function updateClaim(
  * while inconsistent.
  */
 export function addDependency(
-  ticketId: number,
-  dependsOn: number,
+  ticket: TicketRef,
+  dependsOn: TicketRef,
   opts: { now?: string } = {},
 ): void {
-  if (ticketId === dependsOn) throw new Error("A ticket cannot block itself.");
   const db = openBoard();
   const at = opts.now ?? new Date().toISOString();
   // Immediate rather than deferred: the write lock is taken before the reachability read, so a
   // second session adding the opposite edge at the same moment cannot slip a cycle past a check
-  // made against a snapshot that was already stale.
+  // made against a snapshot that was already stale. Both addresses resolve under the same lock,
+  // for the same reason.
   db.transaction(() => {
-    for (const id of [ticketId, dependsOn]) {
-      if (!db.query<{ id: number }, [number]>("SELECT id FROM tickets WHERE id = ?").get(id)) {
-        throw new Error(`No ticket with id ${id}.`);
-      }
-    }
-    if (reaches(dependsOn, ticketId)) {
+    // Resolved before the self-check, and the waiting ticket first, so that two numbers neither of
+    // which exists is reported as the missing subject rather than as a self-reference.
+    const ticketId = requireId(db, ticket);
+    const blockerId = requireId(db, dependsOn);
+    if (ticketId === blockerId) throw new Error("A ticket cannot block itself.");
+    if (reaches(blockerId, ticketId)) {
       throw new Error(
-        `That dependency would create a cycle: ${dependsOn} already waits on ${ticketId}.`,
+        `That dependency would create a cycle: ${dependsOn.workspace}#${dependsOn.seq} already waits on ${ticket.workspace}#${ticket.seq}.`,
       );
     }
     db.run(
       "INSERT OR IGNORE INTO ticket_dependencies (ticket_id, depends_on, created_at) VALUES (?, ?, ?)",
-      [ticketId, dependsOn, at],
+      [ticketId, blockerId, at],
     );
   }).immediate();
 }
@@ -481,16 +535,23 @@ function reaches(from: number, target: number): boolean {
   return row !== null;
 }
 
-export function removeDependency(ticketId: number, dependsOn: number): void {
-  openBoard().run("DELETE FROM ticket_dependencies WHERE ticket_id = ? AND depends_on = ?", [
-    ticketId,
-    dependsOn,
+export function removeDependency(ticket: TicketRef, dependsOn: TicketRef): void {
+  const db = openBoard();
+  // Both addresses are required to exist even though deleting a missing edge is harmless. It is
+  // what `servant ticket unblock` used to get from reading both tickets before calling: without
+  // it, a mistyped number reports success, and the edge stays on the board while its owner
+  // believes it is gone.
+  db.run("DELETE FROM ticket_dependencies WHERE ticket_id = ? AND depends_on = ?", [
+    requireId(db, ticket),
+    requireId(db, dependsOn),
   ]);
 }
 
 /** The tickets waiting on this one — "what does leaving this undone cost?". */
-export function dependentsOf(id: number): Ticket[] {
-  const rows = openBoard()
+export function dependentsOf(ref: TicketRef): Ticket[] {
+  const db = openBoard();
+  const id = requireId(db, ref);
+  const rows = db
     .query<TicketRow, [number]>(
       `SELECT ${TICKET_COLUMNS} FROM ticket_dependencies d
          JOIN tickets t ON t.id = d.ticket_id
@@ -562,8 +623,10 @@ interface ActionRow {
   external_id: string | null;
 }
 
-export function ticketActions(ticketId: number): TicketAction[] {
-  return openBoard()
+export function ticketActions(ref: TicketRef): TicketAction[] {
+  const db = openBoard();
+  const ticketId = requireId(db, ref);
+  return db
     .query<ActionRow, [number]>(
       `SELECT id, ticket_id, actor, session, kind, body, at, external_id FROM ticket_actions
        WHERE ticket_id = ? ORDER BY id`,
@@ -607,11 +670,12 @@ function recordAction(
 }
 
 export function addComment(
-  ticketId: number,
+  ref: TicketRef,
   body: string,
   opts: { session?: string | undefined; now?: string } = {},
 ): void {
-  recordAction(ticketId, {
+  const db = openBoard();
+  recordAction(requireId(db, ref), {
     kind: "comment",
     session: opts.session ?? null,
     body,
@@ -627,13 +691,14 @@ export function addComment(
  * unique index makes the second run a no-op rather than a thing the caller has to remember.
  */
 export function carryComment(
-  ticketId: number,
+  ref: TicketRef,
   comment: { externalId: string; actor: string; body: string; at: string },
 ): boolean {
-  const { changes } = openBoard().run(
+  const db = openBoard();
+  const { changes } = db.run(
     `INSERT OR IGNORE INTO ticket_actions (ticket_id, actor, session, kind, body, at, external_id)
      VALUES (?, ?, NULL, 'comment', ?, ?, ?)`,
-    [ticketId, comment.actor, comment.body, comment.at, comment.externalId],
+    [requireId(db, ref), comment.actor, comment.body, comment.at, comment.externalId],
   );
   return changes > 0;
 }

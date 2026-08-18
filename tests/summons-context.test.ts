@@ -155,7 +155,7 @@ describe("summons scope and snapshot", () => {
       "../src/core/board/store.ts"
     );
     createTicket({ workspace: WS, title: "already shipped", seq: 3 });
-    updateTicket(requireTicket(WS, 3).id, { status: "done" });
+    updateTicket(requireTicket(WS, 3), { status: "done" });
     const scope = await resolveSummonsScope(WS, undefined);
 
     expect((await readWorkspaceSnapshot(scope)).tickets.map((t) => t.number)).toEqual([15]);
