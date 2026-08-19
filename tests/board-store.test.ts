@@ -10,7 +10,6 @@ import {
   carryComment,
   closeBoard,
   createTicket,
-  dependentsOf,
   findTicket,
   listBoards,
   listTickets,
@@ -231,7 +230,6 @@ describe("dependencies", () => {
     addDependency(tenant, core, { now: AT });
     expect(reread(tenant)?.blockedBy).toEqual([core.id]);
     // "what does this block" — the question the hub could never answer.
-    expect(dependentsOf(core).map((t) => t.id)).toEqual([tenant.id]);
     expect(reread(core)?.blocks).toEqual([tenant.id]);
   });
 

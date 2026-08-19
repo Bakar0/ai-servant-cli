@@ -470,6 +470,7 @@ export async function importHub(hubRepo: string, opts: ImportOptions = {}): Prom
         status: hubClosed ? "done" : "todo",
         input: { hub: { number: issue.number, url: issue.url } },
         now,
+        actor: "import",
       });
       report.created += 1;
       byNumber.set(issue.number, created);

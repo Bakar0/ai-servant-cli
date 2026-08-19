@@ -51,7 +51,8 @@ board is \`${workspace}\`. Every command below defaults to the current workspace
   (heredoc for multi-line bodies). It prints the new number; add \`--json\` to read it back
   programmatically. Labels are freeform strings — nothing needs creating first.
 - **Read a ticket**: \`servant ticket show <number>\` — body, labels, claim, both directions of its
-  blocking edges, and its comments.
+  blocking edges, and its comments. Add \`--history\` for how it got there: when it was filed, and
+  every label and status change since.
 - **List this workspace's tickets**: \`servant tasks --ws ${workspace}\` (add \`--state all\` for
   closed ones too). \`servant tasks --frontier --ws ${workspace} --json\` reports what is
   dispatchable.

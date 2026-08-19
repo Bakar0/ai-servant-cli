@@ -8,6 +8,8 @@ import {
   closeBoard,
   createTicket,
   listBoards,
+  updateClaim,
+  updateTicket,
 } from "../src/core/board/store.ts";
 import { createBoardFeed } from "../src/core/board/feed.ts";
 import {
@@ -180,10 +182,43 @@ describe("reading one ticket", () => {
     ]);
   });
 
+  test("carries the state-change trail, apart from the comments and without the claim's", async () => {
+    const t = file("moved");
+    updateTicket(t, { labels: ["ticket", "ready-for-agent"] }, { now: AT });
+    updateTicket(t, { status: "in_progress" }, { now: AT, actor: "import" });
+    updateClaim(t, { session: "kanban-t9", at: AT });
+    addComment(t, "picked it up", { session: "kanban-t9", now: AT });
+
+    const detail = (await get(`/api/w/${WS}/t/${t.seq}`).json()) as TicketDetail;
+    expect(detail.history).toEqual([
+      { kind: "created", detail: "", at: AT, actor: "servant" },
+      { kind: "labels", detail: "ticket, ready-for-agent", at: AT, actor: "servant" },
+      { kind: "status", detail: "in_progress", at: AT, actor: "import" },
+    ]);
+    // The two streams stay apart, and the claim trail keeps its one reader in `claim --history`.
+    expect(detail.comments.map((c) => c.bodyHtml)).toEqual(["<p>picked it up</p>"]);
+  });
+
   test("404s a seq that board has never carried", () => {
     file("t");
     const res = get(`/api/w/${WS}/t/999`);
     expect(res.status).toBe(404);
+  });
+
+  test("builds no board view — not for the ticket, and not for any 404 on the route", async () => {
+    const t = file("read me");
+    // The detail panel re-fetches this on every SSE push, so a view built here is built constantly.
+    const noView: Partial<BoardHandlerDeps> = {
+      view: () => {
+        throw new Error("a whole board view was built to answer one ticket");
+      },
+    };
+    expect(get(`/api/w/${WS}/t/${t.seq}`, noView).status).toBe(200);
+    expect(get(`/api/w/${WS}/t/999`, noView).status).toBe(404);
+    expect(get(`/api/w/${WS}/t/abc`, noView).status).toBe(404);
+    const unknown = get("/api/w/nope/t/1", noView);
+    expect(unknown.status).toBe(404);
+    expect(await unknown.text()).toContain('No board for the "nope" workspace.');
   });
 
   test("carries no body onto the board itself, so an SSE frame stays cheap", async () => {

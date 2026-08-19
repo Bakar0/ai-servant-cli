@@ -234,6 +234,11 @@ export interface CreateTicketInput {
   input?: Record<string, unknown>;
   /** Forced seq — the importer preserving a hub issue number. Otherwise the next free one. */
   seq?: number;
+  /**
+   * Who filed it, on the `created` audit row. Defaults to "servant"; the importer passes "import",
+   * without which a carried ticket's trail would read as one this board filed itself.
+   */
+  actor?: string;
   now?: string;
 }
 
@@ -266,7 +271,7 @@ export function createTicket(spec: CreateTicketInput): Ticket {
       ],
     );
     const created = requireTicket(spec.workspace, seq);
-    recordAction(created.id, { kind: "created", actor: "servant", at: now });
+    recordAction(created.id, { kind: "created", actor: spec.actor ?? "servant", at: now });
     return created;
   })();
 }
@@ -547,22 +552,6 @@ export function removeDependency(ticket: TicketRef, dependsOn: TicketRef): void 
   ]);
 }
 
-/** The tickets waiting on this one — "what does leaving this undone cost?". */
-export function dependentsOf(ref: TicketRef): Ticket[] {
-  const db = openBoard();
-  const id = requireId(db, ref);
-  const rows = db
-    .query<TicketRow, [number]>(
-      `SELECT ${TICKET_COLUMNS} FROM ticket_dependencies d
-         JOIN tickets t ON t.id = d.ticket_id
-         JOIN boards b ON b.id = t.board_id
-       WHERE d.depends_on = ? ORDER BY b.workspace, t.seq`,
-    )
-    .all(id);
-  const edges = readEdges();
-  return rows.map((row) => hydrate(row, edges));
-}
-
 /**
  * Dependency depth counting **only open blockers**, per board.
  *
@@ -730,6 +719,11 @@ export function recordSessionsSeen(
   })();
 }
 
+/**
+ * Read by `claimView` in view.ts, which turns it into the "· 4m" age beside a claim badge. Only an
+ * age: whether the session is still alive is `ClaimView.state`, which the frontier's PID check
+ * fills in (ADR-0011 decision 3).
+ */
 export function sessionLastSeen(name: string): { pid: number | null; lastSeen: string } | null {
   const row = openBoard()
     .query<{ pid: number | null; last_seen: string }, [string]>(

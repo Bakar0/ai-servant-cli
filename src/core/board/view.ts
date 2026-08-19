@@ -12,6 +12,8 @@
 import { blockerLabel } from "../tasks.ts";
 import type { ClaimLiveness, Frontier } from "../tasks.ts";
 import { computeFrontier } from "../tasks.ts";
+import { ticketHistory } from "./history.ts";
+import type { HistoryEntry } from "./history.ts";
 import { renderInlineMarkdown, renderMarkdown } from "./markdown.ts";
 import type { Ticket, TicketStatus } from "./store.ts";
 import {
@@ -625,6 +627,8 @@ export interface TicketDetail {
   blockedBy: TicketLink[];
   blocks: TicketLink[];
   comments: TicketComment[];
+  /** Board-state transitions, oldest first. Its own list, not interleaved with the comments. */
+  history: HistoryEntry[];
   createdAt: string;
   updatedAt: string;
   url: string;
@@ -680,6 +684,8 @@ export function buildTicketDetail(
       }
     : null;
 
+  const actions = ticketActions(ticket);
+
   return {
     workspace: ticket.workspace,
     seq: ticket.seq,
@@ -692,7 +698,7 @@ export function buildTicketDetail(
     claim,
     blockedBy: links(ticket.blockedBy),
     blocks: links(ticket.blocks),
-    comments: ticketActions(ticket)
+    comments: actions
       .filter((action) => action.kind === "comment")
       .map((action) => ({
         actor: action.actor,
@@ -700,6 +706,7 @@ export function buildTicketDetail(
         bodyHtml: renderMarkdown(action.body),
         at: action.at,
       })),
+    history: ticketHistory(actions),
     createdAt: ticket.createdAt,
     updatedAt: ticket.updatedAt,
     url: ticket.url,
