@@ -186,6 +186,22 @@ describe("reading one ticket", () => {
     expect(res.status).toBe(404);
   });
 
+  test("builds no board view — not for the ticket, and not for any 404 on the route", async () => {
+    const t = file("read me");
+    // The detail panel re-fetches this on every SSE push, so a view built here is built constantly.
+    const noView: Partial<BoardHandlerDeps> = {
+      view: () => {
+        throw new Error("a whole board view was built to answer one ticket");
+      },
+    };
+    expect(get(`/api/w/${WS}/t/${t.seq}`, noView).status).toBe(200);
+    expect(get(`/api/w/${WS}/t/999`, noView).status).toBe(404);
+    expect(get(`/api/w/${WS}/t/abc`, noView).status).toBe(404);
+    const unknown = get("/api/w/nope/t/1", noView);
+    expect(unknown.status).toBe(404);
+    expect(await unknown.text()).toContain('No board for the "nope" workspace.');
+  });
+
   test("carries no body onto the board itself, so an SSE frame stays cheap", async () => {
     const long = "x".repeat(49_000);
     file("heavy", { body: long });

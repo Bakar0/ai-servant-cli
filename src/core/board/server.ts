@@ -31,7 +31,10 @@ export interface BoardPayload {
 }
 
 export interface BoardHandlerDeps {
-  /** The view for one board, or null when no such board exists. */
+  /**
+   * The view for one board, or null when no such board exists. Called only on the routes that
+   * render a view — never to decide whether a board exists, which `boards` answers far more cheaply.
+   */
   view: (workspace: string) => BoardView | null;
   /** Every board's frontier at once. */
   everywhere: () => EverywhereView;
@@ -41,7 +44,10 @@ export interface BoardHandlerDeps {
    * is fetched only when someone opens a ticket.
    */
   ticket: (workspace: string, seq: number) => TicketDetail | null;
-  /** Every board, for the selector — most recently touched first. */
+  /**
+   * Every board, for the selector — most recently touched first. Also the authority on whether a
+   * board exists at all, so it must list every workspace `view` would answer for.
+   */
   boards: () => BoardSummary[];
   /**
    * Register for views of a scope as it changes — a board's name, or `EVERYWHERE`; returns an
@@ -166,12 +172,13 @@ export function handleBoardRequest(req: Request, deps: BoardHandlerDeps): Respon
   if (!route) return notFound("No such page.");
   const { workspace, rest } = route;
 
-  const view = deps.view(workspace);
-  if (!view) return notFound(`No board for the "${workspace}" workspace.`);
+  // Whether a board exists is answered by `boards`, already read above — building that board's view
+  // to find out was the expensive way to ask, and the ticket-detail route below does not need a view
+  // at all.
+  if (!boards.some((board) => board.workspace === workspace))
+    return notFound(`No board for the "${workspace}" workspace.`);
 
-  if (!isApi && rest[0] === "events" && rest.length === 1) {
-    return eventStream(workspace, view, deps);
-  }
+  const isEvents = !isApi && rest.length === 1 && rest[0] === "events";
 
   // `/w/<ws>/t/<seq>` addresses one ticket on both surfaces: as JSON it is that ticket in full, as
   // a page it is the board with that ticket opened.
@@ -180,15 +187,24 @@ export function handleBoardRequest(req: Request, deps: BoardHandlerDeps): Respon
     const seq = Number(rest[1]);
     if (!Number.isInteger(seq) || seq <= 0) return notFound("A ticket is a positive number.");
     focus = seq;
-  } else if (rest.length > 0) {
+  } else if (rest.length > 0 && !isEvents) {
     return notFound("No such page.");
   }
 
-  if (isApi) {
-    if (focus === null) return json(view);
+  // Answered before any view is built. This is the hottest request the page makes — the detail panel
+  // re-fetches it on every SSE push while it is open — and one ticket needs one ticket, not every
+  // card, edge, fan and tree column on the board.
+  if (isApi && focus !== null) {
     const ticket = deps.ticket(workspace, focus);
     return ticket ? json(ticket) : notFound(`No ticket #${focus} on the "${workspace}" board.`);
   }
+
+  const view = deps.view(workspace);
+  // Not the existence check any more — `boards` settled that. Kept because the dep's type admits
+  // null, and a null here still has no board to render.
+  if (!view) return notFound(`No board for the "${workspace}" workspace.`);
+  if (isEvents) return eventStream(workspace, view, deps);
+  if (isApi) return json(view);
 
   return page(
     {
