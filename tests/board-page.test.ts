@@ -713,7 +713,10 @@ describe("reading a ticket", () => {
 
     click(cardEl(t.seq));
     await settle();
-    expect($$("#panel .pgrp > h4").map((h) => h.textContent)).toEqual(["Blocked by", "Blocks"]);
+    expect($$("#panel .pgrp.edges > h4").map((h) => h.textContent)).toEqual([
+      "Blocked by",
+      "Blocks",
+    ]);
     expect($$("#panel .plink .t").map((l) => l.textContent)).toEqual([
       "the blocker",
       "waits on me",
@@ -734,8 +737,52 @@ describe("reading a ticket", () => {
     click(cardEl(t.seq));
     await settle();
 
-    expect($("#panel .pgrp:last-child > h4")?.textContent).toBe("1 comment");
+    expect($("#panel .pgrp.comments > h4")?.textContent).toBe("1 comment");
     expect($("#panel .pcomment .md p")?.textContent).toBe("the analysis is in #78");
+  });
+
+  test("shows how the card got here, as its own section below the comments", async () => {
+    const t = file("moved");
+    updateTicket(t, { labels: ["ticket"] }, { now: AT });
+    updateTicket(t, { status: "in_progress" }, { now: AT, actor: "import" });
+    addComment(t, "picked it up", { session: "kanban-t9", now: AT });
+    await mount({ view: view() });
+    servePanel();
+
+    click(cardEl(t.seq));
+    await settle();
+
+    // Below the comments, and its own section — a transition is a line to scan, a comment a
+    // paragraph to read.
+    expect($$("#panel .pgrp > h4").map((h) => h.textContent)).toEqual(["1 comment", "History"]);
+    expect($$("#panel .history .pkind").map((k) => k.textContent)).toEqual([
+      "filed",
+      "labels",
+      "status",
+    ]);
+    expect($$("#panel .history .pdetail").map((d) => d.textContent)).toEqual([
+      "",
+      "ticket",
+      "in_progress",
+    ]);
+
+    // The importer is named; servant's own writes name nobody.
+    const when = $$("#panel .history .pwhen").map((w) => w.textContent);
+    expect(when[2]).toContain("· import");
+    expect(when[0]).not.toContain("·");
+  });
+
+  test("shows an emptied label set as a value, where filed simply has none", async () => {
+    const t = file("stripped", { labels: ["ticket"] });
+    updateTicket(t, { labels: [] }, { now: AT });
+    await mount({ view: view() });
+    servePanel();
+
+    click(cardEl(t.seq));
+    await settle();
+
+    // Filed has no value to show; an emptied set does, and a blank cell there reads as a bug.
+    expect($$("#panel .history .pdetail").map((d) => d.textContent)).toEqual(["", "—"]);
   });
 
   test("renders a body's own markup as text, never as markup", async () => {

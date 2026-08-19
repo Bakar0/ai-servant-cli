@@ -98,6 +98,17 @@ const noNative: HubApiRunner = async () => "[]";
 const runImport = (issues: FakeIssue[], apiRunner: HubApiRunner = noNative) =>
   importHub("acme/hub", { runner: async () => listing(issues), apiRunner, now: AT });
 
+describe("what the import attributes to itself", () => {
+  test("a carried ticket is filed by the importer, not by servant", async () => {
+    await runImport([{ number: 10, title: "carried", labels: ["ws:k"] }]);
+
+    const filed = ticketActions(requireTicket("k", 10)).find((a) => a.kind === "created");
+    // Without this, an imported ticket's whole trail reads as one this board filed itself: a
+    // first-time import writes exactly one row, and the creation fields are not transitions.
+    expect(filed?.actor).toBe("import");
+  });
+});
+
 describe("hub-shaped parsing", () => {
   test("parseGhIssues derives the workspace from the ws: label", () => {
     const issues = parseGhIssues(

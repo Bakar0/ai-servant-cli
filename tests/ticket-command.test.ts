@@ -6,7 +6,13 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type ArgsDef, type CommandDef, runCommand } from "citty";
-import { carryComment, closeBoard, requireTicket, ticketActions } from "../src/core/board/store.ts";
+import {
+  carryComment,
+  closeBoard,
+  requireTicket,
+  ticketActions,
+  updateTicket,
+} from "../src/core/board/store.ts";
 import { claimCommand } from "../src/commands/claim.ts";
 import { tasksCommand } from "../src/commands/tasks.ts";
 import { ticketCommand } from "../src/commands/ticket.ts";
@@ -114,6 +120,54 @@ describe("servant ticket show / comment / label / close", () => {
     const shown = await run(ticketCommand, "show", String(t.number));
     expect(shown).toContain("— 2026-08-14T09:00:00Z (Barak-Zen)");
     expect(shown).toContain("    Variant B won.\n\n    > the criterion needed refining");
+  });
+
+  test("--history prints how the ticket got here, and the default read does not", async () => {
+    const t = await newTicket("moved");
+    await run(ticketCommand, "label", String(t.number), "--add", "ticket,ready-for-agent");
+    await run(ticketCommand, "status", String(t.number), "in_progress");
+    await run(ticketCommand, "comment", String(t.number), "--body", "picked it up");
+
+    const plain = await run(ticketCommand, "show", String(t.number));
+    expect(plain).toContain("picked it up");
+    expect(plain).not.toContain("history:");
+
+    const shown = await run(ticketCommand, "show", String(t.number), "--history");
+    const history = shown.slice(shown.indexOf("history:"));
+    expect(history).toContain("filed");
+    expect(history).toContain("labels: ticket, ready-for-agent");
+    expect(history).toContain("status: in_progress");
+    // Comments stay in their own block: the two streams read differently, so they render apart.
+    expect(history).not.toContain("picked it up");
+
+    const asJson = await run(ticketCommand, "show", String(t.number), "--history", "--json");
+    expect(JSON.parse(asJson).history.map((h: { kind: string }) => h.kind)).toEqual([
+      "created",
+      "labels",
+      "status",
+    ]);
+    expect(JSON.parse(await run(ticketCommand, "show", String(t.number), "--json")).history).toBe(
+      undefined,
+    );
+  });
+
+  test("--history shows an emptied label set as a value, not a dangling colon", async () => {
+    const t = await newTicket("stripped", "--labels", "ticket");
+    await run(ticketCommand, "label", String(t.number), "--remove", "ticket");
+
+    const shown = await run(ticketCommand, "show", String(t.number), "--history");
+    expect(shown).toContain("labels: —");
+    expect(shown).not.toMatch(/labels: *$/m);
+  });
+
+  test("--history names the importer, and says nothing where the actor is servant itself", async () => {
+    const t = await newTicket("carried");
+    updateTicket(requireTicket(WS, t.number), { status: "done" }, { actor: "import" });
+
+    const shown = await run(ticketCommand, "show", String(t.number), "--history");
+    expect(shown).toContain("status: done (import)");
+    // "servant" is the default actor and names nobody, so it is not printed.
+    expect(shown).toMatch(/ {2}filed$/m);
   });
 
   test("labels are added and removed with no label needing to exist first", async () => {

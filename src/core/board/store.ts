@@ -234,6 +234,11 @@ export interface CreateTicketInput {
   input?: Record<string, unknown>;
   /** Forced seq — the importer preserving a hub issue number. Otherwise the next free one. */
   seq?: number;
+  /**
+   * Who filed it, on the `created` audit row. Defaults to "servant"; the importer passes "import",
+   * without which a carried ticket's trail would read as one this board filed itself.
+   */
+  actor?: string;
   now?: string;
 }
 
@@ -266,7 +271,7 @@ export function createTicket(spec: CreateTicketInput): Ticket {
       ],
     );
     const created = requireTicket(spec.workspace, seq);
-    recordAction(created.id, { kind: "created", actor: "servant", at: now });
+    recordAction(created.id, { kind: "created", actor: spec.actor ?? "servant", at: now });
     return created;
   })();
 }

@@ -6,6 +6,8 @@
 
 import { defineCommand } from "citty";
 import { parseSeq, resolveBoardWorkspace } from "../core/board/address.ts";
+import { ticketHistory } from "../core/board/history.ts";
+import type { HistoryEntry } from "../core/board/history.ts";
 import {
   addComment,
   addDependency,
@@ -42,7 +44,27 @@ function splitList(raw: unknown): string[] {
     .filter(Boolean);
 }
 
-function describe(ticket: Ticket, all: readonly Ticket[]): string {
+/** "servant" is the default actor and names nobody; anyone else — the importer — is worth printing. */
+const named = (actor: string) => (actor === "servant" ? "" : actor);
+
+/** One transition per line, as wide as its value needs — the CLI has no column to align to. */
+function historyLines(history: readonly HistoryEntry[]): string[] {
+  if (history.length === 0) return [];
+  const lines = ["", "  history:"];
+  for (const entry of history) {
+    const who = named(entry.actor);
+    // An emptied label set has no value to show, and a bare "labels:" reads as a truncation.
+    const what = entry.kind === "created" ? "filed" : `${entry.kind}: ${entry.detail || "—"}`;
+    lines.push(`  — ${entry.at}  ${what}${who ? ` (${who})` : ""}`);
+  }
+  return lines;
+}
+
+function describe(
+  ticket: Ticket,
+  all: readonly Ticket[],
+  history: readonly HistoryEntry[],
+): string {
   const byId = new Map(all.map((t) => [t.id, t]));
   // A closed edge is marked rather than hidden: it is still a real dependency, and it explains why
   // a ticket with blockers listed is nonetheless in the frontier's ready bucket.
@@ -73,7 +95,7 @@ function describe(ticket: Ticket, all: readonly Ticket[]): string {
     for (const c of comments) {
       // A session wrote it, or — for anything carried in from the hub, where the authors are
       // people — the actor did. "servant" is the default actor and names nobody, so it is not shown.
-      const who = c.session ?? (c.actor === "servant" ? "" : c.actor);
+      const who = c.session ?? named(c.actor);
       // Indented as a block: an imported comment can be pages of markdown, and indenting only its
       // first line leaves the rest flush against the ticket's own body.
       const body = c.body
@@ -84,6 +106,7 @@ function describe(ticket: Ticket, all: readonly Ticket[]): string {
       lines.push(`  — ${c.at}${who ? ` (${who})` : ""}\n    ${body}`);
     }
   }
+  lines.push(...historyLines(history));
   return lines.join("\n");
 }
 
@@ -144,6 +167,12 @@ const showCommand = defineCommand({
   args: {
     ticket: { type: "positional", required: true, description: "Ticket number." },
     ws: wsArg,
+    history: {
+      type: "boolean",
+      required: false,
+      default: false,
+      description: "Also print how the ticket got here: filed, label and status changes.",
+    },
     json: { type: "boolean", required: false, default: false, description: "Emit JSON." },
     root: rootArg,
   },
@@ -152,17 +181,22 @@ const showCommand = defineCommand({
     const seq = parseSeq(args.ticket, "servant ticket show");
     const workspace = await resolveBoardWorkspace({ ws: args.ws, seq });
     const ticket = requireTicket(workspace, seq);
+    const actions = ticketActions(ticket);
+    // Opt-in, like `claim --history`: the default read is the ticket, and a long-lived one's trail
+    // would push the body and the comments people opened it for off the screen.
+    const history = args.history ? ticketHistory(actions) : [];
     if (args.json) {
       console.log(
         JSON.stringify({
           ...ticket,
           number: ticket.seq,
-          comments: ticketActions(ticket).filter((a) => a.kind === "comment"),
+          comments: actions.filter((a) => a.kind === "comment"),
+          ...(args.history ? { history } : {}),
         }),
       );
       return;
     }
-    console.log(describe(ticket, listTickets()));
+    console.log(describe(ticket, listTickets(), history));
   },
 });
 

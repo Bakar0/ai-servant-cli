@@ -8,6 +8,8 @@ import {
   closeBoard,
   createTicket,
   listBoards,
+  updateClaim,
+  updateTicket,
 } from "../src/core/board/store.ts";
 import { createBoardFeed } from "../src/core/board/feed.ts";
 import {
@@ -178,6 +180,23 @@ describe("reading one ticket", () => {
         at: AT,
       },
     ]);
+  });
+
+  test("carries the state-change trail, apart from the comments and without the claim's", async () => {
+    const t = file("moved");
+    updateTicket(t, { labels: ["ticket", "ready-for-agent"] }, { now: AT });
+    updateTicket(t, { status: "in_progress" }, { now: AT, actor: "import" });
+    updateClaim(t, { session: "kanban-t9", at: AT });
+    addComment(t, "picked it up", { session: "kanban-t9", now: AT });
+
+    const detail = (await get(`/api/w/${WS}/t/${t.seq}`).json()) as TicketDetail;
+    expect(detail.history).toEqual([
+      { kind: "created", detail: "", at: AT, actor: "servant" },
+      { kind: "labels", detail: "ticket, ready-for-agent", at: AT, actor: "servant" },
+      { kind: "status", detail: "in_progress", at: AT, actor: "import" },
+    ]);
+    // The two streams stay apart, and the claim trail keeps its one reader in `claim --history`.
+    expect(detail.comments.map((c) => c.bodyHtml)).toEqual(["<p>picked it up</p>"]);
   });
 
   test("404s a seq that board has never carried", () => {
