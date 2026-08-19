@@ -547,22 +547,6 @@ export function removeDependency(ticket: TicketRef, dependsOn: TicketRef): void 
   ]);
 }
 
-/** The tickets waiting on this one — "what does leaving this undone cost?". */
-export function dependentsOf(ref: TicketRef): Ticket[] {
-  const db = openBoard();
-  const id = requireId(db, ref);
-  const rows = db
-    .query<TicketRow, [number]>(
-      `SELECT ${TICKET_COLUMNS} FROM ticket_dependencies d
-         JOIN tickets t ON t.id = d.ticket_id
-         JOIN boards b ON b.id = t.board_id
-       WHERE d.depends_on = ? ORDER BY b.workspace, t.seq`,
-    )
-    .all(id);
-  const edges = readEdges();
-  return rows.map((row) => hydrate(row, edges));
-}
-
 /**
  * Dependency depth counting **only open blockers**, per board.
  *
@@ -730,6 +714,11 @@ export function recordSessionsSeen(
   })();
 }
 
+/**
+ * Read by `claimView` in view.ts, which turns it into the "· 4m" age beside a claim badge. Only an
+ * age: whether the session is still alive is `ClaimView.state`, which the frontier's PID check
+ * fills in (ADR-0011 decision 3).
+ */
 export function sessionLastSeen(name: string): { pid: number | null; lastSeen: string } | null {
   const row = openBoard()
     .query<{ pid: number | null; last_seen: string }, [string]>(
