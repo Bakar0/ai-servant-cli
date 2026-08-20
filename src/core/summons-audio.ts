@@ -21,6 +21,18 @@ const RAW_PCM_ARGS = [
   "-c",
   "1",
 ];
+/**
+ * Read until the input actually ends, rather than trusting how long it looks.
+ *
+ * Bun gives a child a socket for stdin, not a pipe, and `fstat` on a socket reports the bytes
+ * *currently buffered* as its size. `sox` sizes its input that way, so it believed every reply was
+ * exactly as long as whatever had been written when it opened — the priming cushion, about a word —
+ * played that, printed "Done." and exited 0. Perfectly clean exit, mid-sentence, no stderr. The same
+ * `sox` fed by a shell pipe plays the whole thing, which is what makes this look like anything but
+ * the input format options.
+ */
+const IGNORE_INPUT_LENGTH = "--ignore-length";
+
 /** ~200 ms of audio — the chunk size the Realtime API is happiest receiving. */
 const CHUNK_BYTES = (SAMPLE_RATE / 5) * 2;
 
@@ -199,7 +211,7 @@ export function createSoxAudio(opts: SoxAudioOptions = {}): AudioPort {
    * the old input buffer used to hold back.
    */
   function startSpeaker(primed: Buffer): SpeakerProcess {
-    const proc = processes.speaker(["-q", ...RAW_PCM_ARGS, "-", "-d"]);
+    const proc = processes.speaker(["-q", ...RAW_PCM_ARGS, IGNORE_INPUT_LENGTH, "-", "-d"]);
     speaker = proc;
     alive.add(proc);
     void proc.exited.then(() => alive.delete(proc));

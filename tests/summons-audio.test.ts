@@ -222,6 +222,10 @@ describe("opening the device", () => {
     expect(args.join(" ")).toContain("-b 16");
     // Reads PCM from stdin, plays to the default output — never a FIFO, which is what starved it.
     expect(args.slice(-2)).toEqual(["-", "-d"]);
+    // Without this, `sox` sizes a reply by what happened to be buffered when it opened — Bun hands
+    // a child a socket, and `fstat` on a socket reports exactly that. It played the cushion, said
+    // "Done." and exited 0 mid-sentence.
+    expect(args).toContain("--ignore-length");
   });
 });
 
