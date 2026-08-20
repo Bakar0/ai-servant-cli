@@ -478,7 +478,7 @@ export interface TimerPort {
   clearTimeout(handle: unknown): void;
 }
 
-const realTimers: TimerPort = {
+export const realTimers: TimerPort = {
   now: () => Date.now(),
   setTimeout: (fn, ms) => setTimeout(fn, ms),
   clearTimeout: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
