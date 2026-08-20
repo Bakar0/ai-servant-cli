@@ -20,10 +20,16 @@ jobs:
         include:
           - target: bun-darwin-arm64
             asset: servant-darwin-arm64
+            os: darwin
+            cpu: arm64
           - target: bun-darwin-x64
             asset: servant-darwin-x64
+            os: darwin
+            cpu: x64
           - target: bun-linux-x64
             asset: servant-linux-x64
+            os: linux
+            cpu: x64
     steps:
       - uses: actions/checkout@v4
         with:
@@ -36,6 +42,15 @@ jobs:
 
       - name: Install dependencies
         run: bun install --frozen-lockfile
+
+      # `@opentui/core` ships its Zig renderer as a per-platform optional dependency, and the step
+      # above installs only this runner's. Every target is cross-compiled from one ubuntu runner, so
+      # each needs its own fetched before the bundle is built — without this, the two darwin builds
+      # fail with `Could not resolve "@opentui/core-darwin-*"`. That they fail loudly, at build time,
+      # rather than producing a binary with the wrong native library in it, is what made taking a
+      # native dependency safe at all (workspace ADR 0014).
+      - name: Install the target's native packages
+        run: bun install --force --os=${{ matrix.os }} --cpu=${{ matrix.cpu }}
 
       - name: Generate embedded manifest + version
         run: bun run gen:templates && bun run gen:version

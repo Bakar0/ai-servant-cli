@@ -1,10 +1,14 @@
-// Watching a Summons happen: the same entries the record gets, formatted for the terminal the
-// Summons is running in.
+// The Plain view: the same entries the record gets, one line each, for a Summons whose output is
+// not a terminal.
 //
 // It is a bystander, and stays one. It only ever writes lines — it never reads stdin, never
-// prompts, never asks for a keypress, and never touches the audio path. That is deliberate: the
-// user is talking, usually away from the keyboard, and a view that needed attention would be worse
-// than no view at all.
+// prompts, never asks for a keypress, and never touches the audio path. That is what makes it the
+// right view for a pipe, a redirect and a test, which is now all it is for: someone at a keyboard
+// gets the Summons view instead (workspace ADR 0014).
+//
+// `formatCallLogEntry` is shared with that view rather than reimplemented there. One line per entry
+// is what both need, and two formatters would mean a Summons read back through a pipe and a Summons
+// watched live disagreeing about what happened in it.
 
 import { type CallLogEntry, type CallLogPort, redactFields } from "./record.ts";
 
@@ -41,7 +45,12 @@ function toolLine(symbol: string, name: string, target: string, trailer: string)
 export function formatCallLogEntry(entry: CallLogEntry): string[] {
   switch (entry.type) {
     case "said":
-      return [`${entry.who === "user" ? "you  " : "agent"}  ▸ ${oneLine(entry.text)}`];
+      // The one place `channel` is visible. A typed utterance was never heard, so it cannot have
+      // been mis-transcribed — which is exactly what a reader wondering about a strange line needs
+      // to know, and cannot recover from the words themselves.
+      return [
+        `${entry.who === "user" ? "you  " : "agent"}  ${entry.channel === "typed" ? "⌨" : "▸"} ${oneLine(entry.text)}`,
+      ];
     case "tool": {
       const outcome =
         entry.outcome === "ok"

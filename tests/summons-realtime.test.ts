@@ -73,6 +73,12 @@ describe("Realtime server events the controller acts on", () => {
     expect(toInbound({ type: "response.done" })).toEqual({ type: "reply_done" });
   });
 
+  // The other bracket. A reply is cancellable from here, which is well before its first audio —
+  // so an interruption arriving in that window has something to cancel after all.
+  test("a reply starting comes through, since that is when it becomes cancellable", () => {
+    expect(toInbound({ type: "response.created" })).toEqual({ type: "reply_started" });
+  });
+
   test("events the controller has no opinion about are ignored", () => {
     expect(toInbound({ type: "session.updated" })).toBeNull();
     expect(toInbound({ type: "rate_limits.updated" })).toBeNull();

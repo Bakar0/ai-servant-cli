@@ -10,6 +10,7 @@ import {
   type RealtimeTransport,
   type SessionsPort,
   type SummonsActions,
+  type SummonsMicState,
   type SummonsSessionOptions,
   type TicketFilingPort,
   type TicketsPort,
@@ -1087,6 +1088,36 @@ describe("typing to a Summons", () => {
 
     expect(s.sent.userTexts).toEqual([]);
   });
+
+  // Typing over a reply is a barge-in by every measure but the microphone. A typed turn asks for an
+  // answer, and the API refuses a second ask while a response is in flight — so without cutting the
+  // reply off first, the line the user typed would come back as an error and go unanswered.
+  test("typing over a reply cuts the reply off, then asks", async () => {
+    const s = await audioSession();
+    await s.emit({ type: "reply_started" });
+    await s.emit({ type: "audio", pcm: micChunk(4_000), itemId: "item_1" });
+    s.advance(300);
+
+    await s.session.typed("no, the other one");
+
+    expect(s.sent.cancelled).toBe(1);
+    expect(s.sent.truncated).toEqual([{ itemId: "item_1", playedMs: 300 }]);
+    expect(s.flushes).toHaveLength(1);
+    expect(s.sent.userTexts).toEqual(["no, the other one"]);
+  });
+
+  // The sibling of the test above. Nothing is being said, so nothing is cut off — a typed turn on a
+  // quiet Summons must not truncate a message or put a barge-in in the record.
+  test("typing into silence cuts nothing off", async () => {
+    const s = await audioSession();
+
+    await s.session.typed("what is left on the board?");
+
+    expect(s.sent.cancelled).toBe(0);
+    expect(s.sent.truncated).toEqual([]);
+    expect(s.flushes).toEqual([]);
+    expect(s.sent.userTexts).toEqual(["what is left on the board?"]);
+  });
 });
 
 describe("summons idle hang-up", () => {
@@ -1679,6 +1710,89 @@ describe("barging in on the agent", () => {
 
     expect(s.sent.cancelled).toBe(0);
     expect(s.flushes).toEqual([]);
+  });
+
+  // A reply is cancellable from the moment the server starts it, and the first audio can be a
+  // second behind that. Until the controller knew a reply had *started*, Esc in that window did
+  // nothing at all — the one moment a user is most likely to press it, having asked for something
+  // and immediately thought better of it.
+  test("Esc cuts off a reply that has not reached the speakers yet", async () => {
+    const s = await audioSession();
+    await s.emit({ type: "reply_started" });
+
+    expect(s.session.interrupt()).toBe(true);
+
+    expect(s.sent.cancelled).toBe(1);
+    // Nothing was audible, so there is nothing to tell the server the user heard.
+    expect(s.sent.truncated).toEqual([]);
+  });
+
+  test("a reply the server has finished is not cancelled twice over", async () => {
+    const s = await audioSession();
+    await s.emit({ type: "reply_started" });
+    await s.emit({ type: "reply_done" });
+
+    expect(s.session.interrupt()).toBe(false);
+    expect(s.sent.cancelled).toBe(0);
+  });
+
+  // `Esc` means two things and only the gate can tell which: cut the reply off, or — with nothing
+  // to cut off — clear the input line. The view asks by reading the answer.
+  test("Esc answers whether there was anything to cut off", async () => {
+    const quiet = await audioSession();
+    expect(quiet.session.interrupt()).toBe(false);
+
+    const talking = await agentTalking();
+    expect(talking.session.interrupt()).toBe(true);
+  });
+});
+
+describe("what the status line is told about the mic", () => {
+  async function watched(overrides: Partial<SummonsSessionOptions> = {}) {
+    const states: SummonsMicState[] = [];
+    const s = await audioSession({ onMicState: (state) => states.push(state), ...overrides });
+    return { ...s, states, latest: () => states.at(-1) };
+  }
+
+  test("every mic frame reports its level, so the number moves while you talk", async () => {
+    const s = await watched();
+
+    s.mic(micChunk(200, 4_000));
+
+    expect(s.latest()).toEqual({ muted: false, speaking: false, level: 4_000, floor: null });
+  });
+
+  test("a muted mic reports zero, because zero is what the model is hearing", async () => {
+    const s = await watched();
+    s.session.toggleMute();
+
+    s.mic(micChunk(200, 9_000));
+
+    expect(s.latest()?.muted).toBe(true);
+    expect(s.latest()?.level).toBe(0);
+  });
+
+  test("the floor the echo detector learned is reported, not just described in debug prose", async () => {
+    const s = await watched();
+    await s.emit({ type: "audio", pcm: micChunk(4_000), itemId: "item_1" });
+    expect(s.latest()?.speaking).toBe(true);
+
+    // One frame of the agent's own voice coming back in is what characterises the room.
+    s.advance(200);
+    s.mic(micChunk(200, 600));
+
+    expect(s.latest()?.floor).toBe(600);
+    expect(s.latest()?.speaking).toBe(true);
+  });
+
+  test("muting and unmuting are reported without waiting for the next frame", async () => {
+    const s = await watched();
+
+    s.session.toggleMute();
+    expect(s.latest()?.muted).toBe(true);
+
+    s.session.toggleMute();
+    expect(s.latest()?.muted).toBe(false);
   });
 });
 

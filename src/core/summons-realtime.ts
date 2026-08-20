@@ -69,6 +69,8 @@ export function toInbound(event: unknown): RealtimeInbound | null {
       };
     case "response.output_audio_transcript.done":
       return { type: "assistant_transcript", text: str(e.transcript) };
+    case "response.created":
+      return { type: "reply_started" };
     case "response.done":
       return { type: "reply_done" };
     case "error":

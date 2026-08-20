@@ -418,6 +418,13 @@ export type RealtimeInbound =
    */
   | { type: "user_transcript"; text: string; itemId?: string | undefined }
   /**
+   * The server has begun a reply. The bracket around `reply_done`, and needed for the same reason:
+   * a cancel is only legal while a response is in flight, and until this existed the only proof of
+   * one was its audio — so a reply interrupted before it reached the speakers was not cancelled at
+   * all, and a typed turn sent in that window collided with it.
+   */
+  | { type: "reply_started" }
+  /**
    * The model has finished generating a reply — there may still be minutes of it queued to play.
    * Worth knowing only so an interruption does not ask to cancel a reply that is already over,
    * which the API answers with an error the user would then hear about for nothing.
@@ -562,6 +569,31 @@ function peakLevel(base64Pcm: string): number {
 /** Default silence window before a Summons hangs itself up, so a forgotten mic stops billing. */
 export const DEFAULT_SUMMONS_IDLE_TIMEOUT_MS = 3 * 60 * 1000;
 
+/**
+ * What the mic and the speaker are doing, as a status line has to say it.
+ *
+ * A real seam out of the echo gate rather than a line of debug text to be parsed. The level and the
+ * floor exist nowhere else — they are computed frame by frame inside the gate and were, until this,
+ * only ever emitted as prose — and they are the two numbers that explain a barge-in that fired or
+ * did not. Watching them while talking over a reply is how the thresholds get tuned at all.
+ */
+export interface SummonsMicState {
+  /** The user has the mic shut. Nothing reaches the model until they open it again. */
+  muted: boolean;
+  /** The agent's voice is coming out of the speakers right now. */
+  speaking: boolean;
+  /**
+   * Peak level of the last mic frame, admitted or held back. Zero while muted: the number says what
+   * the model is hearing, and a muted mic is heard by nobody however loud the room is.
+   */
+  level: number;
+  /**
+   * The level the agent's own echo settles at, learned from the frames the gate holds back — null
+   * until the room has been characterised, which only happens once a reply has played.
+   */
+  floor: number | null;
+}
+
 /** Local, read-only access to whatever the Summons is scoped to. */
 export interface WorkspaceReader {
   readFile(path: string): Promise<string>;
@@ -615,6 +647,12 @@ export interface SummonsSessionOptions {
   /** Called with anything the API reports going wrong, so the user isn't left talking to silence. */
   onError?: ((message: string) => void) | undefined;
   /**
+   * Where the echo gate reports itself, so a status line can show the mic without parsing debug
+   * prose. Called on every mic frame and on every change to what the gate is doing, so it is a
+   * status *feed*: the receiver decides how often to redraw.
+   */
+  onMicState?: ((state: SummonsMicState) => void) | undefined;
+  /**
    * Traces the decisions no other output can explain — above all what the echo detector heard and
    * what it made of it. Those thresholds are a heuristic against a real room, so tuning them needs
    * the numbers, and the numbers only exist during a live conversation.
@@ -643,9 +681,12 @@ export interface SummonsSession {
   /**
    * Cut the reply off from the keyboard — `Esc`. The third barge-in source, and the only one that
    * is not a guess about whether a person is talking, so it is obeyed even with barge-in switched
-   * off. Nothing playing, nothing happens.
+   * off.
+   *
+   * Answers whether there was a reply to cut off, since `Esc` on a quiet Summons means something
+   * else entirely — clearing the input line — and the view cannot tell the two apart on its own.
    */
-  interrupt(): void;
+  interrupt(): boolean;
   /**
    * Record something only the outside knows — an audio subsystem dying, say. Without this the Call
    * log of a session killed by a dead speaker read as an ordinary hang-up, and the one line that
@@ -1578,6 +1619,18 @@ function createMicGate(opts: SummonsSessionOptions, timers: TimerPort) {
   let loudFrames = 0;
   let lastInterruptAt = Number.NEGATIVE_INFINITY;
   let muted = false;
+  /** The level of the most recent frame, so a redraw asked for at any moment has a number to show. */
+  let lastLevel = 0;
+
+  /** Hand the status feed what the gate knows. Cheap, and called from everywhere the gate changes. */
+  function report(): void {
+    opts.onMicState?.({
+      muted,
+      speaking: timers.now() < speakingUntil,
+      level: muted ? 0 : lastLevel,
+      floor: echoFloor,
+    });
+  }
 
   /**
    * Forget a reply that has finished playing. Nothing pushes this — playback ends by a clock running
@@ -1621,6 +1674,7 @@ function createMicGate(opts: SummonsSessionOptions, timers: TimerPort) {
      */
     if (timers.now() - playbackDurationMs(pcm) < playing.startedAt) return;
     const level = peakLevel(pcm);
+    lastLevel = level;
     if (framesObserved < ECHO_WARMUP_FRAMES) {
       framesObserved += 1;
       echoFloor = Math.max(echoFloor ?? 0, level);
@@ -1665,6 +1719,16 @@ function createMicGate(opts: SummonsSessionOptions, timers: TimerPort) {
       speakingUntil = startsAt + duration;
       generating = true;
       opts.audio?.play(pcm);
+      report();
+    },
+
+    /**
+     * The server has started a reply. Known so an interruption arriving before the first audio does
+     * cancels the reply rather than silently doing nothing — which is also what makes a typed turn
+     * sent in that window safe, since the API refuses a second ask while a response is in flight.
+     */
+    replyStartedGenerating(): void {
+      generating = true;
     },
 
     replyFinishedGenerating(): void {
@@ -1679,7 +1743,10 @@ function createMicGate(opts: SummonsSessionOptions, timers: TimerPort) {
      * the user muted it, or the agent is still audible in the room.
      */
     admit(pcm: string): void {
-      if (muted) return;
+      if (muted) {
+        report();
+        return;
+      }
       settle();
       // Judged on when the frame *began*, not when it arrived. A frame is ~200ms of history, so the
       // first frame admitted after the window closed still opens inside it — and one frame of the
@@ -1689,26 +1756,35 @@ function createMicGate(opts: SummonsSessionOptions, timers: TimerPort) {
         timers.now() - playbackDurationMs(pcm) < speakingUntil + PLAYBACK_TAIL_MS
       ) {
         detect(pcm);
+        report();
         return;
       }
       loudFrames = 0;
+      lastLevel = peakLevel(pcm);
       opts.transport.sendAudio(pcm);
+      report();
     },
 
-    /** The user is talking over the agent — one path, whichever detector noticed. */
-    interrupt(heardBy: BargeInHeardBy): void {
+    /**
+     * The user is talking over the agent — one path, whichever detector noticed. Answers whether
+     * there was anything to cut off, because `Esc` has a second meaning when there is not (it
+     * clears the input line) and only the gate knows which of the two happened.
+     */
+    interrupt(heardBy: BargeInHeardBy): boolean {
       settle();
       // `--no-barge-in` suppresses the two detectors that guess, and only those: a keypress is
       // explicit intent, and a flag about how eagerly a room is listened to has no say over it.
       if (opts.bargeIn === false && heardBy !== "the keyboard") {
         opts.onDebug?.(`echo: heard an interruption (${heardBy}), but barge-in is off`);
-        return;
+        return false;
       }
-      if (!playing) return;
+      // Either half is enough: a reply still being generated is cancellable before a syllable of it
+      // has reached the room, and queued audio outlives the generating by however long it plays.
+      if (!playing && !generating) return false;
       // A reply the model has finished generating has nothing left to cancel, and asking anyway is
       // an API error the user would be told about for no reason. The queued audio still has to go.
       if (generating) opts.transport.cancelResponse();
-      if (playing.itemId) {
+      if (playing?.itemId) {
         const heard = Math.min(Math.max(0, timers.now() - playing.startedAt), playing.queuedMs);
         opts.transport.truncateAudio(playing.itemId, Math.round(heard));
       }
@@ -1732,6 +1808,8 @@ function createMicGate(opts: SummonsSessionOptions, timers: TimerPort) {
             ? "The reply was cut off from the keyboard."
             : `The user talked over the reply and it was cut off (${heardBy}).`,
       });
+      report();
+      return true;
     },
 
     toggleMute(): boolean {
@@ -1745,6 +1823,7 @@ function createMicGate(opts: SummonsSessionOptions, timers: TimerPort) {
           ? "The mic was muted. Input is suspended until it is unmuted; the idle window keeps running."
           : "The mic was unmuted.",
       });
+      report();
       return muted;
     },
   };
@@ -1966,6 +2045,9 @@ export function createSummonsSession(opts: SummonsSessionOptions): SummonsSessio
       case "audio":
         mic.queuePlayback(event.pcm, event.itemId ?? null);
         return;
+      case "reply_started":
+        mic.replyStartedGenerating();
+        return;
       case "reply_done":
         mic.replyFinishedGenerating();
         return;
@@ -2041,6 +2123,23 @@ export function createSummonsSession(opts: SummonsSessionOptions): SummonsSessio
       // Typing is conversation, so it re-arms the idle window: a Summons being typed at for an hour
       // with the mic muted is not a Summons that has been abandoned.
       markActive();
+      /**
+       * Typing over a reply cuts the reply off, exactly as `Esc` would.
+       *
+       * A typed turn asks for an answer, and the API refuses a second ask while a response is in
+       * flight — so this had to be decided one of three ways: cancel the reply, queue the ask until
+       * the reply is over, or send the words without asking. Cancelling is the only one that
+       * matches what the person did. They were listening, they started typing instead, and they
+       * pressed enter: that is a barge-in in every sense but the microphone, and the keyboard is
+       * the one barge-in source that is never a guess (ADR-009). Queueing would let the agent
+       * finish saying something already overtaken and then answer late; sending without asking
+       * would leave the line sitting unanswered until something else provoked a reply, which reads
+       * as the Summons having ignored you.
+       *
+       * The Call log says the keyboard cut it off, which is true and is also the trail back to why
+       * the reply stops mid-sentence in the transcript.
+       */
+      mic.interrupt("the keyboard");
       // Recorded before it is sent, so a turn that dies on the way out is still in the record.
       log.record({ type: "said", who: "user", text: utterance, channel: "typed" });
       opts.transport.sendUserText(utterance);
@@ -2054,7 +2153,7 @@ export function createSummonsSession(opts: SummonsSessionOptions): SummonsSessio
     interrupt() {
       // Guarded like `typed`: a key pressed after the hang-up would otherwise put a barge-in in the
       // record below the line that says the Summons ended.
-      if (!stopped) mic.interrupt("the keyboard");
+      return stopped ? false : mic.interrupt("the keyboard");
     },
 
     note: (text, level = "error") => log.record({ type: "note", level, text }),

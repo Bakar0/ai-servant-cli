@@ -15,15 +15,16 @@ import {
 } from "../core/summons-context.ts";
 import { createSummonsActions } from "../core/summons-delegate.ts";
 import { createHandsSession } from "../core/summons-hands.ts";
-import { attachKeyControls } from "../core/summons-keys.ts";
 import { createSummonsTickets } from "../core/summons-tickets.ts";
 import { requireOpenAiApiKey } from "../core/summons-preflight.ts";
 import { createOpenAiRealtimeTransport } from "../core/summons-realtime.ts";
 import { createWorkspaceReader } from "../core/summons-reader.ts";
+import { createSummonsView } from "../core/summons-view.ts";
 import {
   DEFAULT_SUMMONS_IDLE_TIMEOUT_MS,
   DEFAULT_SUMMONS_MODEL,
   DEFAULT_SUMMONS_VOICE,
+  type SummonsSession,
   createSummonsSession,
 } from "../core/summons.ts";
 import { readWorkspaceAgent, resolveWorkspaceName } from "../core/workspace.ts";
@@ -113,7 +114,7 @@ export const summonCommand = defineCommand({
       required: false,
       default: false,
       description:
-        "Trace the Realtime event stream and the audio subprocesses on stderr. Use when the session goes quiet and you need to see whether it is the socket or the mic.",
+        "Trace the Realtime event stream and the audio subprocesses — inline in the Summons view, on stderr when the output is piped. Use when the session goes quiet and you need to see whether it is the socket or the mic.",
     },
     root: {
       type: "string",
@@ -132,7 +133,18 @@ export const summonCommand = defineCommand({
       throw new Error(`Workspace "${workspace}" not found at ${workspacePath(workspace)}.`);
     }
 
-    const debug = args.debug ? (message: string) => console.error(`summon: ${message}`) : undefined;
+    /**
+     * Where everything the command itself has to say goes.
+     *
+     * Late-bound because the Summons view does not exist yet and must not: it captures the terminal,
+     * and the preflight below can still throw. Until it opens, a line is a line on the terminal;
+     * after it opens, a line written straight to the terminal would land inside the pinned footer,
+     * so every one of them has to go through the view instead. `--debug` above all, which is the
+     * output that made the audio bugs findable and is also the noisiest.
+     */
+    let say: (line: string) => void = (line) => console.log(`servant: ${line}`);
+    let complain: (line: string) => void = (line) => console.error(`servant summon: ${line}`);
+    const debug = args.debug ? (message: string) => complain(`summon: ${message}`) : undefined;
 
     // Preflight before anything expensive: both failures tell the user what to install or export.
     const apiKey = requireOpenAiApiKey(process.env, await readServantEnv());
@@ -163,12 +175,55 @@ export const summonCommand = defineCommand({
       scope: scope.label,
       model: args.model,
       voice: args.voice,
-      onWriteError: (message) =>
-        console.error(`servant summon: call log write failed — ${message}`),
+      onWriteError: (message) => complain(`call log write failed — ${message}`),
     });
-    const live = createLiveCallLogView({
-      write: (line) => process.stdout.write(`${line}\n`),
-    });
+
+    /**
+     * A terminal at both ends, or the Plain view.
+     *
+     * Both are required, and for different reasons: without a terminal on stdout there is nothing to
+     * pin a footer to, and without one on stdin there is nobody to read keys from. A Summons whose
+     * output is piped or redirected keeps today's line printer exactly as it was — which is what a
+     * pipe, a redirect and a test all want (workspace ADR 0014).
+     */
+    const interactive = Boolean(process.stdout.isTTY && process.stdin.isTTY);
+    // Imported here rather than at the top of the file, because this is the one module in servant
+    // with a native dependency behind it. Loaded eagerly, every `servant` command — `tasks`,
+    // `ticket show`, all of them — would pay OpenTUI's FFI load at startup and would stop working
+    // outright on a platform it has no binary for. A Summons on a terminal is the only caller that
+    // needs it, so it is the only one that loads it.
+    const terminal = interactive
+      ? await (await import("../core/summons-terminal.ts")).openSummonsTerminal()
+      : undefined;
+    // The view is built before the session it drives, because it is also where the session's own
+    // opening lines are printed. It reaches the session through this, which is filled in below.
+    let live: SummonsSession | undefined;
+    const view = terminal
+      ? createSummonsView({
+          screen: terminal.screen,
+          session: {
+            typed: (text) => live?.typed(text) ?? Promise.resolve(),
+            interrupt: () => live?.interrupt() ?? false,
+            toggleMute: () => live?.toggleMute() ?? false,
+            stop: () => live?.stop() ?? Promise.resolve(),
+          },
+          workspace,
+          // Named only when it narrows something: every Summons is scoped to a workspace, and
+          // saying so twice on one line says nothing.
+          scope: args.repo ? scope.label : "",
+          bargeIn: !args["no-barge-in"],
+          callLogId: callLog.id,
+        })
+      : undefined;
+    if (view) {
+      terminal?.attach(view);
+      say = (line) => view.say(line);
+      // Nothing may reach the terminal around the view, and stderr is not the view's — a line
+      // written there would be painted over the footer. Errors are notes in the transcript instead.
+      complain = (line) => view.say(line);
+    }
+    const printed =
+      view ?? createLiveCallLogView({ write: (line) => process.stdout.write(`${line}\n`) });
 
     // One adapter over the board, handed to the controller as two narrow ports: the Claims steering
     // reads, and the one write a Summons can make. The Call log id goes with it so anything filed
@@ -198,21 +253,26 @@ export const summonCommand = defineCommand({
       audio,
       headphones: args.headphones,
       bargeIn: !args["no-barge-in"],
-      callLog: teeCallLog([callLog.port, live]),
+      callLog: teeCallLog([callLog.port, printed]),
       instructions: composeSummonsInstructions(snapshot, briefing),
       model: args.model,
       voice: args.voice,
       idleTimeoutMs: idleMs,
       onStopped: () => ended(),
+      // Straight to the status line when there is one: the level and the learned echo floor exist
+      // nowhere else, and watching them while talking over a reply is the only way the detector's
+      // thresholds get tuned (servant-summon#3).
+      onMicState: view ? (state) => view.micState(state) : undefined,
       onDebug: debug,
-      onError: (message) => console.error(`servant summon: ${message}`),
+      onError: (message) => complain(message),
     });
+    live = session;
 
     // A dead mic is not recoverable mid-session, and staying open would look to the user exactly
     // like the agent having nothing to say. Recorded as well as printed: this is the reason the
     // session ended, and the Call log used to show only that it ended.
     onAudioFailure = (message) => {
-      console.error(`servant summon: ${message}`);
+      complain(message);
       session.note(message);
       void session.stop();
     };
@@ -220,32 +280,38 @@ export const summonCommand = defineCommand({
     // Playback died, the conversation did not. Worth saying out loud — a word or two went missing —
     // but not worth hanging up over.
     onAudioLost = (message) => {
-      console.error(`servant summon: ${message}`);
+      complain(message);
       session.note(message, "info");
     };
 
-    await session.start();
-    console.log(
-      `servant: talking about workspace "${workspace}" (${scope.label}) — ${snapshot.tickets.length} open ticket(s).\n` +
-        `  Call log: ${callLog.path}\n` +
-        `  Echo gate: ${args.headphones ? "off (headphones) — talk over it any time" : "on (speakers) — start talking to cut it off"}\n` +
-        (args["no-barge-in"] ? "  Barge-in: off — replies always play to the end\n" : "") +
-        "  The mic is open; just start speaking. m to mute, Ctrl-C to hang up.\n",
-    );
-
-    // The SIGINT handler below is not redundant: it is what covers a non-terminal stdin, which the
-    // key controls deliberately leave alone.
-    const releaseKeys = attachKeyControls({
-      input: process.stdin,
-      toggleMute: () => session.toggleMute(),
-      hangUp: () => void session.stop(),
-      report: (message) => console.log(`servant: ${message}`),
-    });
-    process.on("SIGINT", () => void session.stop());
+    // From here to the `finally`, the terminal is the view's and not the user's — including through
+    // a failed handshake, which is exactly when a footer left pinned and stdin left in raw mode
+    // would hand back an unusable shell.
     try {
+      await session.start();
+      // One line per fact, because the view prints line by line and a paragraph written as one
+      // string would arrive as one line whatever the newlines in it said. What the status line and
+      // the hint row already carry is not repeated here.
+      for (const line of [
+        `talking about workspace "${workspace}" (${scope.label}) — ${snapshot.tickets.length} open ticket(s).`,
+        `Call log: ${callLog.path}`,
+        `Echo gate: ${args.headphones ? "off (headphones) — talk over it any time" : "on (speakers) — start talking to cut it off"}`,
+        ...(args["no-barge-in"] ? ["Barge-in: off — replies always play to the end"] : []),
+        ...(view
+          ? ["The mic is open; start speaking, or type below. /help lists the keys."]
+          : ["The mic is open; just start speaking. Ctrl-C to hang up."]),
+      ]) {
+        say(line);
+      }
+
+      // Not redundant with the view's own Ctrl-C: this is what covers a Summons with no terminal to
+      // read keys from, and a `kill -INT` arriving at one that has.
+      process.on("SIGINT", () => void session.stop());
       await finished;
     } finally {
-      releaseKeys();
+      // Before the closing lines below, so they are written to a terminal that is the user's again.
+      // The footer goes; the transcript above it stays where the terminal put it.
+      terminal?.close();
     }
     // Only the tail is waited on — every entry before it was already on disk when it happened.
     await callLog.close();
