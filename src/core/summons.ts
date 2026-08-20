@@ -611,6 +611,12 @@ export interface SummonsSession {
    * running and a session muted and forgotten still hangs itself up.
    */
   toggleMute(): boolean;
+  /**
+   * Record something only the outside knows — an audio subsystem dying, say. Without this the Call
+   * log of a session killed by a dead speaker read as an ordinary hang-up, and the one line that
+   * explained it existed nowhere but the terminal it scrolled past in.
+   */
+  note(text: string, level?: "info" | "error"): void;
 }
 
 function requireString(args: Record<string, unknown>, key: string, tool: string): string {
@@ -1968,6 +1974,8 @@ export function createSummonsSession(opts: SummonsSessionOptions): SummonsSessio
     },
 
     toggleMute: () => mic.toggleMute(),
+
+    note: (text, level = "error") => log.record({ type: "note", level, text }),
 
     // Only the controller knows why a session ended, and the record wants that — so the reason is
     // internal, and everyone outside is hanging up.

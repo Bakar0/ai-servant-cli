@@ -88,9 +88,27 @@ function soxProcesses(): AudioProcesses {
   };
 }
 
+/**
+ * How many speakers may die one after another before playback is called broken.
+ *
+ * One is a device that changed under us — headphones connected, the default output switched — and
+ * the next reply opens the new one and carries on. Three in a row is a device that cannot be played
+ * to at all, and spawning a fresh `sox` per delta forever would be worse than saying so.
+ */
+const SPEAKER_LOSSES_ALLOWED = 3;
+
 export interface SoxAudioOptions {
-  /** Called when a `sox` process dies on its own — the session is deaf or mute from then on. */
+  /** Called when the session cannot go on — a dead mic, or a speaker that cannot be replaced. */
   onFailure?: ((message: string) => void) | undefined;
+  /**
+   * Called when playback died but the conversation has not.
+   *
+   * A speaker exiting mid-reply used to come through `onFailure`, which hangs the Summons up: one
+   * `sox` exiting cleanly — because macOS moved the default output out from under it — ended the
+   * whole call, having played about a word. Being unable to speak for the rest of a sentence is not
+   * the same as being unable to hear, and only the second is worth hanging up over.
+   */
+  onLost?: ((message: string) => void) | undefined;
   onDebug?: ((message: string) => void) | undefined;
   /** Injected by the suite; the default resolves `sox` on PATH and fails preflight without it. */
   processes?: AudioProcesses | undefined;
@@ -111,21 +129,54 @@ export function createSoxAudio(opts: SoxAudioOptions = {}): AudioPort {
   /** The head of the current reply, held back only until there is enough of it to open with. */
   const priming: Buffer[] = [];
   let primingBytes = 0;
+  /** Speakers lost since the last one that played a reply to its end. */
+  let lostInARow = 0;
 
   /**
    * Watch a `sox` we did not kill or retire ourselves. Silence here is what makes this layer's
    * failures invisible: the mic dying mid-conversation looks exactly like the user having gone quiet.
    */
-  function watch(
-    role: string,
-    proc: { stderr: ReadableStream<Uint8Array>; exited: Promise<number> },
-    retired: () => boolean = () => false,
-  ): void {
+  function watchMic(proc: RecorderProcess): void {
     void (async () => {
-      const [code, stderr] = await Promise.all([proc.exited, new Response(proc.stderr).text()]);
-      if (stopping || retired()) return;
-      const detail = stderr.trim() || `exit code ${code}`;
-      opts.onFailure?.(`the ${role} (sox) stopped: ${detail}`);
+      const detail = await died(proc);
+      if (stopping) return;
+      opts.onFailure?.(`the microphone (sox) stopped: ${detail}`);
+    })();
+  }
+
+  /** Wait for a `sox` to go, and describe why in its own words where it left any. */
+  async function died(proc: {
+    stderr: ReadableStream<Uint8Array>;
+    exited: Promise<number>;
+  }): Promise<string> {
+    const [code, stderr] = await Promise.all([proc.exited, new Response(proc.stderr).text()]);
+    return stderr.trim() || `exit code ${code}`;
+  }
+
+  /**
+   * Watch a speaker, which unlike the microphone is replaceable.
+   *
+   * Exiting once its stdin is closed is the design, so a speaker that is no longer the current one
+   * has simply finished. One that is still current has died under a reply — and the answer to that
+   * is a new `sox` for the rest of it, not the end of the conversation.
+   */
+  function watchSpeaker(proc: SpeakerProcess): void {
+    void (async () => {
+      const detail = await died(proc);
+      if (stopping || speaker !== proc) return;
+      // Dropped rather than kept, so the next delta primes a fresh device instead of writing into
+      // a process that is not there.
+      speaker = null;
+      lostInARow += 1;
+      if (lostInARow >= SPEAKER_LOSSES_ALLOWED) {
+        opts.onFailure?.(
+          `the speaker (sox) died ${lostInARow} times in a row and playback cannot be restarted: ${detail}`,
+        );
+        return;
+      }
+      opts.onLost?.(
+        `the speaker (sox) stopped mid-reply (${detail}) — playing the rest of it on a new one.`,
+      );
     })();
   }
 
@@ -156,9 +207,7 @@ export function createSoxAudio(opts: SoxAudioOptions = {}): AudioPort {
     // whole point of priming.
     void proc.stdin.write(primed);
     opts.onDebug?.(`speaker: started with ${(primed.length / 2 / SAMPLE_RATE).toFixed(2)}s primed`);
-    // Exiting once its stdin is closed is the design, not a failure — so a speaker that is no
-    // longer the current one is retired, and its exit is expected.
-    watch("speaker", proc, () => speaker !== proc);
+    watchSpeaker(proc);
     return proc;
   }
 
@@ -195,6 +244,8 @@ export function createSoxAudio(opts: SoxAudioOptions = {}): AudioPort {
     const retiring = speaker;
     if (!retiring) return;
     speaker = null;
+    // It saw a reply out, so whatever went wrong before is over.
+    if (mode === "drain") lostInARow = 0;
     // Ended in both cases: an unended FileSink holds a file descriptor open, and enough of those
     // is a Summons that has hung up but will not exit.
     void retiring.stdin.end();
@@ -207,7 +258,7 @@ export function createSoxAudio(opts: SoxAudioOptions = {}): AudioPort {
       // — nothing is gated on a keypress, so the keyboard is never captured.
       recorder = processes.recorder(["-q", "-d", ...RAW_PCM_ARGS, "-"]);
       opts.onDebug?.("mic: recorder started");
-      watch("microphone", recorder);
+      watchMic(recorder);
       pump = drainMic(recorder.stdout, onChunk).catch((err: unknown) => {
         if (!stopping) opts.onFailure?.(`the microphone stream failed: ${String(err)}`);
       });

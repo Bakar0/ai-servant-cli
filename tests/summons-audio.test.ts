@@ -150,13 +150,28 @@ function fakeProcesses() {
   return { processes, speakers, recorders };
 }
 
-function createAudio(onFailure?: (message: string) => void) {
+function createAudio(onFailure?: (message: string) => void, onLost?: (message: string) => void) {
   const fake = fakeProcesses();
   const audioPort = createSoxAudio({
     processes: fake.processes,
     ...(onFailure ? { onFailure } : {}),
+    ...(onLost ? { onLost } : {}),
   });
   return { ...fake, audio: audioPort };
+}
+
+/** A port whose two failure channels are collected apart, since which one fires is the point. */
+function createWatchedAudio() {
+  const failures: string[] = [];
+  const lost: string[] = [];
+  return {
+    failures,
+    lost,
+    ...createAudio(
+      (message) => failures.push(message),
+      (message) => lost.push(message),
+    ),
+  };
 }
 
 /** Let the microbtask queue drain, which is all any of the port's own promises need. */
@@ -352,16 +367,65 @@ describe("a sox that dies on its own", () => {
     expect(failures).toEqual([]);
   });
 
-  test("a speaker dying mid-reply is reported", async () => {
-    const failures: string[] = [];
-    const { audio: port, speakers } = createAudio((message) => failures.push(message));
+  test("a speaker dying mid-reply loses the reply, not the conversation", async () => {
+    const { audio: port, speakers, failures, lost } = createWatchedAudio();
     port.play(audio(700));
 
-    speakers[0]?.die(2, "sox: device busy");
+    // What macOS moving the default output out from under `sox` looks like: a clean exit, no
+    // stderr, in the middle of a sentence. Hanging up on it played about a word and ended the call.
+    speakers[0]?.die(0);
     await settle();
 
-    expect(failures[0]).toContain("speaker");
-    expect(failures[0]).toContain("device busy");
+    expect(failures).toEqual([]);
+    expect(lost[0]).toContain("stopped mid-reply");
+  });
+
+  test("the rest of the reply is played, on a speaker of its own", async () => {
+    const { audio: port, speakers } = createWatchedAudio();
+    port.play(audio(700));
+    speakers[0]?.die(0);
+    await settle();
+
+    port.play(audio(700));
+
+    expect(speakers).toHaveLength(2);
+    expect(speakers[1]?.writes[0]?.length).toBe(bytesOf(700));
+  });
+
+  test("a device that cannot be played to at all is a failure, not an endless supply of sox", async () => {
+    const { audio: port, speakers, failures, lost } = createWatchedAudio();
+
+    for (let attempt = 0; attempt < 3; attempt++) {
+      port.play(audio(700));
+      speakers[attempt]?.die(0);
+      await settle();
+    }
+
+    expect(lost).toHaveLength(2);
+    expect(failures[0]).toContain("3 times in a row");
+    // The third death is the last: nothing else is spawned on its account.
+    expect(speakers).toHaveLength(3);
+  });
+
+  test("a reply played to its end forgives the speakers lost before it", async () => {
+    const { audio: port, speakers, failures } = createWatchedAudio();
+    port.play(audio(700));
+    speakers[0]?.die(0);
+    await settle();
+    port.play(audio(700));
+    speakers[1]?.die(0);
+    await settle();
+
+    // A whole reply out of the speakers — whatever the device was doing, it is over.
+    port.play(audio(700));
+    port.endReply();
+    await settle();
+
+    port.play(audio(700));
+    speakers[3]?.die(0);
+    await settle();
+
+    expect(failures).toEqual([]);
   });
 
   test("nothing is reported once the Summons is hanging up — the children die because we killed them", async () => {

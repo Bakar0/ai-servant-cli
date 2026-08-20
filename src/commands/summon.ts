@@ -130,7 +130,12 @@ export const summonCommand = defineCommand({
     // Preflight before anything expensive: both failures tell the user what to install or export.
     const apiKey = requireOpenAiApiKey(process.env, await readServantEnv());
     let onAudioFailure: (message: string) => void = () => {};
-    const audio = createSoxAudio({ onDebug: debug, onFailure: (m) => onAudioFailure(m) });
+    let onAudioLost: (message: string) => void = () => {};
+    const audio = createSoxAudio({
+      onDebug: debug,
+      onFailure: (m) => onAudioFailure(m),
+      onLost: (m) => onAudioLost(m),
+    });
 
     // A Hands session is a resumable headless Claude thread and has no equivalent on Codex, whose
     // headless runs are ephemeral by design. A Codex workspace summons without hands rather than
@@ -195,11 +200,20 @@ export const summonCommand = defineCommand({
       onError: (message) => console.error(`servant summon: ${message}`),
     });
 
-    // A dead mic or speaker is not recoverable mid-session, and staying open would look to the
-    // user exactly like the agent having nothing to say.
+    // A dead mic is not recoverable mid-session, and staying open would look to the user exactly
+    // like the agent having nothing to say. Recorded as well as printed: this is the reason the
+    // session ended, and the Call log used to show only that it ended.
     onAudioFailure = (message) => {
       console.error(`servant summon: ${message}`);
+      session.note(message);
       void session.stop();
+    };
+
+    // Playback died, the conversation did not. Worth saying out loud — a word or two went missing —
+    // but not worth hanging up over.
+    onAudioLost = (message) => {
+      console.error(`servant summon: ${message}`);
+      session.note(message, "info");
     };
 
     await session.start();
