@@ -107,6 +107,17 @@ describe("the status line", () => {
     );
   });
 
+  // A mic that never started is exactly what the user is trying to read the status line about, so
+  // the line cannot be waiting for a mic frame to exist.
+  test("the Summons says what it is from the moment it opens", () => {
+    const v = built();
+
+    expect(v.status[0]).toEqual({
+      left: "servant summon · datalake-loadtest",
+      right: "● listening   0 / floor —",
+    });
+  });
+
   test("what the gate reports lands on the status line", () => {
     const v = built();
 
@@ -337,7 +348,7 @@ describe("the transcript", () => {
 
     expect(v.printed).toEqual([
       "agent  ▸ one moment",
-      "       ⚙ tasks        --frontier                            1.2s",
+      "     3 · tasks        --frontier                            1.2s",
       "       — Summons ended (hung up)",
     ]);
   });

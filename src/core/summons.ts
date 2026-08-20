@@ -1659,7 +1659,7 @@ function createMicGate(opts: SummonsSessionOptions, timers: TimerPort) {
    * 400ms of opening words. So a one-word "stop" reaches the model as nothing at all, which is the
    * right outcome: what it asked for was silence.
    */
-  function detect(pcm: string): void {
+  function detect(pcm: string, level: number): void {
     if (!playing) return;
     /**
      * A frame that *began* before this reply reached the speakers holds no echo — it is the room
@@ -1673,8 +1673,6 @@ function createMicGate(opts: SummonsSessionOptions, timers: TimerPort) {
      * It is not evidence either way: not a floor sample, and not a candidate.
      */
     if (timers.now() - playbackDurationMs(pcm) < playing.startedAt) return;
-    const level = peakLevel(pcm);
-    lastLevel = level;
     if (framesObserved < ECHO_WARMUP_FRAMES) {
       framesObserved += 1;
       echoFloor = Math.max(echoFloor ?? 0, level);
@@ -1748,6 +1746,10 @@ function createMicGate(opts: SummonsSessionOptions, timers: TimerPort) {
         return;
       }
       settle();
+      // Read once, here, whether the frame is going to the model or being held back to be measured:
+      // it is the same number either way, and the status line wants it either way.
+      const level = peakLevel(pcm);
+      lastLevel = level;
       // Judged on when the frame *began*, not when it arrived. A frame is ~200ms of history, so the
       // first frame admitted after the window closed still opens inside it — and one frame of the
       // agent's own voice is all the model's voice detection needs to make it interrupt itself.
@@ -1755,12 +1757,11 @@ function createMicGate(opts: SummonsSessionOptions, timers: TimerPort) {
         !opts.headphones &&
         timers.now() - playbackDurationMs(pcm) < speakingUntil + PLAYBACK_TAIL_MS
       ) {
-        detect(pcm);
+        detect(pcm, level);
         report();
         return;
       }
       loudFrames = 0;
-      lastLevel = peakLevel(pcm);
       opts.transport.sendAudio(pcm);
       report();
     },
@@ -1780,6 +1781,12 @@ function createMicGate(opts: SummonsSessionOptions, timers: TimerPort) {
       }
       // Either half is enough: a reply still being generated is cancellable before a syllable of it
       // has reached the room, and queued audio outlives the generating by however long it plays.
+      //
+      // This widened for all three sources, not just the keyboard. `Esc` is what made the gap
+      // visible, but it was always there: a reply the server had begun and not yet spoken could be
+      // interrupted by nothing at all, and the answer to a turn the user had already moved past
+      // arrived anyway. Every interruption is decided here (ADR-009), so treating one source
+      // specially in this window would be the strange choice, not the consistent one.
       if (!playing && !generating) return false;
       // A reply the model has finished generating has nothing left to cancel, and asking anyway is
       // an API error the user would be told about for no reason. The queued audio still has to go.

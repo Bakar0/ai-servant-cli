@@ -37,6 +37,24 @@ describe("watching a Summons live", () => {
     expect(line).toBe("agent  ▸ one two three");
   });
 
+  // `/tool 7` can only be typed if the 7 is on screen, and a glyph repeated on every row said
+  // nothing. A record from before numbers existed keeps the glyph, and still lines up.
+  test("a tool row is addressed by its number, and an old one still reads", () => {
+    const lines = watched([
+      {
+        type: "tool",
+        name: "tasks",
+        target: "--frontier",
+        outcome: "ok",
+        durationMs: 1_200,
+        number: 3,
+      },
+      { type: "tool", name: "read_file", target: "GOAL.md", outcome: "ok", durationMs: 12 },
+    ]);
+    expect(lines[0]).toStartWith("     3 · tasks        ");
+    expect(lines[1]).toStartWith("       ⚙ read_file    ");
+  });
+
   test("shows a tool call with what it touched and how long it took", () => {
     const [line] = watched([
       { type: "tool", name: "read_file", target: "GOAL.md", outcome: "ok", durationMs: 12 },

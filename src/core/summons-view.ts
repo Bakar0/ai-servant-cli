@@ -11,9 +11,8 @@
 // ADR 0014). That is also why `/tool 7` prints the call again below rather than expanding a row in
 // place — there is no row to expand, because the rows are terminal history.
 
-import { formatCallLogEntry } from "./call-log/live.ts";
+import { formatCallLogEntry, formatToolOutcome } from "./call-log/live.ts";
 import { type CallLogEntry, type CallLogPort, redactFields } from "./call-log/record.ts";
-import { formatDuration } from "./call-log/live.ts";
 import type { SummonsMicState } from "./summons.ts";
 
 /**
@@ -26,7 +25,7 @@ export interface SummonsScreen {
   print(lines: readonly string[]): void;
   /** Replace the status line: what this Summons is, and what the mic is doing. */
   status(left: string, right: string): void;
-  /** Replace what is on the input line — after sending, and for history and `/clear`. */
+  /** Replace what is on the input line — after sending, walking history, and clearing with `Esc`. */
   setInput(text: string): void;
 }
 
@@ -141,13 +140,7 @@ type ToolEntry = Extract<CallLogEntry, { type: "tool" }>;
  * version of something it can already see. So this says where the answer is instead.
  */
 export function formatToolDetail(entry: ToolEntry): string[] {
-  const outcome =
-    entry.outcome === "ok"
-      ? formatDuration(entry.durationMs)
-      : entry.outcome === "held"
-        ? `held — waiting on a yes${entry.detail ? ` (${entry.detail})` : ""}`
-        : `failed — ${entry.detail ?? "no reason given"}`;
-  const head = `${DETAIL_INDENT}tool ${entry.number} · ${entry.name}${entry.target ? ` · ${entry.target}` : ""} · ${outcome}`;
+  const head = `${DETAIL_INDENT}tool ${entry.number} · ${entry.name}${entry.target ? ` · ${entry.target}` : ""} · ${formatToolOutcome(entry)}`;
   const lines = [head];
   if (entry.args) lines.push(...block("args  ", entry.args));
   if (entry.result !== undefined) lines.push(...block("result", entry.result));
@@ -171,7 +164,15 @@ const HELP: readonly string[] = [
 ];
 
 export interface SummonsView extends CallLogPort {
-  /** Enter, with whatever was on the input line. */
+  /**
+   * Enter, with whatever was on the input line.
+   *
+   * One line, and enter sends it — the input is deliberately not multiline. An Utterance is one
+   * turn in a conversation held out loud, and enter-sends is what makes typing one feel like saying
+   * it; a paragraph composed over several lines would need a second key to send, which is a
+   * different kind of interface than the one a Summons is. A pasted block arrives as one line with
+   * its newlines stripped, so pasting something long still sends as the one turn it is.
+   */
   submit(line: string): Promise<void>;
   /** `Esc` — two things, and which one depends on whether there is a reply to cut off. */
   escape(): void;
@@ -203,7 +204,6 @@ export function createSummonsView(opts: SummonsViewOptions): SummonsView {
   const print = (lines: readonly string[]) => opts.screen.print(lines);
   const say = (text: string) => print([`       · ${text}`]);
 
-  /** Show it, and put the line back the way it was. */
   function showStatus(state: SummonsMicState): void {
     opts.screen.status(title, formatMicState(state));
   }
@@ -232,34 +232,37 @@ export function createSummonsView(opts: SummonsViewOptions): SummonsView {
   }
 
   /**
-   * A slash command, or nothing. Returns false when the line was not one, so it is sent as speech.
-   *
-   * An unrecognised slash is a typo, and a typo said out loud to the agent is worse than a typo
-   * refused — so it is refused, and the line is left on the input for the user to fix rather than
-   * swallowed.
+   * Run a slash command. Every line reaching here starts with a slash, so there is no "not a
+   * command" answer to give back — an unrecognised one is a typo, and a typo said out loud to the
+   * agent is worse than a typo refused. So it is refused, and the words are left on the input line
+   * for the user to fix rather than swallowed.
    */
-  function command(line: string): boolean {
+  function command(line: string): void {
     const [word = "", ...rest] = line.split(/\s+/);
     const argument = rest.join(" ");
     switch (word) {
       case "/tool":
         showTool(argument);
-        return true;
+        return;
       case "/mute":
         opts.session.toggleMute();
-        return true;
+        return;
       case "/help":
         print(HELP);
-        return true;
+        return;
       case "/quit":
         void opts.session.stop();
-        return true;
+        return;
       default:
         say(`No such command: ${word}. /help lists them.`);
         opts.screen.setInput(line);
-        return true;
     }
   }
+
+  // Drawn once before anything has happened, so the Summons says what it is from the moment it
+  // opens. Waiting for the first mic frame would leave the line blank exactly when a mic that never
+  // started is the thing the user is trying to diagnose.
+  showStatus({ muted: false, speaking: false, level: 0, floor: null });
 
   return {
     record(entry) {

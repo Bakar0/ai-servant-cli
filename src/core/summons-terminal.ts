@@ -47,9 +47,10 @@ export interface SummonsTerminal {
   close(): void;
 }
 
-const STATUS_ROW = 1;
-const INPUT_BOX = 3;
-const HINT_ROW = 1;
+/** Footer rows, by part. The input box is three because it is a one-line input inside a border. */
+const STATUS_HEIGHT = 1;
+const INPUT_BOX_HEIGHT = 3;
+const HINT_HEIGHT = 1;
 
 /** Dim enough to read as furniture rather than as something that happened. */
 const MUTED_TEXT = "#8a8a8a";
@@ -61,7 +62,7 @@ const MUTED_TEXT = "#8a8a8a";
  */
 export const SUMMONS_RENDERER_CONFIG: CliRendererConfig = {
   screenMode: "split-footer",
-  footerHeight: STATUS_ROW + INPUT_BOX + HINT_ROW,
+  footerHeight: STATUS_HEIGHT + INPUT_BOX_HEIGHT + HINT_HEIGHT,
   externalOutputMode: "capture-stdout",
   // Ctrl-C is a hang-up, which means ending the Summons properly — closing the socket, ending the
   // Hands session, and writing the last line of the Call log. Exiting from under all that would
@@ -96,23 +97,27 @@ export function mountSummonsTerminal(
   const statusRow = new BoxRenderable(renderer, {
     id: "summons-status",
     width: "100%",
-    height: STATUS_ROW,
+    height: STATUS_HEIGHT,
     flexDirection: "row",
     justifyContent: "space-between",
   });
   // Two halves and let the layout put the right one against the right edge, so a resize needs no
   // arithmetic anywhere — least of all in the view model, which has no idea how wide the window is.
   const title = new TextRenderable(renderer, { id: "summons-title", content: "" });
-  const state = new TextRenderable(renderer, { id: "summons-mic", content: "" });
+  const micState = new TextRenderable(renderer, { id: "summons-mic", content: "" });
   statusRow.add(title);
-  statusRow.add(state);
+  statusRow.add(micState);
 
   const inputBox = new BoxRenderable(renderer, {
     id: "summons-input-box",
     width: "100%",
-    height: INPUT_BOX,
+    height: INPUT_BOX_HEIGHT,
     border: true,
   });
+  // Single-line and enter-sends, which is what an Utterance is; a `TextareaRenderable` would take
+  // enter for a newline and need a second key to send. Line editing, undo and paste come with it —
+  // a pasted block arrives as one line with its newlines stripped, which is the right reading of
+  // pasting a paragraph into a conversation held out loud.
   const input = new InputRenderable(renderer, {
     id: "summons-input",
     width: "100%",
@@ -168,7 +173,7 @@ export function mountSummonsTerminal(
     },
     status(left, right) {
       title.content = left;
-      state.content = right;
+      micState.content = right;
     },
     setInput(text) {
       input.value = text;

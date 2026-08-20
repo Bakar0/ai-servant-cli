@@ -35,10 +35,29 @@ export function formatDuration(ms: number): string {
   return safe < 1000 ? `${Math.round(safe)}ms` : `${(safe / 1000).toFixed(1)}s`;
 }
 
-const INDENT = "       ";
+/**
+ * How wide the leading marker column is. A tool call's marker is its own number, and a number is
+ * wider than a glyph — so the column is right-aligned to the widest of them and every line after it
+ * still starts in the same place, whether it is marked `⚙` or `217 ·`.
+ */
+const MARKER_WIDTH = 8;
+const INDENT = " ".repeat(MARKER_WIDTH - 1);
 
-function toolLine(symbol: string, name: string, target: string, trailer: string): string {
-  return `${INDENT}${symbol} ${pad(name, NAME_WIDTH)}${pad(clip(target, TARGET_WIDTH), TARGET_WIDTH)}${trailer}`;
+function toolLine(marker: string, name: string, target: string, trailer: string): string {
+  return `${marker.padStart(MARKER_WIDTH)} ${pad(name, NAME_WIDTH)}${pad(clip(target, TARGET_WIDTH), TARGET_WIDTH)}${trailer}`;
+}
+
+/**
+ * How a tool call ended, in words. Shared with the Summons view's `/tool N`, which shows the same
+ * three outcomes above the arguments — two spellings of "held — waiting on a yes" would be two
+ * answers to one question.
+ */
+export function formatToolOutcome(entry: Extract<CallLogEntry, { type: "tool" }>): string {
+  if (entry.outcome === "ok") return formatDuration(entry.durationMs);
+  if (entry.outcome === "held") {
+    return `held — waiting on a yes${entry.detail ? ` (${entry.detail})` : ""}`;
+  }
+  return `failed — ${entry.detail ?? "no reason given"}`;
 }
 
 /** Exported so the view is asserted line by line, with no terminal anywhere near the test. */
@@ -51,15 +70,18 @@ export function formatCallLogEntry(entry: CallLogEntry): string[] {
       return [
         `${entry.who === "user" ? "you  " : "agent"}  ${entry.channel === "typed" ? "⌨" : "▸"} ${oneLine(entry.text)}`,
       ];
-    case "tool": {
-      const outcome =
-        entry.outcome === "ok"
-          ? formatDuration(entry.durationMs)
-          : entry.outcome === "held"
-            ? `held — waiting on a yes${entry.detail ? ` (${entry.detail})` : ""}`
-            : `failed — ${entry.detail ?? "no reason given"}`;
-      return [toolLine("⚙", entry.name, entry.target, outcome)];
-    }
+    case "tool":
+      // The number *is* the marker, because it is the row's address: `/tool 7` needs the 7 to be on
+      // screen, and a glyph that is the same on every row says nothing a reader did not already
+      // know. A record written before numbers existed keeps the glyph and stays readable.
+      return [
+        toolLine(
+          entry.number === undefined ? "⚙" : `${entry.number} ·`,
+          entry.name,
+          entry.target,
+          formatToolOutcome(entry),
+        ),
+      ];
     case "gate": {
       const verdict =
         entry.verdict === "confirmed"

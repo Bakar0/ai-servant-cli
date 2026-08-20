@@ -195,99 +195,100 @@ export const summonCommand = defineCommand({
     const terminal = interactive
       ? await (await import("../core/summons-terminal.ts")).openSummonsTerminal()
       : undefined;
-    // The view is built before the session it drives, because it is also where the session's own
-    // opening lines are printed. It reaches the session through this, which is filled in below.
-    let live: SummonsSession | undefined;
-    const view = terminal
-      ? createSummonsView({
-          screen: terminal.screen,
-          session: {
-            typed: (text) => live?.typed(text) ?? Promise.resolve(),
-            interrupt: () => live?.interrupt() ?? false,
-            toggleMute: () => live?.toggleMute() ?? false,
-            stop: () => live?.stop() ?? Promise.resolve(),
-          },
-          workspace,
-          // Named only when it narrows something: every Summons is scoped to a workspace, and
-          // saying so twice on one line says nothing.
-          scope: args.repo ? scope.label : "",
-          bargeIn: !args["no-barge-in"],
-          callLogId: callLog.id,
-        })
-      : undefined;
-    if (view) {
-      terminal?.attach(view);
-      say = (line) => view.say(line);
-      // Nothing may reach the terminal around the view, and stderr is not the view's — a line
-      // written there would be painted over the footer. Errors are notes in the transcript instead.
-      complain = (line) => view.say(line);
-    }
-    const printed =
-      view ?? createLiveCallLogView({ write: (line) => process.stdout.write(`${line}\n`) });
 
-    // One adapter over the board, handed to the controller as two narrow ports: the Claims steering
-    // reads, and the one write a Summons can make. The Call log id goes with it so anything filed
-    // by voice can be traced back to the conversation that produced it.
-    const hub = createSummonsTickets({ workspace, callLogId: callLog.id });
-
-    let ended: () => void = () => {};
-    const finished = new Promise<void>((resolve) => {
-      ended = resolve;
-    });
-    const session = createSummonsSession({
-      transport: createOpenAiRealtimeTransport(apiKey, { onDebug: debug }),
-      reader: createWorkspaceReader(scope.root),
-      // Delegated sessions open on the workspace, not the Summons' scope: `--repo` narrows what
-      // the agent may read out loud, never what Claude is allowed to work on.
-      actions: createSummonsActions({ workspace, terminal: args.terminal }),
-      // Constructed, not started: the session behind this is spawned by the first request that
-      // needs it, and a Summons where nothing ever needs hands costs nothing.
-      hands,
-      // A directory scan, not a question put to anyone — so it is always available, even in a
-      // workspace whose backend has no hands to reach.
-      sessions: { list: () => readWorkspaceSessions(workspace) },
-      // What makes steering Claim-scoped. Offered alongside the registry and the hands, since all
-      // three are needed before a session may be addressed at all (workspace ADR 0010).
-      tickets: hub,
-      filing: hub,
-      audio,
-      headphones: args.headphones,
-      bargeIn: !args["no-barge-in"],
-      callLog: teeCallLog([callLog.port, printed]),
-      instructions: composeSummonsInstructions(snapshot, briefing),
-      model: args.model,
-      voice: args.voice,
-      idleTimeoutMs: idleMs,
-      onStopped: () => ended(),
-      // Straight to the status line when there is one: the level and the learned echo floor exist
-      // nowhere else, and watching them while talking over a reply is the only way the detector's
-      // thresholds get tuned (servant-summon#3).
-      onMicState: view ? (state) => view.micState(state) : undefined,
-      onDebug: debug,
-      onError: (message) => complain(message),
-    });
-    live = session;
-
-    // A dead mic is not recoverable mid-session, and staying open would look to the user exactly
-    // like the agent having nothing to say. Recorded as well as printed: this is the reason the
-    // session ended, and the Call log used to show only that it ended.
-    onAudioFailure = (message) => {
-      complain(message);
-      session.note(message);
-      void session.stop();
-    };
-
-    // Playback died, the conversation did not. Worth saying out loud — a word or two went missing —
-    // but not worth hanging up over.
-    onAudioLost = (message) => {
-      complain(message);
-      session.note(message, "info");
-    };
-
-    // From here to the `finally`, the terminal is the view's and not the user's — including through
-    // a failed handshake, which is exactly when a footer left pinned and stdin left in raw mode
-    // would hand back an unusable shell.
+    // Everything from here to the `finally` runs with the terminal belonging to the view rather than
+    // to the user — so every path out of it, a failed handshake included, has to hand the terminal
+    // back. Left pinned, the footer sits over the shell's own output and stdin stays in raw mode.
     try {
+      // The view is built before the session it drives, because it is also where the session's own
+      // opening lines are printed. It reaches the session through this, which is filled in below.
+      let sessionRef: SummonsSession | undefined;
+      const view = terminal
+        ? createSummonsView({
+            screen: terminal.screen,
+            session: {
+              typed: (text) => sessionRef?.typed(text) ?? Promise.resolve(),
+              interrupt: () => sessionRef?.interrupt() ?? false,
+              toggleMute: () => sessionRef?.toggleMute() ?? false,
+              stop: () => sessionRef?.stop() ?? Promise.resolve(),
+            },
+            workspace,
+            // Named only when it narrows something: every Summons is scoped to a workspace, and
+            // saying so twice on one line says nothing.
+            scope: args.repo ? scope.label : "",
+            bargeIn: !args["no-barge-in"],
+            callLogId: callLog.id,
+          })
+        : undefined;
+      if (view) {
+        terminal?.attach(view);
+        say = (line) => view.say(line);
+        // Nothing may reach the terminal around the view, and stderr is not the view's — a line
+        // written there would be painted over the footer. Errors are notes in the transcript instead.
+        complain = (line) => view.say(line);
+      }
+      const printed =
+        view ?? createLiveCallLogView({ write: (line) => process.stdout.write(`${line}\n`) });
+
+      // One adapter over the board, handed to the controller as two narrow ports: the Claims steering
+      // reads, and the one write a Summons can make. The Call log id goes with it so anything filed
+      // by voice can be traced back to the conversation that produced it.
+      const hub = createSummonsTickets({ workspace, callLogId: callLog.id });
+
+      let ended: () => void = () => {};
+      const finished = new Promise<void>((resolve) => {
+        ended = resolve;
+      });
+      const session = createSummonsSession({
+        transport: createOpenAiRealtimeTransport(apiKey, { onDebug: debug }),
+        reader: createWorkspaceReader(scope.root),
+        // Delegated sessions open on the workspace, not the Summons' scope: `--repo` narrows what
+        // the agent may read out loud, never what Claude is allowed to work on.
+        actions: createSummonsActions({ workspace, terminal: args.terminal }),
+        // Constructed, not started: the session behind this is spawned by the first request that
+        // needs it, and a Summons where nothing ever needs hands costs nothing.
+        hands,
+        // A directory scan, not a question put to anyone — so it is always available, even in a
+        // workspace whose backend has no hands to reach.
+        sessions: { list: () => readWorkspaceSessions(workspace) },
+        // What makes steering Claim-scoped. Offered alongside the registry and the hands, since all
+        // three are needed before a session may be addressed at all (workspace ADR 0010).
+        tickets: hub,
+        filing: hub,
+        audio,
+        headphones: args.headphones,
+        bargeIn: !args["no-barge-in"],
+        callLog: teeCallLog([callLog.port, printed]),
+        instructions: composeSummonsInstructions(snapshot, briefing),
+        model: args.model,
+        voice: args.voice,
+        idleTimeoutMs: idleMs,
+        onStopped: () => ended(),
+        // Straight to the status line when there is one: the level and the learned echo floor exist
+        // nowhere else, and watching them while talking over a reply is the only way the detector's
+        // thresholds get tuned (servant-summon#3).
+        onMicState: view ? (state) => view.micState(state) : undefined,
+        onDebug: debug,
+        onError: (message) => complain(message),
+      });
+      sessionRef = session;
+
+      // A dead mic is not recoverable mid-session, and staying open would look to the user exactly
+      // like the agent having nothing to say. Recorded as well as printed: this is the reason the
+      // session ended, and the Call log used to show only that it ended.
+      onAudioFailure = (message) => {
+        complain(message);
+        session.note(message);
+        void session.stop();
+      };
+
+      // Playback died, the conversation did not. Worth saying out loud — a word or two went missing —
+      // but not worth hanging up over.
+      onAudioLost = (message) => {
+        complain(message);
+        session.note(message, "info");
+      };
+
       await session.start();
       // One line per fact, because the view prints line by line and a paragraph written as one
       // string would arrive as one line whatever the newlines in it said. What the status line and
