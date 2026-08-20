@@ -1047,7 +1047,7 @@ describe("typing to a Summons", () => {
   test("a typed utterance reaches the model as an ordinary user turn", async () => {
     const s = await audioSession();
 
-    s.session.typed("actually check ticket 3");
+    await s.session.typed("actually check ticket 3");
 
     expect(s.sent.userTexts).toEqual(["actually check ticket 3"]);
   });
@@ -1055,7 +1055,7 @@ describe("typing to a Summons", () => {
   test("an empty line is not a turn", async () => {
     const s = await audioSession();
 
-    s.session.typed("   ");
+    await s.session.typed("   ");
 
     expect(s.sent.userTexts).toEqual([]);
   });
@@ -1065,13 +1065,13 @@ describe("typing to a Summons", () => {
   test("typing leaves the mic exactly as the user set it", async () => {
     const s = await audioSession();
 
-    s.session.typed("one");
+    await s.session.typed("one");
     s.advance(200);
     s.mic(micChunk(200, 3_000));
     expect(s.sent.audioSent).toHaveLength(1);
 
     s.session.toggleMute();
-    s.session.typed("two");
+    await s.session.typed("two");
     s.advance(200);
     s.mic(micChunk(200, 3_000));
 
@@ -1083,7 +1083,7 @@ describe("typing to a Summons", () => {
     const s = await audioSession();
     await s.session.stop();
 
-    s.session.typed("hello?");
+    await s.session.typed("hello?");
 
     expect(s.sent.userTexts).toEqual([]);
   });
@@ -1187,7 +1187,7 @@ describe("summons idle hang-up", () => {
     const { session, armed } = build(180_000);
     await session.start();
 
-    session.typed("still here");
+    await session.typed("still here");
 
     expect(armed.armedFor).toEqual([180_000, 180_000]);
   });

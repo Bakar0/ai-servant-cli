@@ -113,7 +113,7 @@ export const DELEGATION_TOOLS: readonly SummonsTool[] = [
   {
     name: "delegate",
     description:
-      "Hand work that CHANGES something — editing, refactoring, running commands, anything that writes — to a fresh Claude session with its full harness. Calling this launches NOTHING: it asks the user to confirm out loud first, and their spoken answer decides. For read-only questions use research instead, which needs no confirmation.",
+      "Hand work that CHANGES something — editing, refactoring, running commands, anything that writes — to a fresh Claude session with its full harness. Calling this launches NOTHING: it asks the user to confirm first, and their answer decides. For read-only questions use research instead, which needs no confirmation.",
     parameters: {
       type: "object",
       properties: {
@@ -261,13 +261,13 @@ export interface TicketFilingPort {
 
 /**
  * Turning the conversation into a ticket. Guarded, and through the same gate as everything else
- * Guarded — the agent proposes a title and a body, and the user's spoken yes is what files it.
+ * Guarded — the agent proposes a title and a body, and the user's yes is what files it.
  */
 export const TICKET_TOOLS: readonly SummonsTool[] = [
   {
     name: "file_ticket",
     description:
-      "Turn what you have been discussing into a ticket in this workspace's hub — 'summarize that into a ticket', 'open an issue for that'. Calling this files NOTHING: it asks the user to confirm out loud first. Say out loud the title you are about to file and ask for a plain yes or no, then stop — their spoken answer is what decides. This is the only thing you can write anywhere, so get the title and body right before you propose them.",
+      "Turn what you have been discussing into a ticket in this workspace's hub — 'summarize that into a ticket', 'open an issue for that'. Calling this files NOTHING: it asks the user to confirm out loud first. Say out loud the title you are about to file and ask for a plain yes or no, then stop — their answer is what decides. This is the only thing you can write anywhere, so get the title and body right before you propose them.",
     parameters: {
       type: "object",
       properties: {
@@ -328,7 +328,7 @@ export const STEER_TOOLS: readonly SummonsTool[] = [
   {
     name: "stop_session",
     description:
-      "Tell a running session to stop or abandon what it is doing. Calling this stops NOTHING: it asks the user to confirm out loud first, because stopping destroys work already done and nothing else will catch it. Say out loud what you are about to stop, ask for a plain yes or no, and stop — their spoken answer is what decides.",
+      "Tell a running session to stop or abandon what it is doing. Calling this stops NOTHING: it asks the user to confirm out loud first, because stopping destroys work already done and nothing else will catch it. Say out loud what you are about to stop, ask for a plain yes or no, and stop — their answer is what decides.",
     parameters: {
       type: "object",
       properties: {
@@ -632,11 +632,14 @@ export interface SummonsSession {
    */
   toggleMute(): boolean;
   /**
-   * A typed utterance: the same turn a spoken one is, answered in voice like any other. Blank
-   * input is not a turn, and the mic is left exactly as the user set it — muting is theirs alone,
-   * so typing neither opens nor closes it.
+   * A typed utterance: the same turn a spoken one is, and treated as one throughout — answered in
+   * voice, and able to answer the confirm-gate. The channel is recorded so a person reading the
+   * conversation back can tell them apart, not so the agent can.
+   *
+   * Blank input is not a turn, and the mic is left exactly as the user set it — muting is theirs
+   * alone, so typing neither opens nor closes it.
    */
-  typed(text: string): void;
+  typed(text: string): Promise<void>;
   /**
    * Cut the reply off from the keyboard — `Esc`. The third barge-in source, and the only one that
    * is not a guess about whether a person is talking, so it is obeyed even with barge-in switched
@@ -752,7 +755,7 @@ interface GatedAction {
   askedAfterItemId: string | null;
   /** What did not happen, said back when the answer is anything but a clear yes. */
   nothingHappened: string;
-  /** Runs on a spoken yes, and returns the note the agent is given. */
+  /** Runs on a yes, and returns the note the agent is given. */
   run(): Promise<string>;
   /** How a failure of `run` is put to the user. */
   failed(message: string): string;
@@ -787,9 +790,10 @@ function createGate(opts: SummonsSessionOptions) {
     },
 
     /**
-     * The user has spoken while something is held. Only an unambiguous yes releases it: a no and
-     * anything unclear both decline, because a misheard sentence must never act. Returns false when
-     * the utterance was not an answer at all, leaving the gate held.
+     * The user has answered while something is held — spoken or typed, which is the same thing.
+     * Only an unambiguous yes releases it: a no and anything unclear both decline, because a
+     * misheard sentence must never act. Returns false when the utterance was not an answer at all,
+     * leaving the gate held.
      */
     async resolve(text: string, itemId: string | null): Promise<boolean> {
       const action = pending;
@@ -1061,7 +1065,7 @@ function createDelegations(opts: SummonsSessionOptions, gate: Gate) {
         launched: false,
         label,
         instruction:
-          "Nothing has been launched. Say out loud, in one sentence, what you are about to hand to Claude, then ask the user to answer yes or no. Do not call delegate again — their spoken answer is what decides.",
+          "Nothing has been launched. Say out loud, in one sentence, what you are about to hand to Claude, then ask the user to answer yes or no. Do not call delegate again — their answer is what decides.",
       });
       return { outcome: "held", detail: label };
     },
@@ -1180,7 +1184,7 @@ function createFiling(opts: SummonsSessionOptions, gate: Gate) {
         filed: false,
         title,
         instruction:
-          "Nothing has been filed. Say the title out loud, in one sentence, then ask the user to answer yes or no. Do not call file_ticket again — their spoken answer is what decides.",
+          "Nothing has been filed. Say the title out loud, in one sentence, then ask the user to answer yes or no. Do not call file_ticket again — their answer is what decides.",
       });
       return { outcome: "held", detail: title };
     },
@@ -1534,7 +1538,7 @@ function createSteering(opts: SummonsSessionOptions, gate: Gate, timers: TimerPo
       status: "awaiting_confirmation",
       session: target.name,
       ...(target.ticket === null ? {} : { ticket: target.ticket }),
-      instruction: `Nothing has been sent. Say out loud that you are about to stop ${target.name}${target.ticket === null ? "" : ` on #${target.ticket}`} and that work it has already done may be lost, then ask for a plain yes or no and stop. Their spoken answer is what decides.`,
+      instruction: `Nothing has been sent. Say out loud that you are about to stop ${target.name}${target.ticket === null ? "" : ` on #${target.ticket}`} and that work it has already done may be lost, then ask for a plain yes or no and stop. Their answer is what decides.`,
     });
     return { outcome: "held", detail: label };
   }
@@ -1980,7 +1984,8 @@ export function createSummonsSession(opts: SummonsSessionOptions): SummonsSessio
         return;
       case "user_transcript":
         log.record({ type: "said", who: "user", text: event.text });
-        // The one place a spoken word decides something: releasing whatever the gate is holding.
+        // Where a heard word decides something: releasing whatever the gate is holding. A typed
+        // one does it too, through the same call (`typed`).
         await gate.resolve(event.text, event.itemId ?? null);
         delegations.remember("user", event.text);
         return;
@@ -2030,7 +2035,7 @@ export function createSummonsSession(opts: SummonsSessionOptions): SummonsSessio
 
     toggleMute: () => mic.toggleMute(),
 
-    typed(text) {
+    async typed(text) {
       const utterance = text.trim();
       if (stopped || !utterance) return;
       // Typing is conversation, so it re-arms the idle window: a Summons being typed at for an hour
@@ -2039,10 +2044,11 @@ export function createSummonsSession(opts: SummonsSessionOptions): SummonsSessio
       // Recorded before it is sent, so a turn that dies on the way out is still in the record.
       log.record({ type: "said", who: "user", text: utterance, channel: "typed" });
       opts.transport.sendUserText(utterance);
+      // Everything below is what a heard turn does, in the same order, because a typed turn is the
+      // same turn. No item id: the stale-utterance guard exists for transcription lag, and there is
+      // none — what was typed was typed now.
+      await gate.resolve(utterance, null);
       delegations.remember("user", utterance);
-      // Deliberately not offered to the confirm-gate: what releases a Guarded action is a *spoken*
-      // yes (ADR 0009), and widening that to a keystroke is a decision about the gate, not about
-      // typing. A typed "yes" reaches the agent, which says what it is still waiting for.
     },
 
     interrupt() {

@@ -117,7 +117,7 @@ describe("a Summons records what was said", () => {
     const { session, of } = summoned();
     await session.start();
 
-    session.typed("actually check ticket 3");
+    await session.typed("actually check ticket 3");
 
     expect(of("said")).toEqual([
       { type: "said", who: "user", text: "actually check ticket 3", channel: "typed" },
@@ -276,6 +276,34 @@ describe("a Summons records the confirm-gate and what it released", () => {
     expect(of("tool")[0]?.args).toContain("refactor auth");
     expect(of("tool")[0]?.result).toBeUndefined();
     expect(of("delegation")).toEqual([]);
+  });
+
+  // Typed or spoken is the same turn, so the answer that releases a Guarded action can be either.
+  // The mic is muted while you type, and a gate that only heard voices could not be answered at all.
+  test("a typed yes releases it, exactly as a spoken one does", async () => {
+    const { actions, launched } = fakeActions();
+    const { session, emit, of } = summoned({ actions });
+    await session.start();
+
+    await propose(emit, { task: "refactor auth", label: "the auth refactor" });
+    await session.typed("yes go ahead");
+
+    expect(of("gate")).toEqual([
+      { type: "gate", label: "the auth refactor", verdict: "confirmed", heard: "yes go ahead" },
+    ]);
+    expect(launched.map((r) => r.label)).toEqual(["the auth refactor"]);
+  });
+
+  test("and a typed no declines it, with nothing launched", async () => {
+    const { actions, launched } = fakeActions();
+    const { session, emit, of } = summoned({ actions });
+    await session.start();
+
+    await propose(emit, { task: "refactor auth", label: "the auth refactor" });
+    await session.typed("no, leave it");
+
+    expect(of("gate")[0]).toMatchObject({ verdict: "declined" });
+    expect(launched).toEqual([]);
   });
 
   test("the verdict is recorded with the words it was read from", async () => {

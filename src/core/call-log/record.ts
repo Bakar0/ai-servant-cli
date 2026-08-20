@@ -10,8 +10,9 @@ export type CallLogEntry =
   /**
    * An utterance, from either side. `channel` is how a user utterance arrived: absent means spoken,
    * which is what every utterance was before a Summons could be typed into, and what the great
-   * majority still are. A typed one was never heard, so it cannot have been mis-transcribed — worth
-   * telling apart when reading a conversation back.
+   * majority still are. It changes nothing about how the utterance was treated — a typed turn is
+   * the same turn — and is here only because a typed one was never heard, so a reader checking a
+   * conversation back knows it cannot have been mis-transcribed.
    */
   | { type: "said"; who: "user" | "servant"; text: string; channel?: "spoken" | "typed" }
   /**

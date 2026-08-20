@@ -47,7 +47,7 @@ export function formatCallLogEntry(entry: CallLogEntry): string[] {
         entry.outcome === "ok"
           ? formatDuration(entry.durationMs)
           : entry.outcome === "held"
-            ? `held — waiting on a spoken yes${entry.detail ? ` (${entry.detail})` : ""}`
+            ? `held — waiting on a yes${entry.detail ? ` (${entry.detail})` : ""}`
             : `failed — ${entry.detail ?? "no reason given"}`;
       return [toolLine("⚙", entry.name, entry.target, outcome)];
     }
