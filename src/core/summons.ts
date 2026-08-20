@@ -478,7 +478,7 @@ export interface TimerPort {
   clearTimeout(handle: unknown): void;
 }
 
-const realTimers: TimerPort = {
+export const realTimers: TimerPort = {
   now: () => Date.now(),
   setTimeout: (fn, ms) => setTimeout(fn, ms),
   clearTimeout: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
@@ -579,6 +579,15 @@ export interface SummonsSessionOptions {
    * default: an open mic there hears the agent and the conversation dies chewing on its own echo.
    */
   headphones?: boolean | undefined;
+  /**
+   * Whether the user may cut a reply off by talking over it. On by default.
+   *
+   * Turning it off is how you find out whether a reply that stops early was interrupted or died:
+   * with no interruption possible, a reply that still stops short stopped for some other reason.
+   * It also stands on its own for a room the echo detector reads badly — a reply that plays to its
+   * end every time is worth more than being able to talk over it.
+   */
+  bargeIn?: boolean | undefined;
   instructions: string;
   model?: string | undefined;
   voice?: string | undefined;
@@ -611,6 +620,12 @@ export interface SummonsSession {
    * running and a session muted and forgotten still hangs itself up.
    */
   toggleMute(): boolean;
+  /**
+   * Record something only the outside knows — an audio subsystem dying, say. Without this the Call
+   * log of a session killed by a dead speaker read as an ordinary hang-up, and the one line that
+   * explained it existed nowhere but the terminal it scrolled past in.
+   */
+  note(text: string, level?: "info" | "error"): void;
 }
 
 function requireString(args: Record<string, unknown>, key: string, tool: string): string {
@@ -1653,6 +1668,10 @@ function createMicGate(opts: SummonsSessionOptions, timers: TimerPort) {
     /** The user is talking over the agent — one path, whichever detector noticed. */
     interrupt(heardBy: BargeInHeardBy): void {
       settle();
+      if (opts.bargeIn === false) {
+        opts.onDebug?.(`echo: heard an interruption (${heardBy}), but barge-in is off`);
+        return;
+      }
       if (!playing) return;
       // A reply the model has finished generating has nothing left to cancel, and asking anyway is
       // an API error the user would be told about for no reason. The queued audio still has to go.
@@ -1968,6 +1987,8 @@ export function createSummonsSession(opts: SummonsSessionOptions): SummonsSessio
     },
 
     toggleMute: () => mic.toggleMute(),
+
+    note: (text, level = "error") => log.record({ type: "note", level, text }),
 
     // Only the controller knows why a session ended, and the record wants that — so the reason is
     // internal, and everyone outside is hanging up.

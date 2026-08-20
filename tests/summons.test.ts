@@ -1560,6 +1560,19 @@ describe("barging in on the agent", () => {
     expect(s.flushes).toEqual([]);
   });
 
+  test("with barge-in off nothing cuts a reply short, whichever half heard it", async () => {
+    const s = await agentTalking({ bargeIn: false });
+
+    // Loud enough, for long enough, that the detector would have cut in several times over...
+    frame(s, SPEECH, 8);
+    // ...and the server's own voice detection saying the same thing.
+    await s.emit({ type: "user_speaking", itemId: "utterance_9" });
+
+    expect(s.sent.cancelled).toBe(0);
+    expect(s.sent.truncated).toEqual([]);
+    expect(s.flushes).toEqual([]);
+  });
+
   test("a muted mic cannot barge in — that is the whole point of muting it", async () => {
     const s = await agentTalking();
     s.session.toggleMute();
