@@ -3,8 +3,9 @@ import type { AudioPort } from "./summons.ts";
 
 // Microphone and speaker for a Summons, built on two long-lived `sox` subprocesses. Chosen
 // over a native audio addon because servant ships as a compiled Bun single-file binary, which
-// native addons break (workspace ADR 0009). macOS-first; this is the seam's outside, verified by
-// hand rather than in the test suite.
+// native addons break (workspace ADR 0009). macOS-first; this is the seam's outside. What is handed
+// to `sox` and when is pinned by the suite through the spawn seam below; how it sounds coming out of
+// the device is verified by hand, because nothing else can.
 
 /** The Realtime API's wire format on a WebSocket: 24 kHz mono little-endian signed 16-bit PCM. */
 const SAMPLE_RATE = 24_000;
@@ -38,22 +39,73 @@ const CHUNK_BYTES = (SAMPLE_RATE / 5) * 2;
  */
 const SPEAKER_PRIME_BYTES = (SAMPLE_RATE / 1000) * 600 * 2;
 
+/** A `sox` recording the microphone: PCM on stdout, and a death worth reporting. */
+export interface RecorderProcess {
+  readonly stdout: ReadableStream<Uint8Array>;
+  readonly stderr: ReadableStream<Uint8Array>;
+  readonly exited: Promise<number>;
+  kill(): void;
+}
+
+/** A `sox` playing one reply: PCM in on stdin, ended to make it drain and exit. */
+export interface SpeakerProcess {
+  readonly stdin: { write(chunk: Uint8Array): unknown; end(): unknown };
+  readonly stderr: ReadableStream<Uint8Array>;
+  readonly exited: Promise<number>;
+  kill(): void;
+}
+
+/**
+ * The subprocess seam.
+ *
+ * Everything this module knows about audio quality is a claim about *what is handed to `sox` and
+ * when* — how much is behind the device before it opens, that a reply gets a speaker of its own,
+ * that stdin is closed rather than the process killed. All of that is checkable without a sound
+ * card; only the sound itself is not. So the spawn is injectable and the invariants are tested,
+ * while the device stays hand-verified.
+ */
+export interface AudioProcesses {
+  recorder(args: string[]): RecorderProcess;
+  speaker(args: string[]): SpeakerProcess;
+}
+
+/** The real thing: two long-lived `sox` subprocesses, with the tool resolved up front. */
+function soxProcesses(): AudioProcesses {
+  const sox = requireAudioTool((command) => Bun.which(command));
+  return {
+    recorder: (args) =>
+      Bun.spawn([sox, ...args], {
+        stdin: "ignore",
+        stdout: "pipe",
+        stderr: "pipe",
+      }) as unknown as RecorderProcess,
+    speaker: (args) =>
+      Bun.spawn([sox, ...args], {
+        stdin: "pipe",
+        stdout: "ignore",
+        stderr: "pipe",
+      }) as unknown as SpeakerProcess,
+  };
+}
+
 export interface SoxAudioOptions {
   /** Called when a `sox` process dies on its own — the session is deaf or mute from then on. */
   onFailure?: ((message: string) => void) | undefined;
   onDebug?: ((message: string) => void) | undefined;
+  /** Injected by the suite; the default resolves `sox` on PATH and fails preflight without it. */
+  processes?: AudioProcesses | undefined;
 }
 
 export function createSoxAudio(opts: SoxAudioOptions = {}): AudioPort {
-  const sox = requireAudioTool((command) => Bun.which(command));
-  let recorder: Bun.Subprocess<"ignore", "pipe", "pipe"> | null = null;
-  let speaker: Bun.Subprocess<"pipe", "ignore", "pipe"> | null = null;
+  const processes = opts.processes ?? soxProcesses();
+  let recorder: RecorderProcess | null = null;
+  let speaker: SpeakerProcess | null = null;
   /**
    * Every speaker not yet reaped, including ones left draining the end of a reply. Tracked because
    * `stop()` has to end their stdin and wait for them: an open FileSink and an unreaped child both
    * keep the process alive, and a `servant summon` that will not exit is worse than a silent one.
    */
-  const alive = new Set<Bun.Subprocess<"pipe", "ignore", "pipe">>();
+  const alive = new Set<SpeakerProcess>();
   let pump: Promise<void> | null = null;
   let stopping = false;
   /** The head of the current reply, held back only until there is enough of it to open with. */
@@ -66,7 +118,7 @@ export function createSoxAudio(opts: SoxAudioOptions = {}): AudioPort {
    */
   function watch(
     role: string,
-    proc: Bun.Subprocess<never, never, "pipe">,
+    proc: { stderr: ReadableStream<Uint8Array>; exited: Promise<number> },
     retired: () => boolean = () => false,
   ): void {
     void (async () => {
@@ -95,12 +147,8 @@ export function createSoxAudio(opts: SoxAudioOptions = {}): AudioPort {
    * at the end of a reply makes sox drain and exit, which is also what plays the last syllable that
    * the old input buffer used to hold back.
    */
-  function startSpeaker(primed: Buffer): Bun.Subprocess<"pipe", "ignore", "pipe"> {
-    const proc = Bun.spawn([sox, "-q", ...RAW_PCM_ARGS, "-", "-d"], {
-      stdin: "pipe",
-      stdout: "ignore",
-      stderr: "pipe",
-    });
+  function startSpeaker(primed: Buffer): SpeakerProcess {
+    const proc = processes.speaker(["-q", ...RAW_PCM_ARGS, "-", "-d"]);
     speaker = proc;
     alive.add(proc);
     void proc.exited.then(() => alive.delete(proc));
@@ -110,11 +158,7 @@ export function createSoxAudio(opts: SoxAudioOptions = {}): AudioPort {
     opts.onDebug?.(`speaker: started with ${(primed.length / 2 / SAMPLE_RATE).toFixed(2)}s primed`);
     // Exiting once its stdin is closed is the design, not a failure — so a speaker that is no
     // longer the current one is retired, and its exit is expected.
-    watch(
-      "speaker",
-      proc as unknown as Bun.Subprocess<never, never, "pipe">,
-      () => speaker !== proc,
-    );
+    watch("speaker", proc, () => speaker !== proc);
     return proc;
   }
 
@@ -161,13 +205,9 @@ export function createSoxAudio(opts: SoxAudioOptions = {}): AudioPort {
     startCapture(onChunk) {
       // `-d` records from the default input device. The mic stays open for the life of the session
       // — nothing is gated on a keypress, so the keyboard is never captured.
-      recorder = Bun.spawn([sox, "-q", "-d", ...RAW_PCM_ARGS, "-"], {
-        stdin: "ignore",
-        stdout: "pipe",
-        stderr: "pipe",
-      });
+      recorder = processes.recorder(["-q", "-d", ...RAW_PCM_ARGS, "-"]);
       opts.onDebug?.("mic: recorder started");
-      watch("microphone", recorder as unknown as Bun.Subprocess<never, never, "pipe">);
+      watch("microphone", recorder);
       pump = drainMic(recorder.stdout, onChunk).catch((err: unknown) => {
         if (!stopping) opts.onFailure?.(`the microphone stream failed: ${String(err)}`);
       });
