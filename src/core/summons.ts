@@ -1779,15 +1779,22 @@ function createMicGate(opts: SummonsSessionOptions, timers: TimerPort) {
         opts.onDebug?.(`echo: heard an interruption (${heardBy}), but barge-in is off`);
         return false;
       }
-      // Either half is enough: a reply still being generated is cancellable before a syllable of it
-      // has reached the room, and queued audio outlives the generating by however long it plays.
-      //
-      // This widened for all three sources, not just the keyboard. `Esc` is what made the gap
-      // visible, but it was always there: a reply the server had begun and not yet spoken could be
-      // interrupted by nothing at all, and the answer to a turn the user had already moved past
-      // arrived anyway. Every interruption is decided here (ADR-009), so treating one source
-      // specially in this window would be the strange choice, not the consistent one.
-      if (!playing && !generating) return false;
+      /**
+       * A reply nobody has heard yet can only be cancelled from the keyboard.
+       *
+       * There are two windows. Once audio is queued, any source may cut in — that is barge-in as it
+       * has always been. Before the first syllable reaches the room the reply is still cancellable,
+       * and `Esc` (or a typed turn, which has to cancel or the API refuses its ask) must be able to,
+       * because a person who has changed their mind should not have to wait to be spoken to first.
+       *
+       * The two detectors must not. Both *guess* whether a person is talking, and the gap between
+       * "the user stopped speaking" and "the first audio delta" is a gap with the mic wide open and
+       * nothing queued to hold it shut — so a breath, a chair, or the user's own trailing word trips
+       * the server's voice detection and kills the answer to the question they just asked. Observed
+       * live: ask a question, get silence. A guess may interrupt something the user can hear and
+       * judge; it may not silently discard a reply they never got.
+       */
+      if (!playing && !(generating && heardBy === "the keyboard")) return false;
       // A reply the model has finished generating has nothing left to cancel, and asking anyway is
       // an API error the user would be told about for no reason. The queued audio still has to go.
       if (generating) opts.transport.cancelResponse();

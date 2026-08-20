@@ -1727,6 +1727,26 @@ describe("barging in on the agent", () => {
     expect(s.sent.truncated).toEqual([]);
   });
 
+  // The regression this exists to stop, found in a live run. Between the user's last word and the
+  // reply's first syllable the mic is wide open and nothing is queued to hold it shut, so a breath
+  // or a chair trips the server's voice detection — and a guess must never silently discard a reply
+  // the user has not heard a word of. Ask a question, get silence, with nothing in the log to say
+  // why.
+  test("a guess cannot kill a reply before it has been heard — only the keyboard can", async () => {
+    const s = await audioSession();
+    await s.emit({ type: "reply_started" });
+
+    // Both detectors, saying the same thing they say when somebody clears their throat.
+    await s.emit({ type: "user_speaking", itemId: "utterance_2" });
+    frame(s, SPEECH, 4);
+
+    expect(s.sent.cancelled).toBe(0);
+
+    // ...and the keyboard, which is not a guess, still cancels the same reply.
+    expect(s.session.interrupt()).toBe(true);
+    expect(s.sent.cancelled).toBe(1);
+  });
+
   test("a reply the server has finished is not cancelled twice over", async () => {
     const s = await audioSession();
     await s.emit({ type: "reply_started" });
