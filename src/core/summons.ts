@@ -579,6 +579,15 @@ export interface SummonsSessionOptions {
    * default: an open mic there hears the agent and the conversation dies chewing on its own echo.
    */
   headphones?: boolean | undefined;
+  /**
+   * Whether the user may cut a reply off by talking over it. On by default.
+   *
+   * Turning it off is how you find out whether a reply that stops early was interrupted or died:
+   * with no interruption possible, a reply that still stops short stopped for some other reason.
+   * It also stands on its own for a room the echo detector reads badly — a reply that plays to its
+   * end every time is worth more than being able to talk over it.
+   */
+  bargeIn?: boolean | undefined;
   instructions: string;
   model?: string | undefined;
   voice?: string | undefined;
@@ -1659,6 +1668,10 @@ function createMicGate(opts: SummonsSessionOptions, timers: TimerPort) {
     /** The user is talking over the agent — one path, whichever detector noticed. */
     interrupt(heardBy: BargeInHeardBy): void {
       settle();
+      if (opts.bargeIn === false) {
+        opts.onDebug?.(`echo: heard an interruption (${heardBy}), but barge-in is off`);
+        return;
+      }
       if (!playing) return;
       // A reply the model has finished generating has nothing left to cancel, and asking anyway is
       // an API error the user would be told about for no reason. The queued audio still has to go.

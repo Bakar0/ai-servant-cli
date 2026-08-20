@@ -101,6 +101,13 @@ export const summonCommand = defineCommand({
       description:
         "You are on headphones, so the agent cannot hear itself. Keeps the mic open through its replies, which lets it be interrupted the instant you start speaking. On speakers this must stay off: an open mic there hears the agent and it interrupts itself.",
     },
+    "no-barge-in": {
+      type: "boolean",
+      required: false,
+      default: false,
+      description:
+        "Never cut a reply off, however loud the room gets. Replies always play to the end and talking over one does nothing. Use it to tell an interrupted reply from a broken one, or in a room the echo detector reads badly.",
+    },
     debug: {
       type: "boolean",
       required: false,
@@ -190,6 +197,7 @@ export const summonCommand = defineCommand({
       filing: hub,
       audio,
       headphones: args.headphones,
+      bargeIn: !args["no-barge-in"],
       callLog: teeCallLog([callLog.port, live]),
       instructions: composeSummonsInstructions(snapshot, briefing),
       model: args.model,
@@ -221,6 +229,7 @@ export const summonCommand = defineCommand({
       `servant: talking about workspace "${workspace}" (${scope.label}) — ${snapshot.tickets.length} open ticket(s).\n` +
         `  Call log: ${callLog.path}\n` +
         `  Echo gate: ${args.headphones ? "off (headphones) — talk over it any time" : "on (speakers) — start talking to cut it off"}\n` +
+        (args["no-barge-in"] ? "  Barge-in: off — replies always play to the end\n" : "") +
         "  The mic is open; just start speaking. m to mute, Ctrl-C to hang up.\n",
     );
 
