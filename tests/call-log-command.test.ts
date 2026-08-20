@@ -122,6 +122,43 @@ describe("servant call-log", () => {
     expect(parsed.records.length).toBeGreaterThan(0);
   });
 
+  // Every field the Summons view needed is optional for exactly this reason: a record written
+  // before those fields existed is still a record, and reading one back must not fail.
+  test("reads back a Summons recorded before tool arguments, results and numbers existed", async () => {
+    const id = "legacy-20260401-090000";
+    const lines = [
+      {
+        type: "opened",
+        at: "2026-04-01T09:00:00.000Z",
+        id,
+        workspace: "legacy",
+        scope: "workspace legacy",
+        model: "gpt-realtime",
+        voice: "marin",
+      },
+      { type: "said", at: "2026-04-01T09:00:10.000Z", who: "user", text: "read the goal" },
+      {
+        type: "tool",
+        at: "2026-04-01T09:00:11.000Z",
+        name: "read_file",
+        target: "GOAL.md",
+        outcome: "ok",
+        durationMs: 12,
+      },
+      { type: "ended", at: "2026-04-01T09:01:00.000Z", reason: "hung up" },
+    ];
+    await Bun.write(
+      join(root, "call-logs", `${id}.jsonl`),
+      lines.map((line) => JSON.stringify(line)).join("\n") + "\n",
+    );
+
+    await runCommand(callLogCommand, { rawArgs: [id, "--no-open"] });
+
+    const path = printed.at(-1) ?? "";
+    expect(path).toBe(join(root, "call-logs", "rendered", `${id}.html`));
+    expect(await Bun.file(path).text()).toContain("read the goal");
+  });
+
   test("refuses to guess when the reference matches nothing", async () => {
     await expect(runCommand(callLogCommand, { rawArgs: ["no-such-log"] })).rejects.toThrow(
       /No Call log matching/,

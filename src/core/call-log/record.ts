@@ -7,12 +7,24 @@
 
 /** A moment in a Summons, as the controller reports it. The `at` stamp is added by the adapter. */
 export type CallLogEntry =
-  /** An utterance, from either side. */
-  | { type: "said"; who: "user" | "servant"; text: string }
+  /**
+   * An utterance, from either side. `channel` is how a user utterance arrived: absent means spoken,
+   * which is what every utterance was before a Summons could be typed into, and what the great
+   * majority still are. A typed one was never heard, so it cannot have been mis-transcribed — worth
+   * telling apart when reading a conversation back.
+   */
+  | { type: "said"; who: "user" | "servant"; text: string; channel?: "spoken" | "typed" }
   /**
    * A tool the Summons agent called. `target` is the one thing worth reading at a glance — the
-   * path, the pattern, the label — so the live view has something to show without unpacking args.
+   * path, the pattern, the label — so a line view has something to show without unpacking args.
    * `held` is `delegate` reaching the confirm-gate: proposed, and deliberately not run.
+   *
+   * `number` is the call's address within its Summons — what `/tool 7` asks for. `args` and
+   * `result` are what opening it up shows. `result` is absent for the tools that answer their own
+   * call: what they sent is recorded as an entry of its own — a `delegation`, a `steer`, a `gate`,
+   * a `hands` — which says more than the answer did, so duplicating it here would only mean two
+   * versions of one thing. All three are optional, so a record written before they existed is
+   * still a record.
    */
   | {
       type: "tool";
@@ -21,6 +33,9 @@ export type CallLogEntry =
       outcome: "ok" | "error" | "held";
       detail?: string;
       durationMs: number;
+      number?: number;
+      args?: string;
+      result?: string;
     }
   /** The confirm-gate's verdict on a held delegation, and the words it was read from. */
   | { type: "gate"; label: string; verdict: "confirmed" | "declined" | "unclear"; heard: string }
@@ -168,6 +183,29 @@ export function redactSecrets(text: string): string {
   );
   for (const shape of SECRET_SHAPES) out = out.replace(shape, REDACTED);
   return out;
+}
+
+/**
+ * The most of one tool call's arguments or answer the record keeps.
+ *
+ * `read_file` on a large file answers with the whole of it, and every Call log is parsed in full to
+ * list it — so an uncapped answer is paid for on every read of every record, for a tail nobody
+ * reads. Generous enough that a real answer arrives whole.
+ */
+export const RECORDED_TEXT_LIMIT = 4_000;
+
+/**
+ * Prepare one tool call's arguments or answer for the record: scrubbed, then cut short.
+ *
+ * In that order, and that is the reason this exists rather than leaving the scrubbing to the
+ * adapters as everything else does — a secret cut in half no longer matches the shape that would
+ * have caught it, so cutting first would smuggle the front half of a key onto the disk.
+ */
+export function recordedText(text: string): string {
+  const clean = redactSecrets(text);
+  if (clean.length <= RECORDED_TEXT_LIMIT) return clean;
+  const dropped = clean.length - RECORDED_TEXT_LIMIT;
+  return `${clean.slice(0, RECORDED_TEXT_LIMIT)}… (${dropped} more characters)`;
 }
 
 /**

@@ -2,7 +2,12 @@
 // single seam the feature is tested at — the Realtime socket, the sox audio pipes and the
 // filesystem all sit outside it as injected ports (see workspace ADR 0009).
 
-import { type CallLogEndReason, type CallLogPort, NULL_CALL_LOG } from "./call-log/record.ts";
+import {
+  type CallLogEndReason,
+  type CallLogPort,
+  NULL_CALL_LOG,
+  recordedText,
+} from "./call-log/record.ts";
 import { classifyConfirmation } from "./summons-confirm.ts";
 import {
   composeSteerMessage,
@@ -441,6 +446,12 @@ export interface RealtimeTransport {
    */
   truncateAudio(itemId: string, playedMs: number): void;
   /**
+   * A typed utterance, as an ordinary user turn — and a reply asked for, which is the whole
+   * difference from `sendAgentNote`. Nothing was heard, so no voice-activity detection has started
+   * a reply for this to steer; without asking, a typed line sits in the conversation unanswered.
+   */
+  sendUserText(text: string): void;
+  /**
    * Put a note from the controller into the conversation, for things the agent must say that no
    * tool call is waiting on — above all the verdict of the confirm-gate, which the controller
    * decides after the tool call has already been answered.
@@ -620,6 +631,18 @@ export interface SummonsSession {
    * running and a session muted and forgotten still hangs itself up.
    */
   toggleMute(): boolean;
+  /**
+   * A typed utterance: the same turn a spoken one is, answered in voice like any other. Blank
+   * input is not a turn, and the mic is left exactly as the user set it — muting is theirs alone,
+   * so typing neither opens nor closes it.
+   */
+  typed(text: string): void;
+  /**
+   * Cut the reply off from the keyboard — `Esc`. The third barge-in source, and the only one that
+   * is not a guess about whether a person is talking, so it is obeyed even with barge-in switched
+   * off. Nothing playing, nothing happens.
+   */
+  interrupt(): void;
   /**
    * Record something only the outside knows — an audio subsystem dying, say. Without this the Call
    * log of a session killed by a dead speaker read as an ordinary hang-up, and the one line that
@@ -1519,8 +1542,11 @@ function createSteering(opts: SummonsSessionOptions, gate: Gate, timers: TimerPo
   return { steer, stop };
 }
 
-/** Which half of the subsystem noticed the interruption, as the Call log reports it. */
-type BargeInHeardBy = "over the speakers" | "the model's voice detection";
+/**
+ * Which of the three noticed the interruption, as the Call log reports it. Two are guesses about
+ * whether a person is talking; the keyboard is not, which is the whole reason they are told apart.
+ */
+type BargeInHeardBy = "over the speakers" | "the model's voice detection" | "the keyboard";
 
 /**
  * The half-duplex subsystem: what reaches the model's ears, and what happens when the user talks
@@ -1668,7 +1694,9 @@ function createMicGate(opts: SummonsSessionOptions, timers: TimerPort) {
     /** The user is talking over the agent — one path, whichever detector noticed. */
     interrupt(heardBy: BargeInHeardBy): void {
       settle();
-      if (opts.bargeIn === false) {
+      // `--no-barge-in` suppresses the two detectors that guess, and only those: a keypress is
+      // explicit intent, and a flag about how eagerly a room is listened to has no say over it.
+      if (opts.bargeIn === false && heardBy !== "the keyboard") {
         opts.onDebug?.(`echo: heard an interruption (${heardBy}), but barge-in is off`);
         return;
       }
@@ -1693,7 +1721,12 @@ function createMicGate(opts: SummonsSessionOptions, timers: TimerPort) {
       log.record({
         type: "note",
         level: "info",
-        text: `The user talked over the reply and it was cut off (${heardBy}).`,
+        // Nobody talked over anything when the interruption came from a key, and a log that says
+        // they did reads as the echo detector having fired.
+        text:
+          heardBy === "the keyboard"
+            ? "The reply was cut off from the keyboard."
+            : `The user talked over the reply and it was cut off (${heardBy}).`,
       });
     },
 
@@ -1746,6 +1779,8 @@ export function createSummonsSession(opts: SummonsSessionOptions): SummonsSessio
   const mic = createMicGate(opts, timers);
   let idleHandle: unknown = null;
   let stopped = false;
+  /** Numbers already handed out, so the next call gets one no earlier call had. */
+  let toolCalls = 0;
   /** The utterance the server is currently hearing — the gate's evidence of what came from where. */
   let lastUserItemId: string | null = null;
 
@@ -1819,16 +1854,22 @@ export function createSummonsSession(opts: SummonsSessionOptions): SummonsSessio
   async function handleToolCall(call: Extract<RealtimeInbound, { type: "tool_call" }>) {
     const startedAt = timers.now();
     // Every tool call is recorded, whatever it did — the point of the Call log is that nothing the
-    // agent does on the user's behalf happens invisibly.
-    const recordCall = ({ outcome, detail }: ToolOutcome) =>
+    // agent does on the user's behalf happens invisibly. `result` reaches this only from the calls
+    // the controller answers itself; the rest is explained on the entry kind.
+    const recordCall = ({ outcome, detail }: ToolOutcome, result?: string) => {
+      toolCalls += 1;
       log.record({
         type: "tool",
         name: call.name,
         target: toolTarget(call.name, call.args),
         outcome,
         durationMs: timers.now() - startedAt,
+        number: toolCalls,
+        ...(call.args ? { args: recordedText(call.args) } : {}),
         ...(detail ? { detail } : {}),
+        ...(result === undefined ? {} : { result: recordedText(result) }),
       });
+    };
 
     // The Hands session is recorded as a `hands` entry rather than a `tool` one: what was asked and
     // what came back *is* the record of the call, and the round trip is the only trace a session
@@ -1876,9 +1917,10 @@ export function createSummonsSession(opts: SummonsSessionOptions): SummonsSessio
     } catch (err) {
       result = { error: err instanceof Error ? err.message : String(err) };
     }
-    opts.transport.sendToolResult(call.callId, JSON.stringify(result));
+    const output = JSON.stringify(result);
+    opts.transport.sendToolResult(call.callId, output);
     const failure = typeof result.error === "string" ? result.error : null;
-    recordCall(failure ? { outcome: "error", detail: failure } : { outcome: "ok" });
+    recordCall(failure ? { outcome: "error", detail: failure } : { outcome: "ok" }, output);
   }
 
   async function stop(reason: CallLogEndReason = "hung up"): Promise<void> {
@@ -1987,6 +2029,27 @@ export function createSummonsSession(opts: SummonsSessionOptions): SummonsSessio
     },
 
     toggleMute: () => mic.toggleMute(),
+
+    typed(text) {
+      const utterance = text.trim();
+      if (stopped || !utterance) return;
+      // Typing is conversation, so it re-arms the idle window: a Summons being typed at for an hour
+      // with the mic muted is not a Summons that has been abandoned.
+      markActive();
+      // Recorded before it is sent, so a turn that dies on the way out is still in the record.
+      log.record({ type: "said", who: "user", text: utterance, channel: "typed" });
+      opts.transport.sendUserText(utterance);
+      delegations.remember("user", utterance);
+      // Deliberately not offered to the confirm-gate: what releases a Guarded action is a *spoken*
+      // yes (ADR 0009), and widening that to a keystroke is a decision about the gate, not about
+      // typing. A typed "yes" reaches the agent, which says what it is still waiting for.
+    },
+
+    interrupt() {
+      // Guarded like `typed`: a key pressed after the hang-up would otherwise put a barge-in in the
+      // record below the line that says the Summons ended.
+      if (!stopped) mic.interrupt("the keyboard");
+    },
 
     note: (text, level = "error") => log.record({ type: "note", level, text }),
 

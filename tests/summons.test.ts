@@ -27,6 +27,7 @@ function fakeTransport() {
     audioSent: [] as string[],
     toolResults: [] as { callId: string; output: string }[],
     notes: [] as string[],
+    userTexts: [] as string[],
     cancelled: 0,
     truncated: [] as { itemId: string; playedMs: number }[],
     closed: false,
@@ -50,6 +51,9 @@ function fakeTransport() {
     },
     sendAgentNote(text) {
       state.notes.push(text);
+    },
+    sendUserText(text) {
+      state.userTexts.push(text);
     },
     async close() {
       state.closed = true;
@@ -1039,6 +1043,52 @@ describe("summons audio", () => {
   });
 });
 
+describe("typing to a Summons", () => {
+  test("a typed utterance reaches the model as an ordinary user turn", async () => {
+    const s = await audioSession();
+
+    s.session.typed("actually check ticket 3");
+
+    expect(s.sent.userTexts).toEqual(["actually check ticket 3"]);
+  });
+
+  test("an empty line is not a turn", async () => {
+    const s = await audioSession();
+
+    s.session.typed("   ");
+
+    expect(s.sent.userTexts).toEqual([]);
+  });
+
+  // The point of typing is a muted mic and a keyboard, so typing must work with the mic shut — and
+  // must not open it again, since mute is the user's to change and nothing else's.
+  test("typing leaves the mic exactly as the user set it", async () => {
+    const s = await audioSession();
+
+    s.session.typed("one");
+    s.advance(200);
+    s.mic(micChunk(200, 3_000));
+    expect(s.sent.audioSent).toHaveLength(1);
+
+    s.session.toggleMute();
+    s.session.typed("two");
+    s.advance(200);
+    s.mic(micChunk(200, 3_000));
+
+    expect(s.sent.audioSent).toHaveLength(1);
+    expect(s.sent.userTexts).toEqual(["one", "two"]);
+  });
+
+  test("a Summons that has hung up cannot be typed to", async () => {
+    const s = await audioSession();
+    await s.session.stop();
+
+    s.session.typed("hello?");
+
+    expect(s.sent.userTexts).toEqual([]);
+  });
+});
+
 describe("summons idle hang-up", () => {
   /** Let the controller's async teardown settle after the timer fires. */
   const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
@@ -1131,6 +1181,15 @@ describe("summons idle hang-up", () => {
     fire();
     await settle();
     expect(sent.closed).toBe(true);
+  });
+
+  test("typing re-arms the window — a Summons being typed at is not silent", async () => {
+    const { session, armed } = build(180_000);
+    await session.start();
+
+    session.typed("still here");
+
+    expect(armed.armedFor).toEqual([180_000, 180_000]);
   });
 
   test("an idle timeout of zero leaves the session open indefinitely", async () => {
@@ -1252,6 +1311,7 @@ describe("a session that dies while it is still starting", () => {
       truncateAudio() {},
       sendToolResult() {},
       sendAgentNote() {},
+      sendUserText() {},
       async close() {
         events.push("socket-closed");
       },
@@ -1280,6 +1340,7 @@ describe("a session that dies while it is still starting", () => {
       truncateAudio() {},
       sendToolResult() {},
       sendAgentNote() {},
+      sendUserText() {},
       async close() {
         events.push("socket-closed");
       },
@@ -1567,6 +1628,43 @@ describe("barging in on the agent", () => {
     frame(s, SPEECH, 8);
     // ...and the server's own voice detection saying the same thing.
     await s.emit({ type: "user_speaking", itemId: "utterance_9" });
+
+    expect(s.sent.cancelled).toBe(0);
+    expect(s.sent.truncated).toEqual([]);
+    expect(s.flushes).toEqual([]);
+  });
+
+  test("Esc cuts the reply off, exactly as a voice barge-in does", async () => {
+    const s = await agentTalking();
+    s.advance(300);
+
+    s.session.interrupt();
+
+    expect(s.sent.cancelled).toBe(1);
+    expect(s.sent.truncated).toEqual([{ itemId: "item_1", playedMs: 300 }]);
+    expect(s.flushes).toHaveLength(1);
+  });
+
+  // The sibling of the test above it. `--no-barge-in` suppresses *guesses* about whether a person
+  // is talking, and a keypress is not a guess — so it is the one source the flag does not reach.
+  test("the keyboard is obeyed with barge-in off, unlike either detector", async () => {
+    const s = await agentTalking({ bargeIn: false });
+
+    frame(s, SPEECH, 8);
+    await s.emit({ type: "user_speaking", itemId: "utterance_9" });
+    expect(s.sent.cancelled).toBe(0);
+
+    s.session.interrupt();
+
+    expect(s.sent.cancelled).toBe(1);
+    expect(s.sent.truncated).toHaveLength(1);
+    expect(s.flushes).toHaveLength(1);
+  });
+
+  test("Esc with nothing playing cuts nothing off", async () => {
+    const s = await audioSession();
+
+    s.session.interrupt();
 
     expect(s.sent.cancelled).toBe(0);
     expect(s.sent.truncated).toEqual([]);

@@ -2,7 +2,7 @@
 // in, a fake Call log port out. No socket, no disk, no terminal.
 
 import { describe, expect, test } from "bun:test";
-import type { CallLogEntry } from "../src/core/call-log/record.ts";
+import { type CallLogEntry, RECORDED_TEXT_LIMIT } from "../src/core/call-log/record.ts";
 import {
   type DelegationRequest,
   type RealtimeInbound,
@@ -25,6 +25,7 @@ function fakeTransport() {
     truncateAudio() {},
     sendToolResult() {},
     sendAgentNote() {},
+    sendUserText() {},
     async close() {},
   };
   return { transport, emit: (event: RealtimeInbound) => emit(event) };
@@ -112,6 +113,17 @@ describe("a Summons records what was said", () => {
     ]);
   });
 
+  test("a typed utterance is an utterance, and says which channel it arrived on", async () => {
+    const { session, of } = summoned();
+    await session.start();
+
+    session.typed("actually check ticket 3");
+
+    expect(of("said")).toEqual([
+      { type: "said", who: "user", text: "actually check ticket 3", channel: "typed" },
+    ]);
+  });
+
   test("nothing at all when the Summons was given no Call log", async () => {
     const { transport, emit } = fakeTransport();
     const session = createSummonsSession({
@@ -133,8 +145,44 @@ describe("a Summons records every tool it calls", () => {
     await emit(call("read_file", { path: "GOAL.md" }));
 
     expect(of("tool")).toEqual([
-      { type: "tool", name: "read_file", target: "GOAL.md", outcome: "ok", durationMs: 10 },
+      {
+        type: "tool",
+        name: "read_file",
+        target: "GOAL.md",
+        outcome: "ok",
+        durationMs: 10,
+        number: 1,
+        args: '{"path":"GOAL.md"}',
+        result: '{"content":"contents of GOAL.md"}',
+      },
     ]);
+  });
+
+  // The line view shows `target` and nothing else, so without these there is nothing to open a
+  // call up to — and a Summons whose answers are gone is a Summons you cannot check up on.
+  test("with the arguments it was given and the answer that came back", async () => {
+    const { session, emit, of } = summoned();
+    await session.start();
+
+    await emit(call("grep", { pattern: "createSummonsSession", glob: "src/**" }, "call_g"));
+
+    expect(of("tool")[0]).toMatchObject({
+      args: '{"pattern":"createSummonsSession","glob":"src/**"}',
+      result: '{"matches":["GOAL.md:3: ship the thing"]}',
+    });
+  });
+
+  // `/tool 7` is how a person asks to see one of these in full, so the number is the address and
+  // has to be handed out in the order the calls were recorded.
+  test("and a number of its own, counted per Summons", async () => {
+    const { session, emit, of } = summoned();
+    await session.start();
+
+    await emit(call("read_file", { path: "GOAL.md" }));
+    await emit(call("glob", { pattern: "docs/**" }, "call_2"));
+    await emit(call("read_file", { path: "CONTEXT.md" }, "call_3"));
+
+    expect(of("tool").map((t) => t.number)).toEqual([1, 2, 3]);
   });
 
   test("including the pattern a search ran, not just that a search ran", async () => {
@@ -159,7 +207,48 @@ describe("a Summons records every tool it calls", () => {
 
     await emit(call("read_file", { path: "nope.md" }));
 
-    expect(of("tool")[0]).toMatchObject({ outcome: "error", detail: "no such file" });
+    expect(of("tool")[0]).toMatchObject({
+      outcome: "error",
+      detail: "no such file",
+      args: '{"path":"nope.md"}',
+      result: '{"error":"no such file"}',
+    });
+  });
+
+  // Redacted at the call site, not left to the adapters: a long answer is cut down before it is
+  // recorded, and a secret cut in half no longer looks like one to anything downstream.
+  test("with anything key-shaped scrubbed out of the answer before it is recorded", async () => {
+    const { session, emit, of } = summoned({
+      reader: fakeReader({
+        async readFile() {
+          return "OPENAI_API_KEY=sk-proj-abc123DEF456ghi789JKL012mno345";
+        },
+      }),
+    });
+    await session.start();
+
+    await emit(call("read_file", { path: ".env" }));
+
+    expect(of("tool")[0]?.result).not.toContain("sk-proj-");
+    expect(of("tool")[0]?.result).toContain("[redacted]");
+  });
+
+  // `read_file` on a large file answers with the whole of it. See `RECORDED_TEXT_LIMIT`.
+  test("with a very long answer cut short, saying how much was dropped", async () => {
+    const { session, emit, of } = summoned({
+      reader: fakeReader({
+        async readFile() {
+          return "x".repeat(RECORDED_TEXT_LIMIT * 2);
+        },
+      }),
+    });
+    await session.start();
+
+    await emit(call("read_file", { path: "big.md" }));
+
+    const result = of("tool")[0]?.result ?? "";
+    expect(result.length).toBeLessThan(RECORDED_TEXT_LIMIT + 100);
+    expect(result).toContain("more characters");
   });
 
   test("even when the arguments were unreadable", async () => {
@@ -183,6 +272,9 @@ describe("a Summons records the confirm-gate and what it released", () => {
     await propose(emit, { task: "refactor auth", label: "the auth refactor" });
 
     expect(of("tool")[0]).toMatchObject({ name: "delegate", outcome: "held" });
+    // What was proposed is on the record; a result is not, because nothing ran to produce one.
+    expect(of("tool")[0]?.args).toContain("refactor auth");
+    expect(of("tool")[0]?.result).toBeUndefined();
     expect(of("delegation")).toEqual([]);
   });
 
@@ -440,6 +532,31 @@ describe("a Summons records the things a listener could not have inferred", () =
         .map((n) => n.text)
         .join(" "),
     ).toContain("talked over");
+  });
+
+  // A reply cut off from the keyboard was not talked over, and a log that says it was reads as the
+  // echo detector having fired — which is the thing `--no-barge-in` exists to rule out.
+  test("a reply cut off from the keyboard says the keyboard did it", async () => {
+    const { session, emit, of } = summoned({
+      bargeIn: false,
+      audio: {
+        async startCapture() {},
+        play() {},
+        flush() {},
+        endReply() {},
+        async stop() {},
+      },
+    });
+    await session.start();
+
+    await emit({ type: "audio", pcm: Buffer.alloc(48_000).toString("base64"), itemId: "item_1" });
+    session.interrupt();
+
+    const notes = of("note")
+      .map((n) => n.text)
+      .join(" ");
+    expect(notes).toContain("keyboard");
+    expect(notes).not.toContain("talked over");
   });
 
   test("the ticket it filed, and where to find it", async () => {

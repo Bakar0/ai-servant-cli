@@ -348,9 +348,27 @@ export function createOpenAiRealtimeTransport(
       send({ type: "response.create" });
     },
 
-    // No `response.create` here, unlike a tool result: a note is only ever sent just after the user
-    // spoke, and voice-activity detection has already started a reply to that. Asking for a second
-    // one would collide with it; the note lands in the conversation and steers the reply instead.
+    // A user turn, and a `response.create` unlike `sendAgentNote` below: nothing has been heard,
+    // so no voice-activity detection has started a reply — without asking, a typed line would sit
+    // in the conversation unanswered.
+    //
+    // Which makes this the wrong thing to send *during* a reply, where the second ask is refused:
+    // whoever wires a key to it has to decide what typing over a reply means (servant-summon#8).
+    sendUserText(text) {
+      send({
+        type: "conversation.item.create",
+        item: {
+          type: "message",
+          role: "user",
+          content: [{ type: "input_text", text }],
+        },
+      });
+      send({ type: "response.create" });
+    },
+
+    // No `response.create` here, unlike a tool result or a typed turn: a note is only ever sent
+    // just after the user spoke, and voice-activity detection has already started a reply to that.
+    // Asking for a second one would collide with it; the note steers the reply instead.
     sendAgentNote(text) {
       send({
         type: "conversation.item.create",

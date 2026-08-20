@@ -340,3 +340,48 @@ describe("hanging up", () => {
     expect(fake.socket.closed).toBe(true);
   });
 });
+
+describe("a typed utterance", () => {
+  test("goes in as a user turn and asks for the reply out loud", async () => {
+    const { fake, transport, connected } = connectFake();
+    fake.fire("open");
+    await connected;
+    const from = fake.sent.length;
+
+    transport.sendUserText("actually check ticket 3");
+
+    expect(fake.sent.slice(from)).toEqual([
+      {
+        type: "conversation.item.create",
+        item: {
+          type: "message",
+          role: "user",
+          content: [{ type: "input_text", text: "actually check ticket 3" }],
+        },
+      },
+      { type: "response.create" },
+    ]);
+  });
+
+  // The distinction the two primitives exist for: a note lands in a reply already under way, so
+  // asking for a second one would collide with it. A typed turn has no reply coming.
+  test("a note is the other thing — a system message, and no reply asked for", async () => {
+    const { fake, transport, connected } = connectFake();
+    fake.fire("open");
+    await connected;
+    const from = fake.sent.length;
+
+    transport.sendAgentNote("the user said yes");
+
+    expect(fake.sent.slice(from)).toEqual([
+      {
+        type: "conversation.item.create",
+        item: {
+          type: "message",
+          role: "system",
+          content: [{ type: "input_text", text: "the user said yes" }],
+        },
+      },
+    ]);
+  });
+});
