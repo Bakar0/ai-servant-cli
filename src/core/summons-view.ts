@@ -152,7 +152,7 @@ type ToolEntry = Extract<CallLogEntry, { type: "tool" }>;
  * One tool call, in full.
  *
  * `result` is absent for the tools that answer their own call — `delegate`, `research`,
- * `steer_session`, `stop_session`, `file_ticket`. Each of those leaves a richer entry of its own a
+ * `message_session`, `stop_session`, `file_ticket`. Each of those leaves a richer entry of its own a
  * line below (a `delegation`, a `steer`, a `gate`), so what it answered is already on screen and in
  * the record; threading a copy of it out through ~20 return sites would buy the view a second
  * version of something it can already see. So this says where the answer is instead.

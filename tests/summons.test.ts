@@ -231,9 +231,9 @@ describe("summons startup", () => {
       "glob",
       "grep",
       "list_sessions",
+      "message_session",
       "read_file",
       "research",
-      "steer_session",
       "stop_session",
     ]);
   });
@@ -2306,13 +2306,13 @@ describe("steering a running session", () => {
     emit: (e: RealtimeInbound) => Promise<void>,
     args: Record<string, unknown>,
     callId = "st1",
-  ) => emit({ type: "tool_call", callId, name: "steer_session", args: JSON.stringify(args) });
+  ) => emit({ type: "tool_call", callId, name: "message_session", args: JSON.stringify(args) });
 
   test("the steering tools are offered once there is a relay and a registry to resolve against", async () => {
     const { state } = await summoned();
 
     const names = (state.spec?.tools ?? []).map((t) => t.name);
-    expect(names).toContain("steer_session");
+    expect(names).toContain("message_session");
     expect(names).toContain("stop_session");
   });
 
@@ -2326,7 +2326,7 @@ describe("steering a running session", () => {
     }).start();
 
     const names = (state.spec?.tools ?? []).map((t) => t.name);
-    expect(names).not.toContain("steer_session");
+    expect(names).not.toContain("message_session");
     expect(names).not.toContain("stop_session");
   });
 
@@ -2454,51 +2454,47 @@ describe("which sessions a Summons may steer", () => {
     emit: (e: RealtimeInbound) => Promise<void>,
     args: Record<string, unknown>,
     callId = "st1",
-  ) => emit({ type: "tool_call", callId, name: "steer_session", args: JSON.stringify(args) });
+  ) => emit({ type: "tool_call", callId, name: "message_session", args: JSON.stringify(args) });
 
   const worker = (name: string, ticket: number) => ({ name, kind: "worker" as const, ticket });
 
-  // AC 4. A session the user started by hand carries no ticket, so nothing says it is theirs to
-  // redirect — it is nameable and deliberately not addressable.
-  test("a session holding no Claim is not addressable, and the agent is told why", async () => {
-    const { state, emit, asked } = await harness([
-      { name: "demo-scratch", kind: "other", ticket: null },
-    ]);
+  // The fence is the workspace, not the Claim (ADR 0010 decision 9, as amended). These four used to
+  // assert the opposite, and a live run showed what that cost: a session named `<ws>-t128`, running
+  // here and carrying #128, was refused with "Nobody holds the Claim on #128" because the board row
+  // was missing. Writing a Claim is explicit and not every path that starts a session writes one.
+  test("a session the user started by hand is reachable — it is in this workspace", async () => {
+    const { emit, asked } = await harness([{ name: "demo-scratch", kind: "other", ticket: null }]);
 
     await steer(emit, { session: "demo-scratch", instruction: "rebase first" });
 
-    expect(asked).toEqual([]);
-    expect(outputFor(state.toolResults, "st1").error).toContain("no ticket");
+    expect(asked).toHaveLength(1);
+    expect(asked[0]).toContain("demo-scratch");
   });
 
-  test("a Worker whose ticket somebody else claimed is not addressable", async () => {
-    const { state, emit, asked } = await harness([worker("demo-t23", 23)], {
-      23: "demo-t23-redo",
-    });
+  test("a ticket nobody has claimed is a bookkeeping gap, not a wall", async () => {
+    const { emit, asked } = await harness([worker("demo-t23", 23)], { 23: null });
 
     await steer(emit, { session: "demo-t23", instruction: "rebase first" });
 
-    expect(asked).toEqual([]);
-    expect(outputFor(state.toolResults, "st1").error).toContain("demo-t23-redo");
+    expect(asked).toHaveLength(1);
   });
 
-  test("a Worker on a ticket nobody has claimed is not addressable", async () => {
-    const { state, emit, asked } = await harness([worker("demo-t23", 23)], { 23: null });
+  test("a ticket claimed by some other session is still reachable by name", async () => {
+    const { emit, asked } = await harness([worker("demo-t23", 23)], { 23: "demo-t23-redo" });
 
     await steer(emit, { session: "demo-t23", instruction: "rebase first" });
 
-    expect(asked).toEqual([]);
-    expect(outputFor(state.toolResults, "st1").error).toContain("Nobody holds the Claim");
+    expect(asked).toHaveLength(1);
   });
 
-  // Fail closed: a hub we could not reach must never be read as a ticket nobody has claimed.
-  test("a hub that could not be reached refuses the steer rather than waving it through", async () => {
-    const { state, emit, asked } = await harness([worker("demo-t23", 23)], {}, false);
+  // The Claim read is gone, so an unreachable board cannot block a message either — it was never
+  // the thing keeping the scope, and reading it here was one round trip mid-sentence.
+  test("an unreachable board does not stop a message going out", async () => {
+    const { emit, asked } = await harness([worker("demo-t23", 23)], {}, false);
 
     await steer(emit, { session: "demo-t23", instruction: "rebase first" });
 
-    expect(asked).toEqual([]);
-    expect(outputFor(state.toolResults, "st1").error).toContain("could not be reached");
+    expect(asked).toHaveLength(1);
   });
 
   // AC 5. The registry read is scoped to this workspace's directory, so another project's session
@@ -2587,7 +2583,184 @@ describe("which sessions a Summons may steer", () => {
     await steer(emit, { instruction: "rebase first" });
 
     expect(asked).toEqual([]);
-    expect(outputFor(state.toolResults, "st1").error).toContain("No session is running");
+    expect(outputFor(state.toolResults, "st1").error).toContain("carrying a ticket");
+  });
+});
+
+describe("asking a running session, and hearing the answer", () => {
+  /**
+   * A clock the test fires by hand. The answer watch is the only timer here (no idle window), so
+   * every scheduled callback is a poll.
+   */
+  function answerClock() {
+    let t = 1_000;
+    let scheduled: { handle: number; fn: () => void }[] = [];
+    let nextHandle = 1;
+    const timers: TimerPort = {
+      now: () => t,
+      setTimeout(fn) {
+        const handle = nextHandle++;
+        scheduled.push({ handle, fn });
+        return handle;
+      },
+      clearTimeout(handle) {
+        scheduled = scheduled.filter((s) => s.handle !== handle);
+      },
+    };
+    return {
+      timers,
+      advance: (ms: number) => (t += ms),
+      async tick() {
+        const due = scheduled;
+        scheduled = [];
+        for (const s of due) s.fn();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      },
+      pending: () => scheduled.length,
+    };
+  }
+
+  async function asking(latest: SessionsPort["latest"]) {
+    const asked: string[] = [];
+    const { transport, state, emit } = fakeTransport();
+    const clock = answerClock();
+    const session = createSummonsSession({
+      transport,
+      reader: fakeReader().reader,
+      timers: clock.timers,
+      idleTimeoutMs: 0,
+      sessions: {
+        list: async () => ({
+          known: true,
+          sessions: [
+            { name: "demo-t23", kind: "worker" as const, ticket: 23, status: "busy", pid: 1 },
+          ],
+        }),
+        latest,
+      },
+      hands: {
+        async ask(request) {
+          asked.push(request);
+          return "SERVANT-STEER: delivered";
+        },
+        async end() {},
+      },
+      instructions: "hi",
+    });
+    await session.start();
+    const ask = (args: Record<string, unknown>) =>
+      emit({
+        type: "tool_call",
+        callId: "q1",
+        name: "message_session",
+        args: JSON.stringify(args),
+      });
+    return { session, state, emit, asked, clock, ask };
+  }
+
+  const q = { session: "demo-t23", instruction: "how far have you got", expect_reply: true };
+
+  test("the question goes out as a question, not as an instruction", async () => {
+    const s = await asking(async () => ({ known: true, turns: 4, latest: "on it" }));
+
+    await s.ask(q);
+
+    expect(s.asked).toHaveLength(1);
+    expect(s.asked[0]).toContain("how far have you got");
+    // The reply is read from its transcript, so it has to be said rather than only acted on.
+    expect(s.asked[0]).toContain("it is read back from your transcript");
+    expect(s.asked[0]).toContain("not an instruction");
+  });
+
+  // The tool answers straight away: the target replies at its next safe point, and a voice
+  // conversation cannot sit in silence waiting for it.
+  test("the tool says the question was asked, never that it was answered", async () => {
+    const s = await asking(async () => ({ known: true, turns: 4, latest: "on it" }));
+
+    await s.ask(q);
+
+    const result = outputFor(s.state.toolResults, "q1");
+    expect(result.instruction).toContain("have asked");
+    expect(result.instruction).toContain("do not say it has answered");
+  });
+
+  test("the answer arrives when it arrives, and is said unprompted", async () => {
+    let turns = 4;
+    const s = await asking(async () => ({
+      known: true,
+      turns,
+      latest: turns > 4 ? "rebased, tests green, one file left" : "on it",
+    }));
+
+    await s.ask(q);
+    // Still working: nothing to report, and nothing invented.
+    await s.clock.tick();
+    expect(s.state.prompts).toEqual([]);
+
+    turns = 5;
+    await s.clock.tick();
+
+    expect(s.state.prompts).toHaveLength(1);
+    expect(s.state.prompts[0]).toContain("rebased, tests green, one file left");
+  });
+
+  test("said once, not on every poll after", async () => {
+    let turns = 5;
+    const s = await asking(async () => ({ known: true, turns, latest: "done" }));
+    turns = 4;
+    await s.ask(q);
+    turns = 5;
+
+    await s.clock.tick();
+    await s.clock.tick();
+    await s.clock.tick();
+
+    expect(s.state.prompts).toHaveLength(1);
+  });
+
+  // A question that is never answered has to stop being pending, or the Summons carries it for the
+  // rest of the conversation and keeps reporting it as still coming.
+  test("a question nobody answers is given up on, out loud", async () => {
+    const s = await asking(async () => ({ known: true, turns: 4, latest: "on it" }));
+
+    await s.ask(q);
+    s.clock.advance(6 * 60 * 1000);
+    await s.clock.tick();
+
+    expect(s.state.prompts).toHaveLength(1);
+    expect(s.state.prompts[0]).toContain("never answered");
+  });
+
+  // "Its transcript could not be read" and "it has said nothing" are different facts, and promising
+  // an answer that nothing can notice is the worse of the two mistakes.
+  test("a transcript that cannot be read promises no answer", async () => {
+    const s = await asking(async () => ({ known: false }));
+
+    await s.ask(q);
+
+    expect(s.asked).toHaveLength(1);
+    expect(outputFor(s.state.toolResults, "q1").instruction).toContain("could not be read");
+    expect(s.clock.pending()).toBe(0);
+  });
+
+  test("an instruction asks for no reply and waits for none", async () => {
+    const s = await asking(async () => ({ known: true, turns: 4, latest: "on it" }));
+
+    await s.ask({ session: "demo-t23", instruction: "rebase onto main first" });
+
+    expect(s.asked[0]).toContain("next safe point");
+    expect(s.asked[0]).not.toContain("not an instruction");
+    expect(s.clock.pending()).toBe(0);
+  });
+
+  test("hanging up drops the question rather than outliving the conversation", async () => {
+    const s = await asking(async () => ({ known: true, turns: 4, latest: "on it" }));
+    await s.ask(q);
+    expect(s.clock.pending()).toBeGreaterThan(0);
+
+    await s.session.stop();
+
+    expect(s.clock.pending()).toBe(0);
   });
 });
 
@@ -2632,7 +2805,7 @@ describe("what a steer writes down", () => {
     emit: (e: RealtimeInbound) => Promise<void>,
     args: Record<string, unknown>,
     callId = "st1",
-  ) => emit({ type: "tool_call", callId, name: "steer_session", args: JSON.stringify(args) });
+  ) => emit({ type: "tool_call", callId, name: "message_session", args: JSON.stringify(args) });
 
   // AC 6 and AC 9 together: the ordinary case is silent and leaves no trace on the ticket.
   test("a routine redirect goes straight out, with no confirmation asked for", async () => {
@@ -2754,7 +2927,7 @@ describe("stopping a session is Guarded", () => {
     emit: (e: RealtimeInbound) => Promise<void>,
     args: Record<string, unknown>,
     callId = "st1",
-  ) => emit({ type: "tool_call", callId, name: "steer_session", args: JSON.stringify(args) });
+  ) => emit({ type: "tool_call", callId, name: "message_session", args: JSON.stringify(args) });
 
   test("asking to stop sends nothing and comes back asking to confirm", async () => {
     const { state, emit, asked } = await harness();
@@ -2909,7 +3082,7 @@ describe("holes review found in steering", () => {
     emit: (e: RealtimeInbound) => Promise<void>,
     args: Record<string, unknown>,
     callId = "st1",
-  ) => emit({ type: "tool_call", callId, name: "steer_session", args: JSON.stringify(args) });
+  ) => emit({ type: "tool_call", callId, name: "message_session", args: JSON.stringify(args) });
 
   const stop = (emit: (e: RealtimeInbound) => Promise<void>, callId = "sp1") =>
     emit({

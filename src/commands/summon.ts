@@ -28,7 +28,7 @@ import {
   createSummonsSession,
 } from "../core/summons.ts";
 import { readWorkspaceAgent, resolveWorkspaceName } from "../core/workspace.ts";
-import { readWorkspaceSessions } from "../core/workspace-sessions.ts";
+import { readSessionLatest, readWorkspaceSessions } from "../core/workspace-sessions.ts";
 
 const DEFAULT_IDLE_TIMEOUT_SECONDS = DEFAULT_SUMMONS_IDLE_TIMEOUT_MS / 1000;
 
@@ -261,7 +261,10 @@ export const summonCommand = defineCommand({
         hands,
         // A directory scan, not a question put to anyone — so it is always available, even in a
         // workspace whose backend has no hands to reach.
-        sessions: { list: () => readWorkspaceSessions(workspace) },
+        sessions: {
+          list: () => readWorkspaceSessions(workspace),
+          latest: (name) => readSessionLatest(workspace, name),
+        },
         // What makes steering Claim-scoped. Offered alongside the registry and the hands, since all
         // three are needed before a session may be addressed at all (workspace ADR 0010).
         tickets: hub,

@@ -27,11 +27,27 @@ export const STEER_ACK_MARKER = "SERVANT-STEER:";
  * the next safe point, which is what keeps a session from abandoning a half-written file to obey
  * (ticket acceptance criterion 8).
  */
-export function composeSteerMessage(spec: { instruction: string; stop?: boolean }): string {
+export function composeSteerMessage(spec: {
+  instruction: string;
+  stop?: boolean;
+  /** A question rather than an instruction: the user wants an answer, not a change of course. */
+  question?: boolean;
+}): string {
   const parts = [
-    "Steer from the user, spoken out loud during a Summons of this workspace and relayed to you. They are away from the keyboard, so there is nobody to ask about it.",
+    spec.question
+      ? "A question from the user, spoken out loud during a Summons of this workspace and relayed to you. They are away from the keyboard and cannot read your screen, so answering is the whole job here."
+      : "Steer from the user, spoken out loud during a Summons of this workspace and relayed to you. They are away from the keyboard, so there is nobody to ask about it.",
     spec.instruction.trim(),
   ];
+  if (spec.question) {
+    // Read from the transcript, not returned through the relay — so the answer has to be *said*,
+    // and said in the reply rather than only acted on. A session that silently complies answers
+    // nothing, and there is nowhere else to look.
+    parts.push(
+      "Answer it in your next message, in a few sentences: what you have done, where you are, and anything you are stuck on. Say the answer out loud in your reply rather than only acting on it — it is read back from your transcript, so an answer you do not write down does not exist. Do not change what you are doing because of this; it is a question, not an instruction.",
+    );
+    return parts.join("\n\n");
+  }
   if (spec.stop) {
     parts.push(
       "This stops or abandons your work, and the user confirmed it out loud before it was sent. Wind up at your next safe point: leave the tree in a state someone can pick up, say what you had done and what you stopped short of, and do not start anything new.",

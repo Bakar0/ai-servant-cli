@@ -162,6 +162,20 @@ export const DELEGATION_TOOLS: readonly SummonsTool[] = [
  * agent must never satisfy this by asking a session, which costs that session a whole turn.
  */
 export interface SessionsPort {
+  /**
+   * What a named session has said and how many turns it has taken, read from its transcript rather
+   * than asked for. The pull half of ADR 0010, extended past this conversation's own delegations:
+   * `list` says a session exists and whether it is busy, and carries nothing about its work.
+   *
+   * Unknown when the name cannot be linked to a transcript — which is not "it has said nothing".
+   *
+   * Optional, and `list` is not: listing is what makes a session addressable, and this is only what
+   * lets an answer be *noticed*. Without it a question can still be sent, and the agent is told the
+   * reply cannot be watched for rather than promised one that will never come.
+   */
+  latest?(
+    name: string,
+  ): Promise<{ known: false } | { known: true; turns: number; latest: string | null }>;
   list(): Promise<
     | { known: false }
     | {
@@ -292,7 +306,7 @@ export const TICKET_TOOLS: readonly SummonsTool[] = [
  * agent is not a Claude session, so both go out through the Hands session, which is (ADR 0010
  * decision 6). Which session may be addressed is decided here and not there — see `resolveTarget`.
  *
- * `steer_session` is not Guarded, deliberately. Sessions run in auto mode and their own permission
+ * `message_session` is not Guarded, deliberately. Sessions run in auto mode and their own permission
  * prompts are the real gate; a message is speech to another agent, not an action on the workspace,
  * and confirming every steer would make the feature unusable in the workflow it exists for.
  * `stop_session` is Guarded, because it destroys work already done and nothing downstream catches
@@ -300,26 +314,31 @@ export const TICKET_TOOLS: readonly SummonsTool[] = [
  */
 export const STEER_TOOLS: readonly SummonsTool[] = [
   {
-    name: "steer_session",
+    name: "message_session",
     description:
-      "Redirect a Claude session that is ALREADY RUNNING — 'rebase onto main first', 'drop that approach', 'also check the tests'. Use this the moment the user wants to change what a running session is doing; it is the whole point of talking while work is in flight. It launches nothing and needs no confirmation. The instruction is relayed to that session, which takes it up at its next safe point rather than immediately, so report it as passed on, never as done. To stop or abandon a session, use stop_session instead — not this.",
+      "Send a message to a Claude session that is ALREADY RUNNING — either to redirect it ('rebase onto main first', 'drop that approach', 'also check the tests') or to ask it something ('how far have you got', 'what is left', 'did the tests pass'). Use it the moment the user wants to change or find out what a running session is doing; that is the whole point of talking while work is in flight. It launches nothing and needs no confirmation. A session takes a message up at its next safe point rather than immediately, so report an instruction as passed on, never as done. For work this conversation delegated, check_delegation reads its progress for free and is the better tool — this one costs the session a turn. To stop or abandon a session, use stop_session instead.",
     parameters: {
       type: "object",
       properties: {
         session: {
           type: "string",
           description:
-            "Which session to steer, by the name list_sessions reports, or its ticket number. Omit only when there is just one session running; with several, you will be asked which.",
+            "Which session to message, by the name list_sessions reports, or its ticket number. Omit only when there is just one session running; with several, you will be asked which.",
+        },
+        expect_reply: {
+          type: "boolean",
+          description:
+            "True when the message is a question and the user wants the answer. The session's reply is read back from its transcript once it answers, which takes as long as it takes to reach a safe point — so you may be told the answer is not in yet, and it will be reported to you when it arrives. Leave it out for an instruction, which needs no reply.",
         },
         instruction: {
           type: "string",
           description:
-            "What to tell it, written out for someone who cannot hear this conversation. The user's own words and specifics, in full sentences — it is relayed verbatim.",
+            "What to say to it, written out for someone who cannot hear this conversation. The user's own words and specifics, in full sentences — it is relayed verbatim.",
         },
         changes_acceptance_criteria: {
           type: "boolean",
           description:
-            "True only when this changes what *done* means for the ticket — a new requirement, a dropped one, a different definition of finished. That gets written to the ticket, because it outlives the session. A plain course correction does not: leave this out.",
+            "True only when this changes what *done* means for the ticket — a new requirement, a dropped one, a different definition of finished. That gets written to the ticket, because it outlives the session. A plain course correction or a question does not: leave this out.",
         },
       },
       required: ["instruction"],
@@ -1417,29 +1436,60 @@ interface SteerTarget {
  * left to the agent's instructions. The Hands prompt still carries the rule, as a backstop that is
  * not load-bearing.
  */
-function createSteering(opts: SummonsSessionOptions, gate: Gate, timers: TimerPort) {
-  const log = opts.callLog ?? NULL_CALL_LOG;
+/** How often a Summons looks for the answer to a question it asked a running session. */
+const ANSWER_POLL_MS = 3_000;
 
-  /** Everything the registry says is running here, workspace-scoped by construction (AC 5). */
-  async function candidates(): Promise<
-    { known: false } | { known: true; targets: SteerTarget[]; unaddressable: string[] }
-  > {
+/**
+ * How long it keeps looking. A session takes a message up at its next safe point, which can be a
+ * long edit away — but a question nobody ever answers has to stop being pending, or the Summons
+ * carries it for the rest of the conversation and reports it as still coming.
+ */
+const ANSWER_DEADLINE_MS = 5 * 60 * 1000;
+
+/** A question sent to a running session, waiting for its transcript to show the reply. */
+interface PendingAnswer {
+  target: string;
+  question: string;
+  /** Turns the target had taken when the question went out — the reply is the turn after that. */
+  askedTurns: number;
+  askedAt: number;
+}
+
+/** A running session having answered — or having failed to, which is also worth saying. */
+export interface SessionAnswer {
+  target: string;
+  question: string;
+  /** null when the deadline passed with no new turn from it. */
+  answer: string | null;
+}
+
+function createSteering(
+  opts: SummonsSessionOptions,
+  gate: Gate,
+  timers: TimerPort,
+  /** Where an answer goes when it arrives after the tool call has already been answered. */
+  onAnswer: (answer: SessionAnswer) => void,
+) {
+  const log = opts.callLog ?? NULL_CALL_LOG;
+  const pending: PendingAnswer[] = [];
+  let watchHandle: unknown = null;
+
+  /**
+   * Everything the registry says is running here — and all of it is addressable.
+   *
+   * This filter *is* the fence (ADR 0010 decision 9, as amended): the registry is scoped to this
+   * workspace's root, so another workspace's session and another project's session were never
+   * candidates. A session the user started by hand used to be listed here and refused, because it
+   * carries no ticket and so holds no Claim; it is in this workspace and the person talking is the
+   * one who started it, so refusing it protected nobody.
+   */
+  async function candidates(): Promise<{ known: false } | { known: true; targets: SteerTarget[] }> {
     const report = await opts.sessions?.list();
     if (!report || !report.known) return { known: false };
-    const targets: SteerTarget[] = [];
-    const unaddressable: string[] = [];
-    for (const session of report.sessions) {
-      if (session.kind === "worker" && session.ticket !== null) {
-        targets.push({ name: session.name, ticket: session.ticket });
-      } else if (session.kind === "hands") {
-        targets.push({ name: session.name, ticket: null });
-      } else {
-        // A session the user started by hand carries no ticket and so holds no Claim. Nameable,
-        // deliberately not addressable — the agent has to be able to say why (AC 4).
-        unaddressable.push(session.name);
-      }
-    }
-    return { known: true, targets, unaddressable };
+    return {
+      known: true,
+      targets: report.sessions.map((session) => ({ name: session.name, ticket: session.ticket })),
+    };
   }
 
   /** How a person names a session out loud: its name, or the ticket it carries. */
@@ -1478,19 +1528,14 @@ function createSteering(opts: SummonsSessionOptions, gate: Gate, timers: TimerPo
       // conversation's own errand-runner.
       const workers = found.targets.filter((t) => t.ticket !== null);
       if (workers.length === 0) {
+        const others = found.targets.map((t) => t.name);
         return refuse(
-          found.unaddressable.length > 0
-            ? `Nothing addressable is running. ${found.unaddressable.join(", ")} ${found.unaddressable.length === 1 ? "is" : "are"} running but ${found.unaddressable.length === 1 ? "carries" : "carry"} no ticket, so ${found.unaddressable.length === 1 ? "it holds" : "they hold"} no Claim and cannot be steered.`
-            : "No session is running that this workspace can steer.",
+          others.length > 0
+            ? `No session here is carrying a ticket, so there is no obvious one to mean. ${others.join(", ")} ${others.length === 1 ? "is" : "are"} running — name one of them if that is who the user meant.`
+            : "Nothing is running in this workspace to send anything to.",
         );
       }
       // AC 11: picking one would send the user's instruction into work they did not mean.
-      //
-      // Counted over sessions carrying a ticket, not over sessions whose Claim has been read —
-      // reading every Claim here would be one `gh` round trip per session while the user is
-      // mid-sentence. The cost is asking "which one?" in the rare case where several are running
-      // and only one is actually claimed; the Claim is still checked on whichever they name, so
-      // the scope never widens, only the question gets asked once more than it had to.
       if (workers.length > 1) {
         return {
           ok: false,
@@ -1508,32 +1553,26 @@ function createSteering(opts: SummonsSessionOptions, gate: Gate, timers: TimerPo
 
     const matched = found.targets.filter((t) => matches(t, wanted));
     if (matched.length !== 1) {
-      const named = found.unaddressable.some((name) => name.toLowerCase() === wanted.toLowerCase());
       return refuse(
-        named
-          ? `"${wanted}" is running here but carries no ticket, so it holds no Claim and cannot be steered. Say that, and offer to ask your hands instead.`
+        matched.length > 1
+          ? `"${wanted}" matches more than one session running here. Call list_sessions and use one exact name.`
           : `There is no session called "${wanted}" running in this workspace. Call list_sessions and use a name from it — you cannot reach sessions in other workspaces or other projects.`,
       );
     }
-    const target = matched[0] as SteerTarget;
-    if (target.ticket === null) return { ok: true, target };
-
-    // AC 4, and the reason `claim` degrades to unknown rather than to null: a hub we could not
-    // reach must refuse, not wave the instruction through.
-    const claim = await opts.tickets?.claim(target.ticket);
-    if (!claim || !claim.known) {
-      return refuse(
-        `The hub could not be reached to check who holds #${target.ticket}, so nothing was sent. Say that plainly rather than assuming it went.`,
-      );
-    }
-    if (claim.session !== target.name) {
-      return refuse(
-        claim.session
-          ? `#${target.ticket} is claimed by ${claim.session}, not ${target.name}, so ${target.name} was not steered.`
-          : `Nobody holds the Claim on #${target.ticket}, so ${target.name} cannot be steered. Only sessions carrying a claimed ticket can be.`,
-      );
-    }
-    return { ok: true, target };
+    /**
+     * The fence is the workspace, and it was crossed long before this line: the candidate list is
+     * built from the session registry filtered to this workspace's root, so a session in another
+     * workspace or another project was never a candidate.
+     *
+     * A Claim used to be required on top (ADR 0010 decision 9, now amended). It was a second fence
+     * inside the first, and it fenced out the wrong thing — a session named `<ws>-t128`, running
+     * here, carrying ticket 128, was refused with "Nobody holds the Claim on #128" because the board
+     * row was missing. Writing a Claim is explicit and not every path that starts a session writes
+     * one, so the Claim is bookkeeping about who carries a ticket, and reading it as a permission
+     * turned a bookkeeping gap into a wall. Stopping keeps its own protection, which never depended
+     * on this: `stop_session` is Guarded, and the spoken confirm-gate stands in front of it.
+     */
+    return { ok: true, target: matched[0] as SteerTarget };
   }
 
   /** One relayed instruction: recorded going out, recorded coming back, whatever happened. */
@@ -1541,9 +1580,10 @@ function createSteering(opts: SummonsSessionOptions, gate: Gate, timers: TimerPo
     target: SteerTarget,
     instruction: string,
     stop: boolean,
+    question = false,
   ): Promise<{ result: Record<string, unknown>; outcome: ToolOutcome }> {
     const startedAt = timers.now();
-    const message = composeSteerMessage({ instruction, stop });
+    const message = composeSteerMessage({ instruction, stop, question });
     // Written before the round trip, not after it: a relay can run for a minute or two, and the
     // Call log is the only place a headless session's work is visible while it is happening.
     log.record({ type: "steer-sent", target: target.name, instruction });
@@ -1652,8 +1692,8 @@ function createSteering(opts: SummonsSessionOptions, gate: Gate, timers: TimerPo
     let instruction: string;
     let args: Record<string, unknown>;
     try {
-      args = parseArgs(rawArgs, "steer_session");
-      instruction = requireString(args, "instruction", "steer_session");
+      args = parseArgs(rawArgs, "message_session");
+      instruction = requireString(args, "instruction", "message_session");
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);
       answer({ error: detail });
@@ -1680,7 +1720,27 @@ function createSteering(opts: SummonsSessionOptions, gate: Gate, timers: TimerPo
     // session; dropping it because the relay went quiet rounds "we do not know" down to "it did not
     // happen", which is the conflation this whole feature exists to avoid. Only an outright
     // failure — where nothing was sent — leaves the ticket alone.
-    const { result, outcome } = await deliver(resolved.target, instruction, false);
+    const asking = args.expect_reply === true;
+    // Read *before* the question goes out: the answer is the turn after this one, and a count taken
+    // afterwards could already include the reply or miss it, either way silently.
+    const before = asking ? await opts.sessions?.latest?.(resolved.target.name) : undefined;
+    const { result, outcome } = await deliver(resolved.target, instruction, false, asking);
+    if (asking && result.status !== "failed") {
+      if (before?.known) {
+        pending.push({
+          target: resolved.target.name,
+          question: instruction,
+          askedTurns: before.turns,
+          askedAt: timers.now(),
+        });
+        watchAnswers();
+        result.instruction = `The question is in ${resolved.target.name}'s inbox. Say you have asked and that you will pass the answer on the moment it comes — it answers at its next safe point, which may be a minute or two. Do not invent an answer, and do not say it has answered.`;
+      } else {
+        // Nothing to compare a reply against, so nothing could recognise one. Better to say the
+        // question went and the answer cannot be watched for than to promise an answer forever.
+        result.instruction = `The question was sent to ${resolved.target.name}, but its transcript could not be read, so nothing here can notice the reply. Say that, and offer to check again with check_delegation or list_sessions.`;
+      }
+    }
     if (args.changes_acceptance_criteria === true && result.status !== "failed") {
       await noteOnTicket(resolved.target, instruction, result.status === "unconfirmed");
     }
@@ -1746,7 +1806,52 @@ function createSteering(opts: SummonsSessionOptions, gate: Gate, timers: TimerPo
     return { outcome: "held", detail: label };
   }
 
-  return { steer, stop };
+  /**
+   * Waiting for an answer, by reading rather than asking.
+   *
+   * The reply cannot come back through the relay: the Hands session is a one-shot headless call and
+   * has already returned by the time the target reaches a safe point. So the question goes out as a
+   * push — the only thing cross-session messaging does — and the answer is found where it lands
+   * anyway, in the target's own transcript, one assistant turn later than when it was asked.
+   */
+  function watchAnswers(): void {
+    if (watchHandle !== null || pending.length === 0) return;
+    watchHandle = timers.setTimeout(() => {
+      watchHandle = null;
+      void pollAnswers();
+    }, ANSWER_POLL_MS);
+  }
+
+  async function pollAnswers(): Promise<void> {
+    // A copy, because an answered question is spliced out of `pending` inside the loop.
+    const asked = pending.slice();
+    for (const question of asked) {
+      const seen = await opts.sessions?.latest?.(question.target);
+      // A transcript that cannot be read is not a session that said nothing, so this looks again.
+      const answered = seen?.known && seen.turns > question.askedTurns ? seen.latest : null;
+      const expired = timers.now() - question.askedAt >= ANSWER_DEADLINE_MS;
+      if (!answered && !expired) continue;
+      pending.splice(pending.indexOf(question), 1);
+      log.record({
+        type: "note",
+        level: "info",
+        text: answered
+          ? `${question.target} answered "${question.question}": ${answered}`
+          : `${question.target} did not answer "${question.question}" in time.`,
+      });
+      onAnswer({ target: question.target, question: question.question, answer: answered });
+    }
+    watchAnswers();
+  }
+
+  /** Hanging up stops the watch — a poll timer outliving its conversation never lets the process go. */
+  function stopWatching(): void {
+    timers.clearTimeout(watchHandle);
+    watchHandle = null;
+    pending.length = 0;
+  }
+
+  return { steer, stop, stopWatching };
 }
 
 /**
@@ -2107,7 +2212,14 @@ export function createSummonsSession(opts: SummonsSessionOptions): SummonsSessio
   });
   // Steering needs all three: a registry to resolve a name against, a hub to check the Claim on,
   // and hands to relay through. Missing any one, the tools are not offered at all (below).
-  const steering = createSteering(opts, gate, timers);
+  const steering = createSteering(opts, gate, timers, (answered) => {
+    markActive();
+    announce(
+      answered.answer
+        ? `${answered.target} has answered the question "${answered.question}". Tell the user now, in your own words, keeping the specifics: ${answered.answer}`
+        : `${answered.target} never answered the question "${answered.question}" — it has taken no turn since it was asked. Say so, and offer to ask again or to look at what it last said.`,
+    );
+  });
   const filing = createFiling(opts, gate);
   /**
    * The two halves of the status line, joined here because this is the only place that holds both.
@@ -2282,7 +2394,7 @@ export function createSummonsSession(opts: SummonsSessionOptions): SummonsSessio
     // whether it landed is the record of the call, the same way `ask_hands` is. A call that never
     // got that far leaves no `steer` entry, so it is recorded as a plain tool call instead:
     // an instruction refused for scope is exactly what the user needs to see in the log.
-    if (call.name === "steer_session") {
+    if (call.name === "message_session") {
       const outcome = await steering.steer(call.callId, call.args, lastUserItemId);
       if (!outcome.relayed) recordCall(outcome);
       return;
@@ -2330,6 +2442,7 @@ export function createSummonsSession(opts: SummonsSessionOptions): SummonsSessio
     }
     log.record({ type: "ended", reason });
     delegations.stopWatching();
+    steering.stopWatching();
     timers.clearTimeout(idleHandle);
     idleHandle = null;
     await opts.audio?.stop();
@@ -2405,7 +2518,9 @@ export function createSummonsSession(opts: SummonsSessionOptions): SummonsSessio
             ...(opts.actions ? DELEGATION_TOOLS : []),
             ...(opts.hands ? HANDS_TOOLS : []),
             ...(opts.sessions ? SESSIONS_TOOLS : []),
-            ...(opts.hands && opts.sessions && opts.tickets ? STEER_TOOLS : []),
+            // No hub needed any more: addressing a session is a registry read, and only the
+            // acceptance-criteria write wants a ticket — which already skips itself without one.
+            ...(opts.hands && opts.sessions ? STEER_TOOLS : []),
             ...(opts.filing ? TICKET_TOOLS : []),
           ],
         },
