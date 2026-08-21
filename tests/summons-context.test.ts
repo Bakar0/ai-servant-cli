@@ -193,9 +193,23 @@ describe("the persona draws one line between the three Claude sessions", () => {
     expect(persona).not.toContain("look up how this API works");
   });
 
-  test("the axis is stated in terms of how long and who watches, not read-only versus not", () => {
-    expect(persona).toContain("before you can say your next sentence");
+  // Settled after the first attempt: the axis is *time*, because a hands call holds the conversation
+  // shut while it runs, and a blocked voice agent is the worst failure mode here.
+  test("the axis is time, and it says why", () => {
+    expect(persona).toContain("seconds");
+    expect(persona).toContain("holds this conversation shut");
     expect(persona).toContain("watch");
+  });
+
+  // The one thing the tool descriptions cannot enforce, so the persona has to be straight about it.
+  test("the persona says asking the hands to change something is Guarded", () => {
+    expect(persona).toContain("Asking them to change something is Guarded");
+  });
+
+  // Left stale by the Claim change (servant-summon#13) and caught here: the persona was still
+  // telling the agent it could only reach a session holding a Claim.
+  test("nothing still claims a Claim is needed to reach a session", () => {
+    expect(persona).not.toContain("on a claimed ticket");
   });
 
   test("the agent is told to say which of the three it is reaching for", () => {

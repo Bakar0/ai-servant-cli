@@ -18,6 +18,7 @@ import {
   type WorkspaceReader,
   createSummonsSession,
 } from "../src/core/summons.ts";
+import type { CallLogEntry } from "../src/core/call-log/record.ts";
 import { requireAudioTool, requireOpenAiApiKey } from "../src/core/summons-preflight.ts";
 
 /** A fake Realtime transport: records what the controller sent, replays scripted inbound events. */
@@ -2058,6 +2059,116 @@ describe("what the status line is told", () => {
 
     s.session.toggleMute();
     expect(s.latest()?.muted).toBe(false);
+  });
+});
+
+describe("asking the hands to change something is Guarded", () => {
+  async function summoned(answer = "done, one file changed") {
+    const asked: string[] = [];
+    const { transport, state, emit } = fakeTransport();
+    await createSummonsSession({
+      transport,
+      reader: fakeReader().reader,
+      actions: fakeActions().actions,
+      hands: {
+        async ask(request) {
+          asked.push(request);
+          return answer;
+        },
+        async end() {},
+      },
+      instructions: "hi",
+    }).start();
+    const ask = (request: string, callId = "h1") =>
+      emit({ type: "tool_call", callId, name: "ask_hands", args: JSON.stringify({ request }) });
+    return { state, emit, asked, ask };
+  }
+
+  // The hands run with `--dangerously-skip-permissions`, so without this the gate on `delegate` is
+  // one the model walks around by asking its hands instead.
+  test("a request that would change something asks first and does nothing", async () => {
+    const s = await summoned();
+
+    await s.ask("fix the failing parser test");
+
+    expect(s.asked).toEqual([]);
+    const result = outputFor(s.state.toolResults, "h1");
+    expect(result.status).toBe("awaiting_confirmation");
+    expect(result.asked).toBe(false);
+    expect(result.instruction).toContain("yes or no");
+  });
+
+  test("a spoken yes is what asks them", async () => {
+    const s = await summoned();
+    await s.ask("rename that helper");
+
+    await s.emit({ type: "user_transcript", text: "yes go ahead", itemId: "u2" });
+
+    expect(s.asked).toHaveLength(1);
+    expect(s.asked[0]).toContain("rename that helper");
+  });
+
+  test("a no leaves the hands untouched", async () => {
+    const s = await summoned();
+    await s.ask("delete the dead file");
+
+    await s.emit({ type: "user_transcript", text: "no, leave it", itemId: "u2" });
+
+    expect(s.asked).toEqual([]);
+    expect(s.state.notes.join(" ")).toContain("declined");
+  });
+
+  // The other half, and the half that makes the gate bearable: a question is not a change, and
+  // asking about one would train the user to say yes without listening.
+  test("a question goes straight through, ungated", async () => {
+    const s = await summoned("they pass");
+
+    await s.ask("run the tests and tell me if they pass");
+
+    expect(s.asked).toHaveLength(1);
+    expect(outputFor(s.state.toolResults, "h1").answer).toBe("they pass");
+  });
+
+  // A held ask is a `tool` entry with outcome `held` — a `hands` entry would claim a round trip
+  // that has not happened.
+  test("a held ask is recorded as held, not as a round trip", async () => {
+    const entries: CallLogEntry[] = [];
+    const { transport, emit } = fakeTransport();
+    await createSummonsSession({
+      transport,
+      reader: fakeReader().reader,
+      hands: {
+        async ask() {
+          return "done";
+        },
+        async end() {},
+      },
+      callLog: { record: (entry) => entries.push(entry) },
+      instructions: "hi",
+    }).start();
+
+    await emit({
+      type: "tool_call",
+      callId: "h1",
+      name: "ask_hands",
+      args: JSON.stringify({ request: "commit what you have" }),
+    });
+
+    const tool = entries.find((e) => e.type === "tool");
+    expect(tool).toMatchObject({ name: "ask_hands", outcome: "held" });
+    expect(entries.some((e) => e.type === "hands" || e.type === "hands-asked")).toBe(false);
+  });
+
+  // One question in the air at a time: a second one accepted while the first waits means the user's
+  // "yes" releases whichever the controller happens to be holding.
+  test("it will not put a second question in the air", async () => {
+    const s = await summoned();
+    await s.ask("fix the parser");
+
+    await s.ask("delete the old tests", "h2");
+
+    expect(s.asked).toEqual([]);
+    expect(outputFor(s.state.toolResults, "h2").error).toContain("already waiting");
   });
 });
 

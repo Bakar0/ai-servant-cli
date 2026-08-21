@@ -9,6 +9,7 @@ import {
   recordedText,
 } from "./call-log/record.ts";
 import { classifyConfirmation } from "./summons-confirm.ts";
+import { looksLikeWritingRequest } from "./summons-hands.ts";
 import {
   composeSteerMessage,
   composeSteerRequest,
@@ -88,7 +89,7 @@ export const DELEGATION_TOOLS: readonly SummonsTool[] = [
   {
     name: "research",
     description:
-      "Hand a question about the code — 'how does X work', 'why is Y slow', 'what calls Z' — to a fresh Claude session that can search the whole codebase, in its own tab where the user can watch it. Use this instead of grinding through files yourself: it is token-hungry work and Claude has the harness for it. Launches immediately, no confirmation, because the session it starts cannot change anything. For a fact you need before you can finish the sentence you are saying, use ask_hands, which answers into the conversation instead. If the task would edit, run or write ANYTHING, it is not research — use delegate.",
+      "Hand a question about the code — 'how does X work', 'why is Y slow', 'what calls Z' — to a fresh Claude session that can search the whole codebase, in its own tab where the user can watch it. Use this instead of grinding through files yourself: it is token-hungry work and Claude has the harness for it, and it runs without holding this conversation shut. Launches immediately, no confirmation, because the session it starts cannot change anything. For something that comes back in seconds, use ask_hands, which answers into the conversation instead. If the task would edit, run or write ANYTHING, it is not research — use delegate.",
     parameters: {
       type: "object",
       properties: {
@@ -236,7 +237,7 @@ export const HANDS_TOOLS: readonly SummonsTool[] = [
   {
     name: "ask_hands",
     description:
-      "Ask your hands — a Claude session kept for this conversation — to do one small job and tell you the answer: run the tests, check whether that compiles, what git blame says here, what a session concluded. Use it whenever you need the result before you can say your next sentence; it answers into the conversation, in one round trip, and remembers the earlier things you asked it. The line against research is not read-only versus not — both mostly read — it is that this answers now and a research session goes away and works where the user can watch it. So a question about how the codebase works is research; a fact you need to finish the sentence you are saying is this. Work that would leave a file changed is delegate.",
+      "Ask your hands — a Claude session kept for this conversation — for something that comes back in SECONDS: what git blame says here, whether that compiles, what is in that file, what a session concluded. It answers into the conversation, in one round trip, and remembers the earlier things you asked it. The test is time, because a hands call holds the conversation shut while it runs — you cannot speak or be interrupted until it returns. Anything that might run for a minute (a test suite, a build, a search across everything) belongs in a session of its own instead, where the user can watch it and you two can keep talking: research when it changes nothing, delegate when it does. Asking your hands to CHANGE something is allowed but Guarded: it comes back asking the user to confirm first, so keep questions and changes in separate requests.",
     parameters: {
       type: "object",
       properties: {
@@ -2289,10 +2290,45 @@ export function createSummonsSession(opts: SummonsSessionOptions): SummonsSessio
    * failed is exactly the case the user cannot see any other way, so the failure goes where the
    * answer would have gone.
    */
+  /** One round trip to the hands, recorded whatever came back. Shared by the direct and gated paths. */
+  async function runHandsRequest(request: string, startedAt: number): Promise<string> {
+    // Recorded before the call goes out, not after it returns. A round trip can run for minutes,
+    // and until this line existed the live view showed nothing at all while it did — the user
+    // heard "just a moment" and had no way to tell working from hung.
+    log.record({ type: "hands-asked", request });
+    try {
+      const answer = await opts.hands!.ask(request);
+      log.record({
+        type: "hands",
+        request,
+        response: answer,
+        outcome: "ok",
+        durationMs: timers.now() - startedAt,
+      });
+      return answer;
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      log.record({
+        type: "hands",
+        request,
+        response: detail,
+        outcome: "error",
+        durationMs: timers.now() - startedAt,
+      });
+      throw err;
+    }
+  }
+
+  /**
+   * Answers with an outcome only when the caller should record a plain `tool` entry — which is the
+   * Guarded case, where no round trip has happened yet. Otherwise it writes its own `hands` entries,
+   * because what was asked and what came back *is* the record of the call.
+   */
   async function handleHandsCall(
     call: Extract<RealtimeInbound, { type: "tool_call" }>,
     startedAt: number,
-  ): Promise<void> {
+    lastUserItemId: string | null,
+  ): Promise<ToolOutcome | null> {
     let request = "";
     const fail = (detail: string) => {
       opts.transport.sendToolResult(call.callId, JSON.stringify({ error: detail }));
@@ -2308,29 +2344,61 @@ export function createSummonsSession(opts: SummonsSessionOptions): SummonsSessio
       request = requireString(parseArgs(call.args, call.name), "request", call.name);
     } catch (err) {
       fail(err instanceof Error ? err.message : String(err));
-      return;
+      return null;
     }
     if (!opts.hands) {
       fail("This Summons has no hands — it was started without a Hands session.");
-      return;
+      return null;
     }
-    // Recorded before the call goes out, not after it returns. A round trip can run for minutes,
-    // and until this line existed the live view showed nothing at all while it did — the user
-    // heard "just a moment" and had no way to tell working from hung.
-    log.record({ type: "hands-asked", request });
-    try {
-      const answer = await opts.hands.ask(request);
-      opts.transport.sendToolResult(call.callId, JSON.stringify({ answer }));
-      log.record({
-        type: "hands",
-        request,
-        response: answer,
-        outcome: "ok",
-        durationMs: timers.now() - startedAt,
+    /**
+     * A hands request that would change something is Guarded, exactly as `delegate` is.
+     *
+     * The hands run with `--dangerously-skip-permissions` and can edit, write and run anything, so
+     * without this the gate on `delegate` is a gate the model can walk around by asking its hands
+     * instead — and ADR-009's own principle is that a model deciding its own gating has not been
+     * gated. Same shape as the stop-phrased-as-a-redirect check: the words are read here, and the
+     * tool descriptions are the signpost rather than the enforcement.
+     */
+    if (looksLikeWritingRequest(request)) {
+      const blocked = gate.blocked();
+      if (blocked) {
+        fail(blocked);
+        return null;
+      }
+      const heldRequest = request;
+      gate.hold({
+        label: `ask your hands to ${heldRequest}`,
+        askedAfterItemId: lastUserItemId,
+        nothingHappened: "Your hands were not asked, and nothing was changed.",
+        async run() {
+          const answer = await runHandsRequest(heldRequest, timers.now());
+          return `Your hands answered: ${answer}. Tell the user what came back.`;
+        },
+        failed: (message) =>
+          `Asking your hands to "${heldRequest}" failed: ${message}. Nothing came back, and you do not know whether anything changed. Tell the user plainly.`,
       });
+      opts.transport.sendToolResult(
+        call.callId,
+        JSON.stringify({
+          status: "awaiting_confirmation",
+          asked: false,
+          request: heldRequest,
+          instruction:
+            "Nothing has been asked yet, because this would change something. Say out loud, in one sentence, what you are about to have your hands do, then ask the user to answer yes or no. Do not call ask_hands again — their answer is what decides.",
+        }),
+      );
+      // Recorded as a `tool` entry with outcome `held`, the same way a held delegation is: what the
+      // gate did with it is the `gate` entry, and a `hands` entry would claim a round trip that has
+      // not happened.
+      return { outcome: "held", detail: heldRequest };
+    }
+    try {
+      const answer = await runHandsRequest(request, startedAt);
+      opts.transport.sendToolResult(call.callId, JSON.stringify({ answer }));
     } catch (err) {
       fail(err instanceof Error ? err.message : String(err));
     }
+    return null;
   }
 
   // Tool failures are conversation, not crashes: the agent hears what went wrong and can say so.
@@ -2376,7 +2444,8 @@ export function createSummonsSession(opts: SummonsSessionOptions): SummonsSessio
     // what came back *is* the record of the call, and the round trip is the only trace a session
     // with no tab leaves anywhere (workspace ADR 0010).
     if (call.name === "ask_hands") {
-      await handleHandsCall(call, startedAt);
+      const held = await handleHandsCall(call, startedAt, lastUserItemId);
+      if (held) recordCall(held);
       return;
     }
 
