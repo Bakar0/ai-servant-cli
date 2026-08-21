@@ -181,3 +181,24 @@ describe("summons scope and snapshot", () => {
     expect(after.goal).toContain("Ship something else.");
   });
 });
+
+// servant-summon#12: the persona used to hand the same example to two different tools — "how does X
+// work" to research, and "look up how this API works" to hands, two paragraphs apart. From the
+// outside that made the choice between them look arbitrary, because it was.
+describe("the persona draws one line between the three Claude sessions", () => {
+  const persona = composeSummonsInstructions(SNAPSHOT);
+
+  test("a codebase question belongs to research alone", () => {
+    expect(persona).toContain('"how does X work"');
+    expect(persona).not.toContain("look up how this API works");
+  });
+
+  test("the axis is stated in terms of how long and who watches, not read-only versus not", () => {
+    expect(persona).toContain("before you can say your next sentence");
+    expect(persona).toContain("watch");
+  });
+
+  test("the agent is told to say which of the three it is reaching for", () => {
+    expect(persona).toContain("I'll ask my hands");
+  });
+});

@@ -88,7 +88,7 @@ export const DELEGATION_TOOLS: readonly SummonsTool[] = [
   {
     name: "research",
     description:
-      "Hand a read-only question — 'how does X work', 'why is Y slow', 'what calls Z' — to a fresh Claude session that can search the whole codebase. Use this instead of grinding through files yourself: it is token-hungry work and Claude has the harness for it. Launches immediately, no confirmation, because the session it starts cannot change anything. If the task would edit, run or write ANYTHING, it is not research — use delegate.",
+      "Hand a question about the code — 'how does X work', 'why is Y slow', 'what calls Z' — to a fresh Claude session that can search the whole codebase, in its own tab where the user can watch it. Use this instead of grinding through files yourself: it is token-hungry work and Claude has the harness for it. Launches immediately, no confirmation, because the session it starts cannot change anything. For a fact you need before you can finish the sentence you are saying, use ask_hands, which answers into the conversation instead. If the task would edit, run or write ANYTHING, it is not research — use delegate.",
     parameters: {
       type: "object",
       properties: {
@@ -222,7 +222,7 @@ export const HANDS_TOOLS: readonly SummonsTool[] = [
   {
     name: "ask_hands",
     description:
-      "Ask your hands — a Claude session kept for this conversation — to do one small job and tell you the answer: run the tests, check whether that compiles, look at what git blame says. It answers immediately, in one round trip, so use it for anything you need the result of before you can say the next sentence. It remembers the earlier things you asked it, so you can refer back to them. For work that carries a ticket, or that you would want to watch in its own tab, use delegate instead.",
+      "Ask your hands — a Claude session kept for this conversation — to do one small job and tell you the answer: run the tests, check whether that compiles, what git blame says here, what a session concluded. Use it whenever you need the result before you can say your next sentence; it answers into the conversation, in one round trip, and remembers the earlier things you asked it. The line against research is not read-only versus not — both mostly read — it is that this answers now and a research session goes away and works where the user can watch it. So a question about how the codebase works is research; a fact you need to finish the sentence you are saying is this. Work that would leave a file changed is delegate.",
     parameters: {
       type: "object",
       properties: {
@@ -2054,6 +2054,7 @@ export function createSummonsSession(opts: SummonsSessionOptions): SummonsSessio
   // construction would be a temporal-dead-zone crash, and the one place that would surface is a
   // live conversation.
   let stopped = false;
+  let idleHandle: unknown = null;
   /** The mic half of the status, as the gate last reported it. */
   let gateReport: GateReport = {
     muted: false,
@@ -2079,6 +2080,21 @@ export function createSummonsSession(opts: SummonsSessionOptions): SummonsSessio
   const gate = createGate(opts);
   const delegations = createDelegations(opts, gate, timers, (finished) => {
     reportStatus();
+    /**
+     * A Summons waiting on work it asked for is not idle.
+     *
+     * The idle window is armed by what the *server* reports — speech, a reply, a tool call — and a
+     * delegated session runs for minutes with none of those happening. So a Summons hung itself up
+     * on the very thing it was waiting for, and the announcement below could never arrive: observed
+     * live. Every roster change re-arms it, and the watch loop makes one on every poll for as long
+     * as anything is still running.
+     *
+     * The consequence, stated plainly: a delegated session that runs for hours keeps its Summons
+     * open for hours. That is the right way round — hanging up on the work you are waiting for is
+     * worse than a socket left open — but the idle window no longer bounds a forgotten Summons whose
+     * delegate is stuck.
+     */
+    markActive();
     if (!finished) return;
     announce(
       `The session "${finished.session}" you delegated as "${finished.label}" has just finished. ` +
@@ -2134,7 +2150,6 @@ export function createSummonsSession(opts: SummonsSessionOptions): SummonsSessio
     gateReport = report;
     reportStatus();
   });
-  let idleHandle: unknown = null;
   /** Numbers already handed out, so the next call gets one no earlier call had. */
   let toolCalls = 0;
   /** The utterance the server is currently hearing — the gate's evidence of what came from where. */

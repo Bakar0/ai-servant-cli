@@ -104,6 +104,12 @@ function statusOf(live: SessionLiveness, assistantTurns: number): DelegationStat
 export interface SummonsActionsDeps {
   workspace: string;
   terminal?: string | undefined;
+  /**
+   * Launch delegated sessions in fast mode. On by default from `servant summon`, because a session
+   * a Summons delegates to is by definition the thing the conversation is waiting for, and fast mode
+   * is the same model with faster output rather than a smaller one.
+   */
+  fastMode?: boolean | undefined;
   /** Injected in tests; default to the real spawn, `gh` and transcript/registry readers. */
   launch?: typeof launchWorkspaceSession;
   claim?: typeof claimTicket;
@@ -137,6 +143,7 @@ export function createSummonsActions(deps: SummonsActionsDeps): SummonsActions {
           sessionName,
           terminal: deps.terminal,
           permissionMode: request.readOnly ? READ_ONLY_PERMISSION_MODE : undefined,
+          fastMode: deps.fastMode,
         });
       } catch (err) {
         // A Claim with no session behind it would read as in-flight work forever.

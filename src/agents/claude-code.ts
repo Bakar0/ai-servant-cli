@@ -17,6 +17,10 @@ export const claudeCodeAgent: AgentBackend = {
     const parts = ["claude"];
     if (sessionName) parts.push("--name", shellSingleQuote(sessionName));
     if (permissionMode) parts.push("--permission-mode", shellSingleQuote(permissionMode));
+    // There is no `--fast`: fast mode is a setting, and `--settings` loads *additional* settings
+    // rather than replacing the sources — so the session still gets the user's own hooks,
+    // permissions and status line, with this on top.
+    if (opts?.fastMode) parts.push("--settings", shellSingleQuote('{"fastMode":true}'));
     // `--add-dir <directories...>` is variadic — it greedily consumes every following arg until
     // the next option or a `--`. Pass all dirs to one flag, then terminate with `--` so the
     // positional prompt is parsed as the prompt and not swallowed as another directory.

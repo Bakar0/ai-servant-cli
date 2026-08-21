@@ -102,6 +102,13 @@ export const summonCommand = defineCommand({
       description:
         "You are on headphones, so the agent cannot hear itself. Keeps the mic open through its replies, which lets it be interrupted the instant you start speaking. On speakers this must stay off: an open mic there hears the agent and it interrupts itself.",
     },
+    "no-fast": {
+      type: "boolean",
+      required: false,
+      default: false,
+      description:
+        "Launch delegated Claude sessions without fast mode. Fast mode is the same model with faster output, and a session a Summons delegates to is what the conversation is waiting for — so it is on by default. Turn it off to compare, or if your plan does not offer it.",
+    },
     "no-barge-in": {
       type: "boolean",
       required: false,
@@ -244,7 +251,11 @@ export const summonCommand = defineCommand({
         reader: createWorkspaceReader(scope.root),
         // Delegated sessions open on the workspace, not the Summons' scope: `--repo` narrows what
         // the agent may read out loud, never what Claude is allowed to work on.
-        actions: createSummonsActions({ workspace, terminal: args.terminal }),
+        actions: createSummonsActions({
+          workspace,
+          terminal: args.terminal,
+          fastMode: !args["no-fast"],
+        }),
         // Constructed, not started: the session behind this is spawned by the first request that
         // needs it, and a Summons where nothing ever needs hands costs nothing.
         hands,

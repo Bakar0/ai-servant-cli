@@ -17,6 +17,15 @@ export interface LaunchOptions {
    */
   sessionName?: string;
   /**
+   * Run the session in Claude Code's fast mode — the same model with faster output, not a smaller
+   * one. Worth having wherever somebody is waiting on the answer, which for a Summons is always:
+   * the session it delegates to is the thing the conversation is waiting for.
+   *
+   * Backends without it ignore it, and so does a plan that does not offer it — it is a setting, and
+   * an unrecognised setting is dropped rather than an error.
+   */
+  fastMode?: boolean;
+  /**
    * Permission mode the session runs under. Read-only delegation uses this to spawn a session that
    * *cannot* write, which is what makes launching it without a spoken confirmation safe.
    * Backends with no equivalent flag ignore it.

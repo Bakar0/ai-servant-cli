@@ -29,6 +29,8 @@ export interface LaunchWorkspaceSessionOptions {
   sessionName?: string | undefined;
   /** Permission mode for the launched session (e.g. `plan`, which cannot write). */
   permissionMode?: string | undefined;
+  /** Run the session in fast mode — same model, faster output. Backends without it ignore it. */
+  fastMode?: boolean | undefined;
   /**
    * Runs once the workspace is scaffolded and before the tab opens. `servant spawn -r` uses it to
    * run its interactive repo picker in the current TTY, so the worktrees exist by the time the
@@ -76,6 +78,7 @@ export async function launchWorkspaceSession(
     prompt,
     sessionName,
     permissionMode: opts.permissionMode,
+    ...(opts.fastMode ? { fastMode: true } : {}),
   });
   const driver = opts.terminal ? getDriver(opts.terminal) : await detectTerminal();
 

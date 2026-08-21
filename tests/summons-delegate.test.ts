@@ -9,11 +9,14 @@ import {
 } from "../src/core/summons-delegate.ts";
 
 /** Records the order of claim and launch, which is the property that matters most here. */
-function fakeWorld(launchFails = false) {
+function fakeWorld(over: { launchFails?: boolean; fastMode?: boolean } | boolean = {}) {
+  const { launchFails = false, fastMode } =
+    typeof over === "boolean" ? { launchFails: over } : over;
   const order: string[] = [];
   const launches: LaunchWorkspaceSessionOptions[] = [];
   const actions = createSummonsActions({
     workspace: "ai_servant",
+    fastMode,
     async claim(_hub, ticket, session) {
       order.push(`claim #${ticket} for ${session}`);
       return { transferredFrom: null, alreadyHeld: false };
@@ -163,6 +166,18 @@ describe("read-only delegation cannot write, which is why it needs no confirmati
     await actions.delegate({ task: "how does the parser work", label: "parser q", readOnly: true });
 
     expect(launches[0]?.permissionMode).toBe("plan");
+  });
+
+  // A session a Summons delegates to is by definition what the conversation is waiting for, so the
+  // faster-output setting is on unless it was turned off. Off by default here, on from `summon`.
+  test("fast mode reaches the launch only when it was asked for", async () => {
+    const plain = fakeWorld();
+    await plain.actions.delegate({ task: "port the parser", label: "p", readOnly: false });
+    expect(plain.launches[0]?.fastMode).toBeUndefined();
+
+    const fast = fakeWorld({ fastMode: true });
+    await fast.actions.delegate({ task: "port the parser", label: "p", readOnly: false });
+    expect(fast.launches[0]?.fastMode).toBe(true);
   });
 
   test("work that changes things runs with the session's normal permissions", async () => {

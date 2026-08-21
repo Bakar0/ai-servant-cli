@@ -366,27 +366,43 @@ function fakeActions(overrides: Partial<SummonsActions> = {}) {
 }
 
 describe("a Summons watches what it delegated", () => {
-  /** A clock whose timeouts the test fires by hand, so the poll loop runs on demand. */
-  function pollableClock() {
+  /**
+   * A clock whose timeouts the test fires by hand.
+   *
+   * Two live here at once — the delegation poll and the idle hang-up — so they are told apart by the
+   * delay they were asked for. Firing the second while meaning the first would end the conversation
+   * underneath the test, and counting them together would hide the thing being asserted.
+   */
+  function pollableClock(idleMs: number) {
     let t = 1_000;
-    const queue: (() => void)[] = [];
+    let nextHandle = 1;
+    const live = new Map<number, { ms: number; fn: () => void }>();
+    /** Armings over the run, not what is armed now: re-arming replaces, so a count of one is stable. */
+    let idleArmings = 0;
     const timers: TimerPort = {
       now: () => t,
-      setTimeout: (fn) => {
-        queue.push(fn);
-        return queue.length;
+      setTimeout(fn, ms) {
+        if (ms === idleMs) idleArmings += 1;
+        const handle = nextHandle++;
+        live.set(handle, { ms, fn });
+        return handle;
       },
-      clearTimeout: () => queue.splice(0, queue.length),
+      clearTimeout(handle) {
+        if (typeof handle === "number") live.delete(handle);
+      },
     };
     return {
       timers,
       advance: (ms: number) => (t += ms),
-      /** Fire everything scheduled, and let the async poll settle. */
+      /** Fire the delegation polls only, and let the async work settle. */
       async tick() {
-        for (const fn of queue.splice(0, queue.length)) fn();
+        const due = [...live].filter(([, s]) => s.ms !== idleMs);
+        for (const [handle] of due) live.delete(handle);
+        for (const [, s] of due) s.fn();
         await new Promise((resolve) => setTimeout(resolve, 0));
       },
-      pending: () => queue.length,
+      idleArmings: () => idleArmings,
+      pending: () => [...live.values()].filter((s) => s.ms !== idleMs).length,
     };
   }
 
@@ -394,7 +410,7 @@ describe("a Summons watches what it delegated", () => {
     const { transport, state, emit } = fakeTransport();
     const { actions, reports } = fakeActions();
     const statuses: SummonsStatus[] = [];
-    const clock = pollableClock();
+    const clock = pollableClock(Number(overrides.idleTimeoutMs ?? -1));
     const session = createSummonsSession({
       transport,
       reader: fakeReader().reader,
@@ -477,6 +493,31 @@ describe("a Summons watches what it delegated", () => {
     await s.emit({ type: "reply_done" });
 
     expect(s.state.prompts).toHaveLength(1);
+  });
+
+  // Observed live: a Summons hung itself up on the very thing it was waiting for, so the session it
+  // spawned finished into a conversation that had already ended. The idle window is armed by what
+  // the server reports, and a delegated session running for minutes reports nothing at all.
+  test("waiting on delegated work is not idle", async () => {
+    const s = await delegated({ idleTimeoutMs: 60_000 });
+    const before = s.clock.idleArmings();
+
+    await s.clock.tick();
+
+    // The poll saw work still running, so the window is armed again rather than left to run out.
+    expect(s.clock.idleArmings()).toBeGreaterThan(before);
+    expect(s.state.closed).toBe(false);
+  });
+
+  // The other half: once there is nothing left to wait for, the ordinary window applies again — or
+  // a forgotten Summons with a finished delegate would stay open for good.
+  test("work finishing hands the idle window back", async () => {
+    const s = await delegated({ idleTimeoutMs: 60_000 });
+    s.reports.set("loadtest", { status: "finished", latest: "done", turns: 9 });
+
+    await s.clock.tick();
+
+    expect(s.clock.pending()).toBe(0);
   });
 
   test("hanging up stops the watch, so nothing outlives the conversation", async () => {
