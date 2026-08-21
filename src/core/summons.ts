@@ -570,18 +570,29 @@ function peakLevel(base64Pcm: string): number {
 export const DEFAULT_SUMMONS_IDLE_TIMEOUT_MS = 3 * 60 * 1000;
 
 /**
- * What the mic and the speaker are doing, as a status line has to say it.
+ * What the Summons is doing, as a status line has to say it.
  *
- * A real seam out of the echo gate rather than a line of debug text to be parsed. The level and the
- * floor exist nowhere else — they are computed frame by frame inside the gate and were, until this,
- * only ever emitted as prose — and they are the two numbers that explain a barge-in that fired or
+ * One snapshot rather than two feeds, because it is one line: two writers racing for it means the
+ * last one wins and drops the other's news. The echo gate owns the mic half and the controller owns
+ * the conversation half, and the controller composes them.
+ *
+ * The level and the floor exist nowhere else — computed frame by frame inside the gate, and once
+ * emitted only as debug prose — and they are the two numbers that explain a barge-in that fired or
  * did not. Watching them while talking over a reply is how the thresholds get tuned at all.
  */
-export interface SummonsMicState {
+export interface SummonsStatus {
   /** The user has the mic shut. Nothing reaches the model until they open it again. */
   muted: boolean;
-  /** The agent's voice is coming out of the speakers right now. */
-  speaking: boolean;
+  /**
+   * What is happening, output-side. `listening` means idle — and means only that, which is the whole
+   * point: a Summons composing a reply or running a tool used to say the same word as one doing
+   * nothing at all, so the one question a status line exists to answer had no answer.
+   */
+  doing: "listening" | "thinking" | "working" | "speaking";
+  /** The tool in flight, when `doing` is `working`. "Waiting" and "checking" are not the same thing. */
+  tool?: string | undefined;
+  /** How long `thinking` or `working` has run — because the question being asked is "is it stuck?". */
+  forMs: number;
   /**
    * Peak level of the last mic frame, admitted or held back. Zero while muted: the number says what
    * the model is hearing, and a muted mic is heard by nobody however loud the room is.
@@ -591,6 +602,18 @@ export interface SummonsMicState {
    * The level the agent's own echo settles at, learned from the frames the gate holds back — null
    * until the room has been characterised, which only happens once a reply has played.
    */
+  floor: number | null;
+}
+
+/** The mic half of a `SummonsStatus`, as the echo gate knows it. */
+interface GateReport {
+  muted: boolean;
+  speaking: boolean;
+  /** A reply is being generated — true from `response.created` until it is done or cancelled. */
+  generating: boolean;
+  /** When the generation in flight began, so a long silence is visibly a long one. */
+  generatingSince: number | null;
+  level: number;
   floor: number | null;
 }
 
@@ -647,11 +670,11 @@ export interface SummonsSessionOptions {
   /** Called with anything the API reports going wrong, so the user isn't left talking to silence. */
   onError?: ((message: string) => void) | undefined;
   /**
-   * Where the echo gate reports itself, so a status line can show the mic without parsing debug
-   * prose. Called on every mic frame and on every change to what the gate is doing, so it is a
-   * status *feed*: the receiver decides how often to redraw.
+   * Where the Summons reports what it is doing, so a status line needs no debug prose to parse.
+   * Called on every mic frame and on every change worth showing, so it is a status *feed*: the
+   * receiver decides how often to redraw.
    */
-  onMicState?: ((state: SummonsMicState) => void) | undefined;
+  onStatus?: ((status: SummonsStatus) => void) | undefined;
   /**
    * Traces the decisions no other output can explain — above all what the echo detector heard and
    * what it made of it. Those thresholds are a heuristic against a real room, so tuning them needs
@@ -1604,7 +1627,11 @@ type BargeInHeardBy = "over the speakers" | "the model's voice detection" | "the
  * drifted: the flush cleared the speaker while the window it was gating on stood, and the mic stayed
  * shut through the sentence the user had just interrupted with.
  */
-function createMicGate(opts: SummonsSessionOptions, timers: TimerPort) {
+function createMicGate(
+  opts: SummonsSessionOptions,
+  timers: TimerPort,
+  onReport: (report: GateReport) => void,
+) {
   const log = opts.callLog ?? NULL_CALL_LOG;
   /** When the audio queued so far will have finished playing out of the speakers. */
   let speakingUntil = 0;
@@ -1612,6 +1639,8 @@ function createMicGate(opts: SummonsSessionOptions, timers: TimerPort) {
   let playing: { itemId: string | null; startedAt: number; queuedMs: number } | null = null;
   /** True while the model is still producing the reply, so there is something left to cancel. */
   let generating = false;
+  /** When the reply in flight began being generated. Maintained only by `setGenerating`. */
+  let generatingSince: number | null = null;
   /** The level the agent's own echo settles at, learned from the frames the echo gate holds back. */
   let echoFloor: number | null = null;
   /** Frames of echo seen so far. Until there are enough, the room is not yet characterised. */
@@ -1624,12 +1653,25 @@ function createMicGate(opts: SummonsSessionOptions, timers: TimerPort) {
 
   /** Hand the status feed what the gate knows. Cheap, and called from everywhere the gate changes. */
   function report(): void {
-    opts.onMicState?.({
+    onReport({
       muted,
       speaking: timers.now() < speakingUntil,
+      generating,
+      generatingSince,
       level: muted ? 0 : lastLevel,
       floor: echoFloor,
     });
+  }
+
+  /**
+   * The one writer of `generating`, so its clock cannot drift from it. Four places turn it on or off
+   * — a reply starting, its first audio, its last byte, and a cancel — and the status line needs to
+   * know how long the current one has run, which is a fact only the transitions have.
+   */
+  function setGenerating(on: boolean): void {
+    if (on === generating) return;
+    generating = on;
+    generatingSince = on ? timers.now() : null;
   }
 
   /**
@@ -1641,7 +1683,7 @@ function createMicGate(opts: SummonsSessionOptions, timers: TimerPort) {
   function settle(): void {
     if (!playing || timers.now() < speakingUntil) return;
     playing = null;
-    generating = false;
+    setGenerating(false);
     loudFrames = 0;
   }
 
@@ -1715,7 +1757,7 @@ function createMicGate(opts: SummonsSessionOptions, timers: TimerPort) {
         playing = { itemId, startedAt: startsAt, queuedMs: duration };
       }
       speakingUntil = startsAt + duration;
-      generating = true;
+      setGenerating(true);
       opts.audio?.play(pcm);
       report();
     },
@@ -1726,14 +1768,16 @@ function createMicGate(opts: SummonsSessionOptions, timers: TimerPort) {
      * sent in that window safe, since the API refuses a second ask while a response is in flight.
      */
     replyStartedGenerating(): void {
-      generating = true;
+      setGenerating(true);
+      report();
     },
 
     replyFinishedGenerating(): void {
-      generating = false;
+      setGenerating(false);
       // Every byte of the reply is in, so the speaker is told where it ends — which is what lets it
       // play the last syllable rather than holding it back waiting for audio that will never come.
       opts.audio?.endReply();
+      report();
     },
 
     /**
@@ -1808,7 +1852,7 @@ function createMicGate(opts: SummonsSessionOptions, timers: TimerPort) {
       // left standing would swallow the sentence the user interrupted with.
       speakingUntil = 0;
       playing = null;
-      generating = false;
+      setGenerating(false);
       loudFrames = 0;
       lastInterruptAt = timers.now();
       opts.onDebug?.(`echo: cut the reply off (${heardBy})`);
@@ -1873,7 +1917,48 @@ export function createSummonsSession(opts: SummonsSessionOptions): SummonsSessio
   // and hands to relay through. Missing any one, the tools are not offered at all (below).
   const steering = createSteering(opts, gate, timers);
   const filing = createFiling(opts, gate);
-  const mic = createMicGate(opts, timers);
+  /** The mic half of the status, as the gate last reported it. */
+  let gateReport: GateReport = {
+    muted: false,
+    speaking: false,
+    generating: false,
+    generatingSince: null,
+    level: 0,
+    floor: null,
+  };
+  /** The tool call in flight, if there is one. What "working" is working on. */
+  let working: { tool: string; since: number } | null = null;
+
+  /**
+   * The two halves of the status line, joined here because this is the only place that holds both.
+   *
+   * `working` beats `speaking` beats `thinking`: a named tool is more use than "busy", and audible
+   * beats being composed because the user can hear the difference themselves.
+   */
+  function reportStatus(): void {
+    if (!opts.onStatus) return;
+    const doing = working
+      ? "working"
+      : gateReport.speaking
+        ? "speaking"
+        : gateReport.generating
+          ? "thinking"
+          : "listening";
+    const since = working ? working.since : (gateReport.generatingSince ?? 0);
+    opts.onStatus({
+      muted: gateReport.muted,
+      doing,
+      ...(working ? { tool: working.tool } : {}),
+      forMs: doing === "working" || doing === "thinking" ? Math.max(0, timers.now() - since) : 0,
+      level: gateReport.level,
+      floor: gateReport.floor,
+    });
+  }
+
+  const mic = createMicGate(opts, timers, (report) => {
+    gateReport = report;
+    reportStatus();
+  });
   let idleHandle: unknown = null;
   let stopped = false;
   /** Numbers already handed out, so the next call gets one no earlier call had. */
@@ -1950,6 +2035,24 @@ export function createSummonsSession(opts: SummonsSessionOptions): SummonsSessio
   // Tool failures are conversation, not crashes: the agent hears what went wrong and can say so.
   async function handleToolCall(call: Extract<RealtimeInbound, { type: "tool_call" }>) {
     const startedAt = timers.now();
+    // Said before the work, not after it. A tool call is recorded when it *finishes*, which is the
+    // right thing for a record and useless while you are waiting — a Summons spawning a session or
+    // reading a transcript looked exactly like one that had gone quiet. The status line says which,
+    // by name, for as long as it takes.
+    working = { tool: call.name, since: startedAt };
+    reportStatus();
+    try {
+      await runToolCall(call, startedAt);
+    } finally {
+      working = null;
+      reportStatus();
+    }
+  }
+
+  async function runToolCall(
+    call: Extract<RealtimeInbound, { type: "tool_call" }>,
+    startedAt: number,
+  ) {
     // Every tool call is recorded, whatever it did — the point of the Call log is that nothing the
     // agent does on the user's behalf happens invisibly. `result` reaches this only from the calls
     // the controller answers itself; the rest is explained on the entry kind.

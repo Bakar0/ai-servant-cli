@@ -264,10 +264,10 @@ export const summonCommand = defineCommand({
         voice: args.voice,
         idleTimeoutMs: idleMs,
         onStopped: () => ended(),
-        // Straight to the status line when there is one: the level and the learned echo floor exist
-        // nowhere else, and watching them while talking over a reply is the only way the detector's
-        // thresholds get tuned (servant-summon#3).
-        onMicState: view ? (state) => view.micState(state) : undefined,
+        // Straight to the status line when there is one. It is the only place a Summons says what it
+        // is doing while it does it, and the only place the mic level and the learned echo floor
+        // appear as numbers at all (servant-summon#3, #10).
+        onStatus: view ? (status) => view.status(status) : undefined,
         onDebug: debug,
         onError: (message) => complain(message),
       });

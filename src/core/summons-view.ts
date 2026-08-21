@@ -13,7 +13,7 @@
 
 import { formatCallLogEntry, formatToolOutcome } from "./call-log/live.ts";
 import { type CallLogEntry, type CallLogPort, redactFields } from "./call-log/record.ts";
-import type { SummonsMicState } from "./summons.ts";
+import type { SummonsStatus } from "./summons.ts";
 
 /**
  * The terminal, as the view needs it. Three operations, and the middle one takes its two halves
@@ -82,19 +82,35 @@ function level(value: number): string {
   return value >= 1_000 ? `${(value / 1_000).toFixed(1)}k` : String(Math.round(value));
 }
 
+/** `4s`, `12s`, `2m` — coarse on purpose, since the question is "is it stuck?" and not "how long". */
+function elapsed(ms: number): string {
+  const seconds = Math.round(ms / 1000);
+  return seconds < 60 ? `${seconds}s` : `${Math.round(seconds / 60)}m`;
+}
+
 /**
- * What the mic is doing, as the right-hand end of the status line.
+ * What the Summons is doing, as the right-hand end of the status line: what it is up to, then what
+ * the mic is hearing. Both, always, because they answer different questions — a Summons can be
+ * muted and thinking at once, and a line that showed one of them would be wrong half the time.
  *
  * The level and the floor are here for the reason servant-summon#3 exists: the echo detector's
  * thresholds are a heuristic against a real room, and nobody can tune them without watching the two
  * numbers while talking over a reply. Muted shows neither, because a muted mic is heard by nobody
  * however loud the room gets, and a moving number would say otherwise.
  */
-export function formatMicState(state: SummonsMicState): string {
-  if (state.muted) return "◼ muted";
-  const floor = state.floor === null ? "—" : level(state.floor);
-  const label = state.speaking ? "▶ speaking" : "● listening";
-  return `${label}   ${level(state.level)} / floor ${floor}`;
+export function formatSummonsStatus(status: SummonsStatus): string {
+  const doing =
+    status.doing === "working"
+      ? `⚙ ${status.tool ?? "working"} ${elapsed(status.forMs)}`
+      : status.doing === "thinking"
+        ? `◐ thinking ${elapsed(status.forMs)}`
+        : status.doing === "speaking"
+          ? "▶ speaking"
+          : "● listening";
+  const mic = status.muted
+    ? "◼ muted"
+    : `${level(status.level)} / floor ${status.floor === null ? "—" : level(status.floor)}`;
+  return `${doing}   ${mic}`;
 }
 
 /** The left-hand end: what this Summons is. Fixed for its whole life, so it is composed once. */
@@ -182,8 +198,8 @@ export interface SummonsView extends CallLogPort {
   hangUp(): void;
   /** Up and down, with whatever is on the line now so a half-typed draft survives the trip. */
   history(direction: "back" | "forward", current: string): void;
-  /** What the echo gate reports, straight onto the status line. */
-  micState(state: SummonsMicState): void;
+  /** What the Summons reports about itself, straight onto the status line. */
+  status(status: SummonsStatus): void;
   /** Anything the command itself has to say: the banner, `--debug`, a dying speaker. */
   say(text: string): void;
 }
@@ -204,8 +220,8 @@ export function createSummonsView(opts: SummonsViewOptions): SummonsView {
   const print = (lines: readonly string[]) => opts.screen.print(lines);
   const say = (text: string) => print([`       · ${text}`]);
 
-  function showStatus(state: SummonsMicState): void {
-    opts.screen.status(title, formatMicState(state));
+  function showStatus(status: SummonsStatus): void {
+    opts.screen.status(title, formatSummonsStatus(status));
   }
 
   function showTool(argument: string): void {
@@ -262,7 +278,7 @@ export function createSummonsView(opts: SummonsViewOptions): SummonsView {
   // Drawn once before anything has happened, so the Summons says what it is from the moment it
   // opens. Waiting for the first mic frame would leave the line blank exactly when a mic that never
   // started is the thing the user is trying to diagnose.
-  showStatus({ muted: false, speaking: false, level: 0, floor: null });
+  showStatus({ muted: false, doing: "listening", forMs: 0, level: 0, floor: null });
 
   return {
     record(entry) {
@@ -327,7 +343,7 @@ export function createSummonsView(opts: SummonsViewOptions): SummonsView {
       opts.screen.setInput(at === typed.length ? draft : (typed[at] ?? ""));
     },
 
-    micState: showStatus,
+    status: showStatus,
 
     say,
   };

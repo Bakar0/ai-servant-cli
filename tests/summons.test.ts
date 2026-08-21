@@ -10,7 +10,7 @@ import {
   type RealtimeTransport,
   type SessionsPort,
   type SummonsActions,
-  type SummonsMicState,
+  type SummonsStatus,
   type SummonsSessionOptions,
   type TicketFilingPort,
   type TicketsPort,
@@ -1767,10 +1767,10 @@ describe("barging in on the agent", () => {
   });
 });
 
-describe("what the status line is told about the mic", () => {
+describe("what the status line is told", () => {
   async function watched(overrides: Partial<SummonsSessionOptions> = {}) {
-    const states: SummonsMicState[] = [];
-    const s = await audioSession({ onMicState: (state) => states.push(state), ...overrides });
+    const states: SummonsStatus[] = [];
+    const s = await audioSession({ onStatus: (status) => states.push(status), ...overrides });
     return { ...s, states, latest: () => states.at(-1) };
   }
 
@@ -1779,7 +1779,13 @@ describe("what the status line is told about the mic", () => {
 
     s.mic(micChunk(200, 4_000));
 
-    expect(s.latest()).toEqual({ muted: false, speaking: false, level: 4_000, floor: null });
+    expect(s.latest()).toEqual({
+      muted: false,
+      doing: "listening",
+      forMs: 0,
+      level: 4_000,
+      floor: null,
+    });
   });
 
   test("a muted mic reports zero, because zero is what the model is hearing", async () => {
@@ -1795,14 +1801,81 @@ describe("what the status line is told about the mic", () => {
   test("the floor the echo detector learned is reported, not just described in debug prose", async () => {
     const s = await watched();
     await s.emit({ type: "audio", pcm: micChunk(4_000), itemId: "item_1" });
-    expect(s.latest()?.speaking).toBe(true);
+    expect(s.latest()?.doing).toBe("speaking");
 
     // One frame of the agent's own voice coming back in is what characterises the room.
     s.advance(200);
     s.mic(micChunk(200, 600));
 
     expect(s.latest()?.floor).toBe(600);
-    expect(s.latest()?.speaking).toBe(true);
+    expect(s.latest()?.doing).toBe("speaking");
+  });
+
+  // The complaint this answers, from a live run: a Summons composing a reply said `listening`, which
+  // is the same word it says when it is doing nothing at all.
+  test("a reply being composed reads as thinking, not as listening", async () => {
+    const s = await watched();
+    expect(s.latest()?.doing ?? "listening").toBe("listening");
+
+    await s.emit({ type: "reply_started" });
+
+    expect(s.latest()?.doing).toBe("thinking");
+    await s.emit({ type: "reply_done" });
+    expect(s.latest()?.doing).toBe("listening");
+  });
+
+  test("thinking carries how long it has been thinking", async () => {
+    const s = await watched();
+    await s.emit({ type: "reply_started" });
+    s.advance(4_000);
+
+    s.mic(micChunk(200, 100));
+
+    expect(s.latest()?.forMs).toBe(4_000);
+  });
+
+  // Named, because "waiting" and "checking" are different answers and the user asked which.
+  test("a tool call in flight is reported by name, and cleared when it returns", async () => {
+    const seen: string[] = [];
+    const s = await audioSession({
+      onStatus: (status) =>
+        seen.push(status.tool ? `${status.doing}:${status.tool}` : status.doing),
+      reader: fakeReader({
+        async readFile() {
+          return "contents";
+        },
+      }).reader,
+    });
+
+    await s.emit({
+      type: "tool_call",
+      callId: "c1",
+      name: "read_file",
+      args: '{"path":"GOAL.md"}',
+    });
+
+    expect(seen).toContain("working:read_file");
+    expect(seen.at(-1)).toBe("listening");
+  });
+
+  // A tool that throws still has to hand the status line back, or the Summons reads as busy forever.
+  test("a tool that fails still stops reading as working", async () => {
+    const s = await watched({
+      reader: fakeReader({
+        async readFile() {
+          throw new Error("no such file");
+        },
+      }).reader,
+    });
+
+    await s.emit({
+      type: "tool_call",
+      callId: "c1",
+      name: "read_file",
+      args: '{"path":"gone.md"}',
+    });
+
+    expect(s.latest()?.doing).toBe("listening");
   });
 
   test("muting and unmuting are reported without waiting for the next frame", async () => {

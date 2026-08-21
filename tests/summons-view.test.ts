@@ -8,11 +8,11 @@ import {
   SUMMONS_VIEW_HINT,
   TOOL_DETAIL_MEMORY,
   createSummonsView,
-  formatMicState,
+  formatSummonsStatus,
   formatSummonsTitle,
 } from "../src/core/summons-view.ts";
 import type { SummonsViewSession } from "../src/core/summons-view.ts";
-import type { SummonsMicState } from "../src/core/summons.ts";
+import type { SummonsStatus } from "../src/core/summons.ts";
 
 function fakeSession(overrides: Partial<SummonsViewSession> = {}) {
   const state = { typed: [] as string[], interrupts: 0, mutes: 0, stops: 0, cutOff: true };
@@ -69,28 +69,55 @@ const toolEntry = (over: Partial<Extract<CallLogEntry, { type: "tool" }>> = {}):
 });
 
 describe("the status line", () => {
+  const idle: SummonsStatus = {
+    muted: false,
+    doing: "listening",
+    forMs: 0,
+    level: 1_400,
+    floor: 900,
+  };
+
   test("shows the level against the learned floor, which is the whole of servant-summon#3 you get for free", () => {
-    expect(formatMicState({ muted: false, speaking: false, level: 1_400, floor: 900 })).toBe(
-      "● listening   1.4k / floor 900",
-    );
+    expect(formatSummonsStatus(idle)).toBe("● listening   1.4k / floor 900");
   });
 
   test("says the agent is speaking, and keeps the numbers — that is when they matter", () => {
-    expect(formatMicState({ muted: false, speaking: true, level: 2_600, floor: 900 })).toBe(
+    expect(formatSummonsStatus({ ...idle, doing: "speaking", level: 2_600 })).toBe(
       "▶ speaking   2.6k / floor 900",
     );
   });
 
+  // The two states that used to read as `listening`, which is what made a working Summons look like
+  // an idle one. Both carry how long, because the question being asked is "is it stuck?".
+  test("a reply being composed says so, and for how long", () => {
+    expect(formatSummonsStatus({ ...idle, doing: "thinking", forMs: 3_200 })).toBe(
+      "◐ thinking 3s   1.4k / floor 900",
+    );
+  });
+
+  test("a tool in flight is named, because waiting and checking are not the same thing", () => {
+    expect(
+      formatSummonsStatus({ ...idle, doing: "working", tool: "check_delegation", forMs: 12_000 }),
+    ).toBe("⚙ check_delegation 12s   1.4k / floor 900");
+  });
+
+  test("a long wait rounds to minutes rather than counting seconds forever", () => {
+    expect(
+      formatSummonsStatus({ ...idle, doing: "working", tool: "delegate", forMs: 130_000 }),
+    ).toContain("delegate 2m");
+  });
+
   // A muted mic is heard by nobody however loud the room is, and a moving number would say the
-  // opposite.
-  test("a muted mic shows no numbers at all", () => {
-    expect(formatMicState({ muted: true, speaking: false, level: 0, floor: 900 })).toBe("◼ muted");
+  // opposite. Muting is about input, so it does not hide what the Summons is doing.
+  test("a muted mic shows no numbers, and still shows what the Summons is doing", () => {
+    expect(formatSummonsStatus({ ...idle, muted: true, level: 0 })).toBe("● listening   ◼ muted");
+    expect(formatSummonsStatus({ ...idle, muted: true, doing: "thinking", forMs: 1_000 })).toBe(
+      "◐ thinking 1s   ◼ muted",
+    );
   });
 
   test("an unlearned floor is a dash, not a zero — zero would read as a floor of nothing", () => {
-    expect(formatMicState({ muted: false, speaking: false, level: 120, floor: null })).toContain(
-      "floor —",
-    );
+    expect(formatSummonsStatus({ ...idle, floor: null })).toContain("floor —");
   });
 
   test("the title names the workspace, and the repo only when it is not the whole workspace", () => {
@@ -121,7 +148,7 @@ describe("the status line", () => {
   test("what the gate reports lands on the status line", () => {
     const v = built();
 
-    v.view.micState({ muted: false, speaking: false, level: 800, floor: 600 } as SummonsMicState);
+    v.view.status({ muted: false, doing: "listening", forMs: 0, level: 800, floor: 600 });
 
     expect(v.status.at(-1)).toEqual({
       left: "servant summon · datalake-loadtest",
