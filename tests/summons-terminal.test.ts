@@ -93,6 +93,15 @@ describe("the Summons terminal", () => {
     expect(frame).toContain("say something, or /help");
   });
 
+  test("delegated work gets its own row in the footer", async () => {
+    const t = await mounted();
+
+    t.terminal.screen.work("⇒ loadtest → summon-t3  running 4m");
+    await t.renderOnce();
+
+    expect(t.captureCharFrame()).toContain("loadtest → summon-t3");
+  });
+
   test("enter hands the typed line over, once", async () => {
     const t = await mounted();
 

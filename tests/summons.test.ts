@@ -28,6 +28,7 @@ function fakeTransport() {
     audioSent: [] as string[],
     toolResults: [] as { callId: string; output: string }[],
     notes: [] as string[],
+    prompts: [] as string[],
     userTexts: [] as string[],
     cancelled: 0,
     truncated: [] as { itemId: string; playedMs: number }[],
@@ -52,6 +53,9 @@ function fakeTransport() {
     },
     sendAgentNote(text) {
       state.notes.push(text);
+    },
+    promptAgent(text) {
+      state.prompts.push(text);
     },
     sendUserText(text) {
       state.userTexts.push(text);
@@ -360,6 +364,130 @@ function fakeActions(overrides: Partial<SummonsActions> = {}) {
   };
   return { actions, launched, reports };
 }
+
+describe("a Summons watches what it delegated", () => {
+  /** A clock whose timeouts the test fires by hand, so the poll loop runs on demand. */
+  function pollableClock() {
+    let t = 1_000;
+    const queue: (() => void)[] = [];
+    const timers: TimerPort = {
+      now: () => t,
+      setTimeout: (fn) => {
+        queue.push(fn);
+        return queue.length;
+      },
+      clearTimeout: () => queue.splice(0, queue.length),
+    };
+    return {
+      timers,
+      advance: (ms: number) => (t += ms),
+      /** Fire everything scheduled, and let the async poll settle. */
+      async tick() {
+        for (const fn of queue.splice(0, queue.length)) fn();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      },
+      pending: () => queue.length,
+    };
+  }
+
+  async function delegated(overrides: Partial<SummonsSessionOptions> = {}) {
+    const { transport, state, emit } = fakeTransport();
+    const { actions, reports } = fakeActions();
+    const statuses: SummonsStatus[] = [];
+    const clock = pollableClock();
+    const session = createSummonsSession({
+      transport,
+      reader: fakeReader().reader,
+      actions,
+      instructions: "hi",
+      idleTimeoutMs: 0,
+      timers: clock.timers,
+      onStatus: (status) => statuses.push(status),
+      ...overrides,
+    });
+    await session.start();
+    // Delegating is Guarded, so the work only starts once the user has said yes.
+    await emit({
+      type: "tool_call",
+      callId: "call_d",
+      name: "delegate",
+      args: JSON.stringify({ task: "load-test the lake", label: "loadtest" }),
+    });
+    await emit({ type: "user_transcript", text: "yes", itemId: "u1" });
+    return { session, state, emit, reports, statuses, clock, latest: () => statuses.at(-1) };
+  }
+
+  test("what is delegated shows up in the status, without anyone asking", async () => {
+    const s = await delegated();
+
+    expect(s.latest()?.delegations).toEqual([
+      { label: "loadtest", session: "demo-1", state: "running", forMs: 0 },
+    ]);
+  });
+
+  // The complaint this answers: "he didn't know when the session he spawned finished". A Summons
+  // used to launch a session and never mention its outcome again.
+  test("a session finishing is noticed, said out loud, and recorded", async () => {
+    const s = await delegated();
+    expect(s.state.prompts).toEqual([]);
+
+    s.reports.set("loadtest", { status: "finished", latest: "17k rps, no errors", turns: 9 });
+    await s.clock.tick();
+
+    expect(s.state.prompts).toHaveLength(1);
+    expect(s.state.prompts[0]).toContain("loadtest");
+    expect(s.state.prompts[0]).toContain("17k rps, no errors");
+    expect(s.latest()?.delegations[0]?.state).toBe("finished");
+  });
+
+  test("it says so once, not on every poll after", async () => {
+    const s = await delegated();
+    s.reports.set("loadtest", { status: "finished", latest: "done", turns: 9 });
+
+    await s.clock.tick();
+    await s.clock.tick();
+    await s.clock.tick();
+
+    expect(s.state.prompts).toHaveLength(1);
+  });
+
+  // `statusOf` refuses to call an unreadable registry "finished" for the same reason: a repo would
+  // be freed on that word. Announcing it would be the same mistake, out loud.
+  test("a registry it cannot read is not a session that finished", async () => {
+    const s = await delegated();
+    s.reports.set("loadtest", { status: "unknown", latest: null, turns: 0 });
+
+    await s.clock.tick();
+
+    expect(s.state.prompts).toEqual([]);
+    expect(s.latest()?.delegations[0]?.state).toBe("unknown");
+  });
+
+  // The opposite answer from a typed turn, and deliberately: a typed turn cancels the reply because
+  // the person has already moved on, and news nobody asked for has no business cutting them off.
+  test("news waits for the reply in flight rather than cutting it off", async () => {
+    const s = await delegated();
+    await s.emit({ type: "reply_started" });
+    s.reports.set("loadtest", { status: "finished", latest: "done", turns: 9 });
+
+    await s.clock.tick();
+    expect(s.state.prompts).toEqual([]);
+    expect(s.state.cancelled).toBe(0);
+
+    await s.emit({ type: "reply_done" });
+
+    expect(s.state.prompts).toHaveLength(1);
+  });
+
+  test("hanging up stops the watch, so nothing outlives the conversation", async () => {
+    const s = await delegated();
+    expect(s.clock.pending()).toBeGreaterThan(0);
+
+    await s.session.stop();
+
+    expect(s.clock.pending()).toBe(0);
+  });
+});
 
 describe("delegating by voice is Guarded", () => {
   async function summoned(actionOverrides: Partial<SummonsActions> = {}) {
@@ -1342,6 +1470,7 @@ describe("a session that dies while it is still starting", () => {
       truncateAudio() {},
       sendToolResult() {},
       sendAgentNote() {},
+      promptAgent() {},
       sendUserText() {},
       async close() {
         events.push("socket-closed");
@@ -1371,6 +1500,7 @@ describe("a session that dies while it is still starting", () => {
       truncateAudio() {},
       sendToolResult() {},
       sendAgentNote() {},
+      promptAgent() {},
       sendUserText() {},
       async close() {
         events.push("socket-closed");
@@ -1785,6 +1915,7 @@ describe("what the status line is told", () => {
       forMs: 0,
       level: 4_000,
       floor: null,
+      delegations: [],
     });
   });
 

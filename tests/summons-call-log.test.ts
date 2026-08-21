@@ -25,6 +25,7 @@ function fakeTransport() {
     truncateAudio() {},
     sendToolResult() {},
     sendAgentNote() {},
+    promptAgent() {},
     sendUserText() {},
     async close() {},
   };

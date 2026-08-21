@@ -48,7 +48,12 @@ export type CallLogEntry =
       task: string;
       /** null while queued behind another task on the same repo, or when the launch failed. */
       session: string | null;
-      status: "launched" | "queued" | "failed";
+      /**
+       * `finished` is the one of these that arrives without anyone asking for it: the Summons
+       * watches what it delegated, so a session stopping is an event in the conversation rather than
+       * something only a later question would have uncovered.
+       */
+      status: "launched" | "queued" | "failed" | "finished";
       detail?: string;
       ticket?: number;
       repo?: string;

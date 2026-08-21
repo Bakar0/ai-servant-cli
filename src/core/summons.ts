@@ -464,6 +464,13 @@ export interface RealtimeTransport {
    * decides after the tool call has already been answered.
    */
   sendAgentNote(text: string): void;
+  /**
+   * A note *and* an ask: something happened that the agent should tell the user about, with nobody
+   * having spoken to prompt it. The one thing a Summons says unbidden — a delegated session
+   * finishing — and the reason it is not `sendAgentNote` is precisely that nothing is under way for
+   * a note to steer.
+   */
+  promptAgent(text: string): void;
   close(): Promise<void>;
 }
 
@@ -603,6 +610,11 @@ export interface SummonsStatus {
    * until the room has been characterised, which only happens once a reply has played.
    */
   floor: number | null;
+  /**
+   * Work handed to Claude sessions in this conversation, as it stands. Empty for the great majority
+   * of Summonses, and the answer to "am I still connected to what I asked for" for the rest.
+   */
+  delegations: readonly SummonsDelegationStatus[];
 }
 
 /** The mic half of a `SummonsStatus`, as the echo gate knows it. */
@@ -786,6 +798,33 @@ interface TrackedDelegation {
   /** Set once the session has been observed to have finished, which frees its repo. */
   finished: boolean;
   queuedBehind: string | null;
+  /** When its session started, so a Summons can show how long the work has been running. */
+  launchedAt: number | null;
+  /** The last status anyone read off it, so the footer has something to show between polls. */
+  lastSeen: DelegationStatus | null;
+}
+
+/** How often the Summons looks at what it delegated. About not being noisy: the read is ~20ms. */
+const DELEGATION_POLL_MS = 10_000;
+
+/** One delegation, as a status line shows it. */
+export interface SummonsDelegationStatus {
+  label: string;
+  /** null while queued behind another task on the same repo. */
+  session: string | null;
+  state: "queued" | "running" | "finished" | "unknown";
+  /** How long since its session started. Zero while queued. */
+  forMs: number;
+}
+
+/** A delegated session having stopped — the one thing a Summons says without being asked. */
+export interface FinishedDelegation {
+  label: string;
+  session: string;
+  /** The last thing the session said, which is the answer the user is waiting for. */
+  latest: string | null;
+  /** A queued task this one finishing let start, if there was one. */
+  alsoStarted: string | null;
 }
 
 /** Compare labels the way a person says them — case, punctuation and "the" do not count. */
@@ -905,7 +944,17 @@ type Gate = ReturnType<typeof createGate>;
  * Delegation: holding a proposed job at the gate until the user says yes, tracking what has been
  * handed out, and keeping two tasks on one repo from running at once.
  */
-function createDelegations(opts: SummonsSessionOptions, gate: Gate) {
+function createDelegations(
+  opts: SummonsSessionOptions,
+  gate: Gate,
+  timers: TimerPort,
+  /**
+   * Anything that changed what the roster says. `finished` is set only for the one change worth
+   * saying out loud; every other one — a launch, a queue, a poll that saw a session go unreadable —
+   * is a redraw and nothing more.
+   */
+  onChange: (finished: FinishedDelegation | null) => void,
+) {
   const actions = opts.actions;
   const log = opts.callLog ?? NULL_CALL_LOG;
   const tracked: TrackedDelegation[] = [];
@@ -941,6 +990,10 @@ function createDelegations(opts: SummonsSessionOptions, gate: Gate) {
     if (!actions) throw new Error("This Summons has nothing to delegate to.");
     entry.handle = await actions.delegate(entry.request);
     entry.queuedBehind = null;
+    entry.launchedAt = timers.now();
+    entry.lastSeen = "running";
+    watch();
+    onChange(null);
   }
 
   /**
@@ -1008,20 +1061,81 @@ function createDelegations(opts: SummonsSessionOptions, gate: Gate) {
     request: DelegationRequest,
     result:
       | { status: "launched"; session: string | null }
+      | { status: "finished"; session: string; detail?: string | undefined }
       | { status: "queued"; detail: string }
       | { status: "failed"; detail: string },
   ): void {
+    const named = result.status === "launched" || result.status === "finished";
     log.record({
       type: "delegation",
       mode: request.readOnly ? "research" : "delegate",
       label: request.label,
       task: request.task,
-      session: result.status === "launched" ? result.session : null,
+      session: named ? result.session : null,
       status: result.status,
-      ...(result.status === "launched" ? {} : { detail: result.detail }),
+      ...(named ? {} : { detail: result.detail }),
+      ...(result.status === "finished" && result.detail ? { detail: result.detail } : {}),
       ...(request.ticket ? { ticket: request.ticket } : {}),
       ...(request.repo ? { repo: request.repo } : {}),
     });
+  }
+
+  /** Everything launched and not yet known to have stopped — what there is to watch. */
+  function running(): TrackedDelegation[] {
+    return tracked.filter((t) => t.handle && !t.finished);
+  }
+
+  let watchHandle: unknown = null;
+
+  /**
+   * Look at what was delegated, on a clock, so a session stopping is something the Summons *notices*
+   * rather than something only a later question would have uncovered. It was the one thing a Summons
+   * did whose outcome it never mentioned.
+   *
+   * Scheduled only while something is running, and cleared when the Summons hangs up — a poll timer
+   * outliving the conversation is a process that will not exit.
+   */
+  function watch(): void {
+    if (watchHandle !== null || !actions || running().length === 0) return;
+    watchHandle = timers.setTimeout(() => {
+      watchHandle = null;
+      void poll();
+    }, DELEGATION_POLL_MS);
+  }
+
+  async function poll(): Promise<void> {
+    let changed = false;
+    for (const entry of running()) {
+      if (!entry.handle || !actions) continue;
+      let report: DelegationReport;
+      try {
+        report = await actions.observe(entry.handle);
+      } catch {
+        // An unreadable registry is not a finished session (`statusOf` is careful about this for the
+        // same reason) — so this looks again next time rather than announcing anything.
+        continue;
+      }
+      entry.lastSeen = report.status;
+      if (report.status !== "finished") continue;
+      changed = true;
+      entry.finished = true;
+      const alsoStarted = await drain(entry.request.repo);
+      recordDelegation(entry.request, {
+        status: "finished",
+        session: entry.handle.sessionName,
+        ...(alsoStarted ? { detail: `freed the repo, so "${alsoStarted}" started` } : {}),
+      });
+      onChange({
+        label: labelOf(entry),
+        session: entry.handle.sessionName,
+        latest: report.latest,
+        alsoStarted,
+      });
+    }
+    // A poll that saw nothing finish can still have changed what the roster says — a session going
+    // unreadable, or an age ticking over — so the redraw is unconditional and the announcement is not.
+    if (!changed) onChange(null);
+    watch();
   }
 
   /** Track and launch. Throws only if the launch itself failed, leaving nothing tracked. */
@@ -1031,6 +1145,8 @@ function createDelegations(opts: SummonsSessionOptions, gate: Gate) {
       handle: null,
       finished: false,
       queuedBehind: null,
+      launchedAt: null,
+      lastSeen: null,
     };
     tracked.push(entry);
     try {
@@ -1043,6 +1159,7 @@ function createDelegations(opts: SummonsSessionOptions, gate: Gate) {
         return { launched: true, label: request.label, session };
       }
       recordDelegation(request, { status: "queued", detail: outcome.behind });
+      onChange(null);
       return { launched: false, label: request.label, queuedBehind: outcome.behind };
     } catch (err) {
       tracked.pop();
@@ -1132,6 +1249,28 @@ function createDelegations(opts: SummonsSessionOptions, gate: Gate) {
           "Nothing has been launched. Say out loud, in one sentence, what you are about to hand to Claude, then ask the user to answer yes or no. Do not call delegate again — their answer is what decides.",
       });
       return { outcome: "held", detail: label };
+    },
+
+    /** What is delegated and how it stands, for the status line. Never asks anyone: reads what the watch loop last saw. */
+    roster(): SummonsDelegationStatus[] {
+      return tracked.map((entry) => ({
+        label: labelOf(entry),
+        session: entry.handle?.sessionName ?? null,
+        state: entry.finished
+          ? ("finished" as const)
+          : !entry.handle
+            ? ("queued" as const)
+            : entry.lastSeen === "unknown"
+              ? ("unknown" as const)
+              : ("running" as const),
+        forMs: entry.launchedAt === null ? 0 : Math.max(0, timers.now() - entry.launchedAt),
+      }));
+    },
+
+    /** Hanging up stops the watch: a poll timer outliving its Summons is a process that never exits. */
+    stopWatching(): void {
+      timers.clearTimeout(watchHandle);
+      watchHandle = null;
     },
 
     /** Silent, and never gated — observing changes nothing, so nothing is confirmed. */
@@ -1911,12 +2050,10 @@ export function createSummonsSession(opts: SummonsSessionOptions): SummonsSessio
   const timers = opts.timers ?? realTimers;
   const idleTimeoutMs = opts.idleTimeoutMs ?? DEFAULT_SUMMONS_IDLE_TIMEOUT_MS;
   const log = opts.callLog ?? NULL_CALL_LOG;
-  const gate = createGate(opts);
-  const delegations = createDelegations(opts, gate);
-  // Steering needs all three: a registry to resolve a name against, a hub to check the Claim on,
-  // and hands to relay through. Missing any one, the tools are not offered at all (below).
-  const steering = createSteering(opts, gate, timers);
-  const filing = createFiling(opts, gate);
+  // Declared before the collaborators below, because their callbacks read it. A `let` read during
+  // construction would be a temporal-dead-zone crash, and the one place that would surface is a
+  // live conversation.
+  let stopped = false;
   /** The mic half of the status, as the gate last reported it. */
   let gateReport: GateReport = {
     muted: false,
@@ -1929,6 +2066,33 @@ export function createSummonsSession(opts: SummonsSessionOptions): SummonsSessio
   /** The tool call in flight, if there is one. What "working" is working on. */
   let working: { tool: string; since: number } | null = null;
 
+  /**
+   * Announcements waiting for the reply in flight to finish. The API refuses a second ask while a
+   * response is active, and unlike a typed turn — where cancelling is right, because the person has
+   * already moved on — news can wait. Cutting the agent off mid-sentence to interrupt with something
+   * nobody asked for is the one reading of this that would be rude.
+   *
+   * One at a time: flushing the queue in a burst would collide with itself on the second ask.
+   */
+  const waitingToBeSaid: string[] = [];
+
+  const gate = createGate(opts);
+  const delegations = createDelegations(opts, gate, timers, (finished) => {
+    reportStatus();
+    if (!finished) return;
+    announce(
+      `The session "${finished.session}" you delegated as "${finished.label}" has just finished. ` +
+        "Tell the user now, in one short sentence, and offer to go through what it did. " +
+        `The last thing it said was: ${finished.latest ?? "(nothing it said was readable)"}` +
+        (finished.alsoStarted
+          ? ` That freed its repo, so the queued task "${finished.alsoStarted}" has started.`
+          : ""),
+    );
+  });
+  // Steering needs all three: a registry to resolve a name against, a hub to check the Claim on,
+  // and hands to relay through. Missing any one, the tools are not offered at all (below).
+  const steering = createSteering(opts, gate, timers);
+  const filing = createFiling(opts, gate);
   /**
    * The two halves of the status line, joined here because this is the only place that holds both.
    *
@@ -1952,7 +2116,18 @@ export function createSummonsSession(opts: SummonsSessionOptions): SummonsSessio
       forMs: doing === "working" || doing === "thinking" ? Math.max(0, timers.now() - since) : 0,
       level: gateReport.level,
       floor: gateReport.floor,
+      delegations: delegations.roster(),
     });
+  }
+
+  /** The only thing a Summons says unbidden. */
+  function announce(text: string): void {
+    if (stopped) return;
+    if (gateReport.generating) {
+      waitingToBeSaid.push(text);
+      return;
+    }
+    opts.transport.promptAgent(text);
   }
 
   const mic = createMicGate(opts, timers, (report) => {
@@ -1960,7 +2135,6 @@ export function createSummonsSession(opts: SummonsSessionOptions): SummonsSessio
     reportStatus();
   });
   let idleHandle: unknown = null;
-  let stopped = false;
   /** Numbers already handed out, so the next call gets one no earlier call had. */
   let toolCalls = 0;
   /** The utterance the server is currently hearing — the gate's evidence of what came from where. */
@@ -2140,6 +2314,7 @@ export function createSummonsSession(opts: SummonsSessionOptions): SummonsSessio
       });
     }
     log.record({ type: "ended", reason });
+    delegations.stopWatching();
     timers.clearTimeout(idleHandle);
     idleHandle = null;
     await opts.audio?.stop();
@@ -2165,9 +2340,13 @@ export function createSummonsSession(opts: SummonsSessionOptions): SummonsSessio
       case "reply_started":
         mic.replyStartedGenerating();
         return;
-      case "reply_done":
+      case "reply_done": {
         mic.replyFinishedGenerating();
+        // Now, and not before: the ask below is the second one the API would have refused.
+        const waited = waitingToBeSaid.shift();
+        if (waited !== undefined) announce(waited);
         return;
+      }
       case "error":
         log.record({ type: "note", level: "error", text: event.message });
         opts.onError?.(event.message);

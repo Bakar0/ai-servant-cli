@@ -13,7 +13,7 @@
 
 import { formatCallLogEntry, formatToolOutcome } from "./call-log/live.ts";
 import { type CallLogEntry, type CallLogPort, redactFields } from "./call-log/record.ts";
-import type { SummonsStatus } from "./summons.ts";
+import type { SummonsDelegationStatus, SummonsStatus } from "./summons.ts";
 
 /**
  * The terminal, as the view needs it. Three operations, and the middle one takes its two halves
@@ -23,8 +23,10 @@ import type { SummonsStatus } from "./summons.ts";
 export interface SummonsScreen {
   /** Print into the terminal's own scrollback, above the pinned footer. */
   print(lines: readonly string[]): void;
-  /** Replace the status line: what this Summons is, and what the mic is doing. */
+  /** Replace the status line: what this Summons is, and what it is doing. */
   status(left: string, right: string): void;
+  /** Replace the delegated-work row. Empty when nothing has been handed to a Claude session. */
+  work(text: string): void;
   /** Replace what is on the input line — after sending, walking history, and clearing with `Esc`. */
   setInput(text: string): void;
 }
@@ -168,6 +170,24 @@ export function formatToolDetail(entry: ToolEntry): string[] {
   return lines;
 }
 
+/**
+ * What has been handed to Claude sessions, on one row.
+ *
+ * The "am I still connected to it" question, and a glance is the right size of answer — a Summons
+ * used to launch a session and then know nothing about it until somebody thought to ask. Empty when
+ * nothing has been delegated, which is most Summonses.
+ */
+export function formatDelegationRow(delegations: readonly SummonsDelegationStatus[]): string {
+  if (delegations.length === 0) return "";
+  const one = (d: SummonsDelegationStatus) => {
+    const where = d.session ? ` → ${d.session}` : "";
+    // A finished session's age says nothing useful; a running one's is the whole question.
+    const age = d.state === "running" || d.state === "unknown" ? ` ${elapsed(d.forMs)}` : "";
+    return `${d.label}${where}  ${d.state}${age}`;
+  };
+  return `⇒ ${delegations.map(one).join("  ·  ")}`;
+}
+
 const HELP: readonly string[] = [
   "  the Summons view",
   "    enter          send what you typed, as an ordinary turn — the answer comes back in voice",
@@ -222,6 +242,7 @@ export function createSummonsView(opts: SummonsViewOptions): SummonsView {
 
   function showStatus(status: SummonsStatus): void {
     opts.screen.status(title, formatSummonsStatus(status));
+    opts.screen.work(formatDelegationRow(status.delegations));
   }
 
   function showTool(argument: string): void {
@@ -278,7 +299,14 @@ export function createSummonsView(opts: SummonsViewOptions): SummonsView {
   // Drawn once before anything has happened, so the Summons says what it is from the moment it
   // opens. Waiting for the first mic frame would leave the line blank exactly when a mic that never
   // started is the thing the user is trying to diagnose.
-  showStatus({ muted: false, doing: "listening", forMs: 0, level: 0, floor: null });
+  showStatus({
+    muted: false,
+    doing: "listening",
+    forMs: 0,
+    level: 0,
+    floor: null,
+    delegations: [],
+  });
 
   return {
     record(entry) {

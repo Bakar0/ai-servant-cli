@@ -99,9 +99,11 @@ export function formatCallLogEntry(entry: CallLogEntry): string[] {
       const outcome =
         entry.status === "launched"
           ? `→ ${entry.session ?? "?"}`
-          : entry.status === "queued"
-            ? `queued behind ${entry.detail ?? "another task"}`
-            : `failed — ${entry.detail ?? "no reason given"}`;
+          : entry.status === "finished"
+            ? `finished — ${entry.session ?? "?"}`
+            : entry.status === "queued"
+              ? `queued behind ${entry.detail ?? "another task"}`
+              : `failed — ${entry.detail ?? "no reason given"}`;
       return [toolLine("⇒", entry.mode, `"${entry.label}"`, outcome)];
     }
     // The one line written while something is still happening, so a long request is visibly

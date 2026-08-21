@@ -8,6 +8,7 @@ import {
   SUMMONS_VIEW_HINT,
   TOOL_DETAIL_MEMORY,
   createSummonsView,
+  formatDelegationRow,
   formatSummonsStatus,
   formatSummonsTitle,
 } from "../src/core/summons-view.ts";
@@ -40,11 +41,13 @@ function built(options: Partial<Parameters<typeof createSummonsView>[0]> = {}) {
   const { session, state } = fakeSession();
   const printed: string[] = [];
   const status: { left: string; right: string }[] = [];
+  const work: string[] = [];
   const input: string[] = [];
   const view = createSummonsView({
     screen: {
       print: (lines) => printed.push(...lines),
       status: (left, right) => status.push({ left, right }),
+      work: (text) => work.push(text),
       setInput: (text) => input.push(text),
     },
     session,
@@ -53,7 +56,7 @@ function built(options: Partial<Parameters<typeof createSummonsView>[0]> = {}) {
     callLogId: "20260820-1",
     ...options,
   });
-  return { view, sent: state, printed, status, input, all: () => printed.join("\n") };
+  return { view, sent: state, printed, status, work, input, all: () => printed.join("\n") };
 }
 
 const toolEntry = (over: Partial<Extract<CallLogEntry, { type: "tool" }>> = {}): CallLogEntry => ({
@@ -75,6 +78,7 @@ describe("the status line", () => {
     forMs: 0,
     level: 1_400,
     floor: 900,
+    delegations: [],
   };
 
   test("shows the level against the learned floor, which is the whole of servant-summon#3 you get for free", () => {
@@ -145,10 +149,49 @@ describe("the status line", () => {
     });
   });
 
+  test("delegated work gets its own row, with where it went and how long", () => {
+    expect(
+      formatDelegationRow([
+        { label: "loadtest", session: "summon-t3", state: "running", forMs: 240_000 },
+        { label: "api-audit", session: "summon-t4", state: "finished", forMs: 900_000 },
+      ]),
+    ).toBe("⇒ loadtest → summon-t3  running 4m  ·  api-audit → summon-t4  finished");
+  });
+
+  // Most Summonses delegate nothing, and a row of furniture for them would be furniture.
+  test("nothing delegated is an empty row", () => {
+    expect(formatDelegationRow([])).toBe("");
+  });
+
+  test("work waiting on a repo says so, and has no age to report yet", () => {
+    expect(
+      formatDelegationRow([{ label: "refactor", session: null, state: "queued", forMs: 0 }]),
+    ).toBe("⇒ refactor  queued");
+  });
+
+  test("the roster reaches its own row, not the status line", () => {
+    const v = built();
+
+    v.view.status({
+      ...idle,
+      delegations: [{ label: "loadtest", session: "t3", state: "running", forMs: 1_000 }],
+    });
+
+    expect(v.work.at(-1)).toContain("loadtest → t3");
+    expect(v.status.at(-1)?.right).not.toContain("loadtest");
+  });
+
   test("what the gate reports lands on the status line", () => {
     const v = built();
 
-    v.view.status({ muted: false, doing: "listening", forMs: 0, level: 800, floor: 600 });
+    v.view.status({
+      muted: false,
+      doing: "listening",
+      forMs: 0,
+      level: 800,
+      floor: 600,
+      delegations: [],
+    });
 
     expect(v.status.at(-1)).toEqual({
       left: "servant summon · datalake-loadtest",

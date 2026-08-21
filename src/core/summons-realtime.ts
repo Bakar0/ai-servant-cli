@@ -368,6 +368,21 @@ export function createOpenAiRealtimeTransport(
       send({ type: "response.create" });
     },
 
+    // The same system turn as `sendAgentNote`, and then an ask — because nothing is under way for a
+    // note to steer. The caller is responsible for only sending this when no response is in flight;
+    // the API refuses a second ask, and there is nothing here that could know.
+    promptAgent(text) {
+      send({
+        type: "conversation.item.create",
+        item: {
+          type: "message",
+          role: "system",
+          content: [{ type: "input_text", text }],
+        },
+      });
+      send({ type: "response.create" });
+    },
+
     // No `response.create` here, unlike a tool result or a typed turn: a note is only ever sent
     // just after the user spoke, and voice-activity detection has already started a reply to that.
     // Asking for a second one would collide with it; the note steers the reply instead.

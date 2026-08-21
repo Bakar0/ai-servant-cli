@@ -49,6 +49,7 @@ export interface SummonsTerminal {
 
 /** Footer rows, by part. The input box is three because it is a one-line input inside a border. */
 const STATUS_HEIGHT = 1;
+const WORK_HEIGHT = 1;
 const INPUT_BOX_HEIGHT = 3;
 const HINT_HEIGHT = 1;
 
@@ -62,7 +63,7 @@ const MUTED_TEXT = "#8a8a8a";
  */
 export const SUMMONS_RENDERER_CONFIG: CliRendererConfig = {
   screenMode: "split-footer",
-  footerHeight: STATUS_HEIGHT + INPUT_BOX_HEIGHT + HINT_HEIGHT,
+  footerHeight: STATUS_HEIGHT + WORK_HEIGHT + INPUT_BOX_HEIGHT + HINT_HEIGHT,
   externalOutputMode: "capture-stdout",
   // Ctrl-C is a hang-up, which means ending the Summons properly — closing the socket, ending the
   // Hands session, and writing the last line of the Call log. Exiting from under all that would
@@ -108,6 +109,15 @@ export function mountSummonsTerminal(
   statusRow.add(title);
   statusRow.add(micState);
 
+  // Its own row, and reserved even when empty. A footer that changed height as work came and went
+  // would move the input line out from under the user's hands mid-sentence.
+  const work = new TextRenderable(renderer, {
+    id: "summons-work",
+    content: "",
+    height: WORK_HEIGHT,
+    fg: MUTED_TEXT,
+  });
+
   const inputBox = new BoxRenderable(renderer, {
     id: "summons-input-box",
     width: "100%",
@@ -132,6 +142,7 @@ export function mountSummonsTerminal(
   });
 
   footer.add(statusRow);
+  footer.add(work);
   footer.add(inputBox);
   footer.add(hint);
   renderer.root.add(footer);
@@ -174,6 +185,9 @@ export function mountSummonsTerminal(
     status(left, right) {
       title.content = left;
       micState.content = right;
+    },
+    work(text) {
+      work.content = text;
     },
     setInput(text) {
       input.value = text;
