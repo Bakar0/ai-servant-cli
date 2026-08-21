@@ -22,9 +22,37 @@ describe("watching a Summons live", () => {
     ]);
   });
 
+  // A typed utterance was never heard, so it cannot have been mis-transcribed — the one thing about
+  // it a reader cannot recover from the words, and the reason `channel` exists at all.
+  test("marks a typed utterance as typed, in both views", () => {
+    const lines = watched([
+      { type: "said", who: "user", text: "actually check ticket 3", channel: "typed" },
+      { type: "said", who: "user", text: "and the one before it", channel: "spoken" },
+    ]);
+    expect(lines).toEqual(["you    ⌨ actually check ticket 3", "you    ▸ and the one before it"]);
+  });
+
   test("collapses a multi-line utterance onto one line, so the view stays scannable", () => {
     const [line] = watched([{ type: "said", who: "servant", text: "one\n\ntwo   three\n" }]);
     expect(line).toBe("agent  ▸ one two three");
+  });
+
+  // `/tool 7` can only be typed if the 7 is on screen, and a glyph repeated on every row said
+  // nothing. A record from before numbers existed keeps the glyph, and still lines up.
+  test("a tool row is addressed by its number, and an old one still reads", () => {
+    const lines = watched([
+      {
+        type: "tool",
+        name: "tasks",
+        target: "--frontier",
+        outcome: "ok",
+        durationMs: 1_200,
+        number: 3,
+      },
+      { type: "tool", name: "read_file", target: "GOAL.md", outcome: "ok", durationMs: 12 },
+    ]);
+    expect(lines[0]).toStartWith("     3 · tasks        ");
+    expect(lines[1]).toStartWith("       ⚙ read_file    ");
   });
 
   test("shows a tool call with what it touched and how long it took", () => {

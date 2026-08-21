@@ -181,3 +181,38 @@ describe("summons scope and snapshot", () => {
     expect(after.goal).toContain("Ship something else.");
   });
 });
+
+// servant-summon#12: the persona used to hand the same example to two different tools — "how does X
+// work" to research, and "look up how this API works" to hands, two paragraphs apart. From the
+// outside that made the choice between them look arbitrary, because it was.
+describe("the persona draws one line between the three Claude sessions", () => {
+  const persona = composeSummonsInstructions(SNAPSHOT);
+
+  test("a codebase question belongs to research alone", () => {
+    expect(persona).toContain('"how does X work"');
+    expect(persona).not.toContain("look up how this API works");
+  });
+
+  // Settled after the first attempt: the axis is *time*, because a hands call holds the conversation
+  // shut while it runs, and a blocked voice agent is the worst failure mode here.
+  test("the axis is time, and it says why", () => {
+    expect(persona).toContain("seconds");
+    expect(persona).toContain("holds this conversation shut");
+    expect(persona).toContain("watch");
+  });
+
+  // The one thing the tool descriptions cannot enforce, so the persona has to be straight about it.
+  test("the persona says asking the hands to change something is Guarded", () => {
+    expect(persona).toContain("Asking them to change something is Guarded");
+  });
+
+  // Left stale by the Claim change (servant-summon#13) and caught here: the persona was still
+  // telling the agent it could only reach a session holding a Claim.
+  test("nothing still claims a Claim is needed to reach a session", () => {
+    expect(persona).not.toContain("on a claimed ticket");
+  });
+
+  test("the agent is told to say which of the three it is reaching for", () => {
+    expect(persona).toContain("I'll ask my hands");
+  });
+});

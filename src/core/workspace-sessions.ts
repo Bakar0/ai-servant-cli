@@ -6,6 +6,7 @@
 // unknown, and so does this: "the registry could not be read" must never be reported as "nobody is
 // working", which is the answer that gets two sessions into one worktree.
 
+import { listWorkspaceSessions } from "./claude-session.ts";
 import { workspacePath } from "./paths.ts";
 import { type LiveSession, readLiveSessions } from "./session-registry.ts";
 import { handsSessionName, sessionNameSlug } from "./session-name.ts";
@@ -80,4 +81,42 @@ export async function readWorkspaceSessions(
       pid: session.pid,
     }));
   return { known: true, sessions };
+}
+
+/** What one named session has said. Unknown is not "it said nothing" — see below. */
+export type SessionLatestReport =
+  | { known: false }
+  | { known: true; turns: number; latest: string | null };
+
+/**
+ * The most this can be read from a session without asking it anything.
+ *
+ * Two hops, because the two stores hold different halves: the live registry knows a session's *name*
+ * and its Claude session id, and the transcript store knows what it has said. Neither knows both, so
+ * a name is resolved through the registry to an id and the id to a transcript.
+ *
+ * Every failure along the way is `known: false` rather than an empty answer. "Its transcript could
+ * not be found" and "it has said nothing yet" look identical from a caller that conflates them, and
+ * the second one is what makes a Summons report silence as an answer.
+ */
+export async function readSessionLatest(
+  workspace: string,
+  name: string,
+  deps: WorkspaceSessionsDeps & { transcripts?: typeof listWorkspaceSessions } = {},
+): Promise<SessionLatestReport> {
+  const live = await (deps.live ?? readLiveSessions)();
+  if (!live.known) return { known: false };
+  const root = workspacePath(workspace);
+  const match = live.sessions.find((s) => s.name === name && inWorkspace(s, root));
+  if (!match?.sessionId) return { known: false };
+  const transcripts = await (deps.transcripts ?? listWorkspaceSessions)({
+    workspaceName: workspace,
+  });
+  const meta = transcripts.find((t) => t.sessionId === match.sessionId);
+  if (!meta) return { known: false };
+  return {
+    known: true,
+    turns: meta.assistantTurns,
+    latest: meta.lastAssistantMessage?.trim() || null,
+  };
 }

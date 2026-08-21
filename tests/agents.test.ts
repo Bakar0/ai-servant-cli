@@ -28,6 +28,22 @@ describe("claudeCodeAgent.launchCommand", () => {
     expect(claudeCodeAgent.launchCommand("/some/cwd", { prompt: "   " })).toBe("claude");
   });
 
+  // There is no `--fast` flag: fast mode is a setting. `--settings` loads *additional* settings, so
+  // the session keeps the user's own hooks, permissions and status line with this on top — which is
+  // the whole reason it is safe to pass at launch.
+  test("fast mode is passed as a setting, not as a flag that does not exist", () => {
+    const command = claudeCodeAgent.launchCommand("/x", { fastMode: true, prompt: "go" });
+
+    expect(command).toContain(`--settings '{"fastMode":true}'`);
+    expect(command).not.toContain("--fast ");
+    // Still last, so the positional prompt is not swallowed by an option that takes a value.
+    expect(command).toEndWith("'go'");
+  });
+
+  test("no fast mode, no settings flag — nothing is passed that was not asked for", () => {
+    expect(claudeCodeAgent.launchCommand("/x", { prompt: "go" })).not.toContain("--settings");
+  });
+
   test("a session name becomes --name, ahead of the prompt", () => {
     expect(
       claudeCodeAgent.launchCommand("/x", { sessionName: "ai-servant-t17", prompt: "go" }),

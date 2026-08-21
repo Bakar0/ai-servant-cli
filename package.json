@@ -24,6 +24,7 @@
     "format:check": "biome format ."
   },
   "dependencies": {
+    "@opentui/core": "0.5.4",
     "citty": "^0.1.6"
   },
   "devDependencies": {

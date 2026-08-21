@@ -234,9 +234,10 @@
           "confirm", '"' + entry.label + '"',
           entry.verdict, "heard: " + (entry.heard || ""));
       case "delegation":
-        return actRow("⇒", entry.status === "launched" ? "good" : entry.status === "failed" ? "bad" : "held",
+        return actRow("⇒", entry.status === "launched" || entry.status === "finished" ? "good" : entry.status === "failed" ? "bad" : "held",
           entry.mode, '"' + entry.label + '"',
-          entry.status === "launched" ? "→ " + entry.session : entry.status,
+          entry.status === "launched" ? "→ " + entry.session
+            : entry.status === "finished" ? "finished · " + entry.session : entry.status,
           [entry.task, entry.ticket ? "#" + entry.ticket : null, entry.repo, entry.detail]
             .filter(Boolean).join(" · "));
       case "hands-asked":

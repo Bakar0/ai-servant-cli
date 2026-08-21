@@ -73,6 +73,65 @@ export function composeHandsPrompt(workspace: string, request: string): string {
  * of minutes the answer has stopped being worth waiting for, and the agent saying so out loud beats
  * it saying "just a moment" forever, which is what happened without this.
  */
+/**
+ * Politeness and request framing, stripped before a clause is read for its verb. "fix the parser"
+ * and "can you fix the parser" are the same request, and the second one would otherwise read as a
+ * question because it starts with "can".
+ */
+const REQUEST_FRAME =
+  /^(?:please|kindly|can you|could you|would you|will you|i want you to|i'd like you to|i would like you to|go ahead and|go and|just|now|then|also|and|first|next|maybe)\s+/i;
+
+/** Where a new clause begins, so "check the tests and fix the broken one" is read as two. */
+const CLAUSE_SPLIT = /(?:[.;,!?]|\band\b|\bthen\b|\bafter that\b|\bonce that\b|\balso\b)+/i;
+
+/**
+ * Verbs that, said as an instruction, leave something different afterwards. Not a list of dangerous
+ * words: a list of things whose *imperative* changes the world.
+ */
+const MUTATING_VERB =
+  /^(?:edit|change|modify|fix|repair|update|upgrade|downgrade|bump|rename|refactor|rewrite|write|create|make|add|append|insert|delete|remove|drop|clear|wipe|truncate|revert|undo|restore|reset|commit|push|pull|merge|rebase|squash|amend|cherry-pick|stash|stage|tag|deploy|publish|release|install|uninstall|apply|migrate|generate|scaffold|seed|bootstrap|format|lint|prettify|replace|swap|move|mv|copy|cp|touch|mkdir|chmod|kill|stop|restart|start|enable|disable|configure|set|unset|patch|implement|build)\b/i;
+
+/**
+ * Things that change the world wherever they appear in a sentence, because they reach outside the
+ * working tree and no phrasing makes them safe to do unasked.
+ */
+const OUTWARD_ACTION =
+  /\bgit\s+(?:commit|push|merge|rebase|reset|revert|tag|cherry-pick)\b|\b(?:npm|bun|yarn|pnpm)\s+(?:install|add|remove|uninstall|publish)\b|\brm\s+-|\bgh\s+(?:pr|issue|release)\s+(?:create|merge|close|edit)\b|--fix\b/i;
+
+/**
+ * Would this hands request change something?
+ *
+ * The Hands session runs with `--dangerously-skip-permissions` and can edit, write and run anything
+ * (see `handsArgv`). `delegate` is Guarded precisely because it changes things — so without this,
+ * "ask your hands to refactor the parser" walks straight around the one gate that exists to catch
+ * exactly that. It is the same hole `looksLikeStopInstruction` closes for a stop phrased as a
+ * redirect, and it is closed the same way: by reading the words, deterministically, rather than
+ * trusting the tool descriptions to have steered the model right.
+ *
+ * A heuristic, and biased on purpose — but not as hard as the stop detector is. A false positive
+ * costs one spoken yes; too many of them and the user answers yes without listening, which is worse
+ * than the hole. So it looks for a mutating verb where an *instruction* would put one — at the start
+ * of a clause, once request framing is stripped — rather than anywhere in the sentence. "what did
+ * that commit change", "why does the fix fail" and "check whether it compiles" are questions, and
+ * are read as questions.
+ */
+export function looksLikeWritingRequest(request: string): boolean {
+  const text = request.trim();
+  if (!text) return false;
+  if (OUTWARD_ACTION.test(text)) return true;
+  return text
+    .split(CLAUSE_SPLIT)
+    .map((clause) => {
+      let rest = clause.trim();
+      // Repeatedly, because "can you please just fix it" stacks three frames.
+      for (let depth = 0; depth < 4 && REQUEST_FRAME.test(rest); depth++) {
+        rest = rest.replace(REQUEST_FRAME, "").trim();
+      }
+      return rest;
+    })
+    .some((clause) => MUTATING_VERB.test(clause));
+}
+
 export const DEFAULT_HANDS_TIMEOUT_MS = 2 * 60 * 1000;
 
 /**

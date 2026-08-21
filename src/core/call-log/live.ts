@@ -1,10 +1,14 @@
-// Watching a Summons happen: the same entries the record gets, formatted for the terminal the
-// Summons is running in.
+// The Plain view: the same entries the record gets, one line each, for a Summons whose output is
+// not a terminal.
 //
 // It is a bystander, and stays one. It only ever writes lines — it never reads stdin, never
-// prompts, never asks for a keypress, and never touches the audio path. That is deliberate: the
-// user is talking, usually away from the keyboard, and a view that needed attention would be worse
-// than no view at all.
+// prompts, never asks for a keypress, and never touches the audio path. That is what makes it the
+// right view for a pipe, a redirect and a test, which is now all it is for: someone at a keyboard
+// gets the Summons view instead (workspace ADR 0014).
+//
+// `formatCallLogEntry` is shared with that view rather than reimplemented there. One line per entry
+// is what both need, and two formatters would mean a Summons read back through a pipe and a Summons
+// watched live disagreeing about what happened in it.
 
 import { type CallLogEntry, type CallLogPort, redactFields } from "./record.ts";
 
@@ -31,26 +35,53 @@ export function formatDuration(ms: number): string {
   return safe < 1000 ? `${Math.round(safe)}ms` : `${(safe / 1000).toFixed(1)}s`;
 }
 
-const INDENT = "       ";
+/**
+ * How wide the leading marker column is. A tool call's marker is its own number, and a number is
+ * wider than a glyph — so the column is right-aligned to the widest of them and every line after it
+ * still starts in the same place, whether it is marked `⚙` or `217 ·`.
+ */
+const MARKER_WIDTH = 8;
+const INDENT = " ".repeat(MARKER_WIDTH - 1);
 
-function toolLine(symbol: string, name: string, target: string, trailer: string): string {
-  return `${INDENT}${symbol} ${pad(name, NAME_WIDTH)}${pad(clip(target, TARGET_WIDTH), TARGET_WIDTH)}${trailer}`;
+function toolLine(marker: string, name: string, target: string, trailer: string): string {
+  return `${marker.padStart(MARKER_WIDTH)} ${pad(name, NAME_WIDTH)}${pad(clip(target, TARGET_WIDTH), TARGET_WIDTH)}${trailer}`;
+}
+
+/**
+ * How a tool call ended, in words. Shared with the Summons view's `/tool N`, which shows the same
+ * three outcomes above the arguments — two spellings of "held — waiting on a yes" would be two
+ * answers to one question.
+ */
+export function formatToolOutcome(entry: Extract<CallLogEntry, { type: "tool" }>): string {
+  if (entry.outcome === "ok") return formatDuration(entry.durationMs);
+  if (entry.outcome === "held") {
+    return `held — waiting on a yes${entry.detail ? ` (${entry.detail})` : ""}`;
+  }
+  return `failed — ${entry.detail ?? "no reason given"}`;
 }
 
 /** Exported so the view is asserted line by line, with no terminal anywhere near the test. */
 export function formatCallLogEntry(entry: CallLogEntry): string[] {
   switch (entry.type) {
     case "said":
-      return [`${entry.who === "user" ? "you  " : "agent"}  ▸ ${oneLine(entry.text)}`];
-    case "tool": {
-      const outcome =
-        entry.outcome === "ok"
-          ? formatDuration(entry.durationMs)
-          : entry.outcome === "held"
-            ? `held — waiting on a spoken yes${entry.detail ? ` (${entry.detail})` : ""}`
-            : `failed — ${entry.detail ?? "no reason given"}`;
-      return [toolLine("⚙", entry.name, entry.target, outcome)];
-    }
+      // The one place `channel` is visible. A typed utterance was never heard, so it cannot have
+      // been mis-transcribed — which is exactly what a reader wondering about a strange line needs
+      // to know, and cannot recover from the words themselves.
+      return [
+        `${entry.who === "user" ? "you  " : "agent"}  ${entry.channel === "typed" ? "⌨" : "▸"} ${oneLine(entry.text)}`,
+      ];
+    case "tool":
+      // The number *is* the marker, because it is the row's address: `/tool 7` needs the 7 to be on
+      // screen, and a glyph that is the same on every row says nothing a reader did not already
+      // know. A record written before numbers existed keeps the glyph and stays readable.
+      return [
+        toolLine(
+          entry.number === undefined ? "⚙" : `${entry.number} ·`,
+          entry.name,
+          entry.target,
+          formatToolOutcome(entry),
+        ),
+      ];
     case "gate": {
       const verdict =
         entry.verdict === "confirmed"
@@ -68,9 +99,11 @@ export function formatCallLogEntry(entry: CallLogEntry): string[] {
       const outcome =
         entry.status === "launched"
           ? `→ ${entry.session ?? "?"}`
-          : entry.status === "queued"
-            ? `queued behind ${entry.detail ?? "another task"}`
-            : `failed — ${entry.detail ?? "no reason given"}`;
+          : entry.status === "finished"
+            ? `finished — ${entry.session ?? "?"}`
+            : entry.status === "queued"
+              ? `queued behind ${entry.detail ?? "another task"}`
+              : `failed — ${entry.detail ?? "no reason given"}`;
       return [toolLine("⇒", entry.mode, `"${entry.label}"`, outcome)];
     }
     // The one line written while something is still happening, so a long request is visibly

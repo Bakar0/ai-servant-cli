@@ -1,4 +1,4 @@
-// Reading a spoken yes or no off a transcript. This is what the Guarded gate turns on, so it is
+// Reading a yes or no off what the user answered — a transcript, or a typed line. This is what the Guarded gate turns on, so it is
 // deliberately strict and deliberately not a model call: a misheard sentence must never be able to
 // launch runaway work (workspace ADR 0009, majordomo#17).
 
@@ -83,10 +83,10 @@ function words(text: string): string[] {
  * True only when the whole utterance is made of these phrases and nothing else. Containment would
  * be far too loose — "I said yes to the other thing" contains "yes" and must not confirm anything.
  */
-function entirely(spoken: readonly string[], phrases: readonly string[][]): boolean {
+function entirely(answer: readonly string[], phrases: readonly string[][]): boolean {
   let i = 0;
-  while (i < spoken.length) {
-    const match = phrases.find((p) => p.every((word, k) => spoken[i + k] === word));
+  while (i < answer.length) {
+    const match = phrases.find((p) => p.every((word, k) => answer[i + k] === word));
     if (!match) return false;
     i += match.length;
   }
@@ -94,14 +94,14 @@ function entirely(spoken: readonly string[], phrases: readonly string[][]): bool
 }
 
 /**
- * Classify a spoken answer to a confirmation question. Anything that is not unambiguously one or
+ * Classify an answer to a confirmation question. Anything that is not unambiguously one or
  * the other — a mixed answer, a sentence, silence, an unrelated remark — is `"unclear"`, and the
  * caller treats that exactly like a decline.
  */
 export function classifyConfirmation(text: string): Confirmation {
-  const spoken = words(text);
-  if (spoken.length === 0) return "unclear";
-  if (entirely(spoken, NEGATIVE_PHRASES)) return "negative";
-  if (entirely(spoken, AFFIRMATIVE_PHRASES)) return "affirmative";
+  const answer = words(text);
+  if (answer.length === 0) return "unclear";
+  if (entirely(answer, NEGATIVE_PHRASES)) return "negative";
+  if (entirely(answer, AFFIRMATIVE_PHRASES)) return "affirmative";
   return "unclear";
 }

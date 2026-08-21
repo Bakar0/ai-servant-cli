@@ -73,6 +73,12 @@ describe("Realtime server events the controller acts on", () => {
     expect(toInbound({ type: "response.done" })).toEqual({ type: "reply_done" });
   });
 
+  // The other bracket. A reply is cancellable from here, which is well before its first audio —
+  // so an interruption arriving in that window has something to cancel after all.
+  test("a reply starting comes through, since that is when it becomes cancellable", () => {
+    expect(toInbound({ type: "response.created" })).toEqual({ type: "reply_started" });
+  });
+
   test("events the controller has no opinion about are ignored", () => {
     expect(toInbound({ type: "session.updated" })).toBeNull();
     expect(toInbound({ type: "rate_limits.updated" })).toBeNull();
@@ -338,5 +344,50 @@ describe("hanging up", () => {
 
     expect(inbound).toEqual([]);
     expect(fake.socket.closed).toBe(true);
+  });
+});
+
+describe("a typed utterance", () => {
+  test("goes in as a user turn and asks for the reply out loud", async () => {
+    const { fake, transport, connected } = connectFake();
+    fake.fire("open");
+    await connected;
+    const from = fake.sent.length;
+
+    transport.sendUserText("actually check ticket 3");
+
+    expect(fake.sent.slice(from)).toEqual([
+      {
+        type: "conversation.item.create",
+        item: {
+          type: "message",
+          role: "user",
+          content: [{ type: "input_text", text: "actually check ticket 3" }],
+        },
+      },
+      { type: "response.create" },
+    ]);
+  });
+
+  // The distinction the two primitives exist for: a note lands in a reply already under way, so
+  // asking for a second one would collide with it. A typed turn has no reply coming.
+  test("a note is the other thing — a system message, and no reply asked for", async () => {
+    const { fake, transport, connected } = connectFake();
+    fake.fire("open");
+    await connected;
+    const from = fake.sent.length;
+
+    transport.sendAgentNote("the user said yes");
+
+    expect(fake.sent.slice(from)).toEqual([
+      {
+        type: "conversation.item.create",
+        item: {
+          type: "message",
+          role: "system",
+          content: [{ type: "input_text", text: "the user said yes" }],
+        },
+      },
+    ]);
   });
 });

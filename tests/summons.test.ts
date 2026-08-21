@@ -10,6 +10,7 @@ import {
   type RealtimeTransport,
   type SessionsPort,
   type SummonsActions,
+  type SummonsStatus,
   type SummonsSessionOptions,
   type TicketFilingPort,
   type TicketsPort,
@@ -17,6 +18,7 @@ import {
   type WorkspaceReader,
   createSummonsSession,
 } from "../src/core/summons.ts";
+import type { CallLogEntry } from "../src/core/call-log/record.ts";
 import { requireAudioTool, requireOpenAiApiKey } from "../src/core/summons-preflight.ts";
 
 /** A fake Realtime transport: records what the controller sent, replays scripted inbound events. */
@@ -27,6 +29,8 @@ function fakeTransport() {
     audioSent: [] as string[],
     toolResults: [] as { callId: string; output: string }[],
     notes: [] as string[],
+    prompts: [] as string[],
+    userTexts: [] as string[],
     cancelled: 0,
     truncated: [] as { itemId: string; playedMs: number }[],
     closed: false,
@@ -50,6 +54,12 @@ function fakeTransport() {
     },
     sendAgentNote(text) {
       state.notes.push(text);
+    },
+    promptAgent(text) {
+      state.prompts.push(text);
+    },
+    sendUserText(text) {
+      state.userTexts.push(text);
     },
     async close() {
       state.closed = true;
@@ -222,9 +232,9 @@ describe("summons startup", () => {
       "glob",
       "grep",
       "list_sessions",
+      "message_session",
       "read_file",
       "research",
-      "steer_session",
       "stop_session",
     ]);
   });
@@ -355,6 +365,171 @@ function fakeActions(overrides: Partial<SummonsActions> = {}) {
   };
   return { actions, launched, reports };
 }
+
+describe("a Summons watches what it delegated", () => {
+  /**
+   * A clock whose timeouts the test fires by hand.
+   *
+   * Two live here at once — the delegation poll and the idle hang-up — so they are told apart by the
+   * delay they were asked for. Firing the second while meaning the first would end the conversation
+   * underneath the test, and counting them together would hide the thing being asserted.
+   */
+  function pollableClock(idleMs: number) {
+    let t = 1_000;
+    let nextHandle = 1;
+    const live = new Map<number, { ms: number; fn: () => void }>();
+    /** Armings over the run, not what is armed now: re-arming replaces, so a count of one is stable. */
+    let idleArmings = 0;
+    const timers: TimerPort = {
+      now: () => t,
+      setTimeout(fn, ms) {
+        if (ms === idleMs) idleArmings += 1;
+        const handle = nextHandle++;
+        live.set(handle, { ms, fn });
+        return handle;
+      },
+      clearTimeout(handle) {
+        if (typeof handle === "number") live.delete(handle);
+      },
+    };
+    return {
+      timers,
+      advance: (ms: number) => (t += ms),
+      /** Fire the delegation polls only, and let the async work settle. */
+      async tick() {
+        const due = [...live].filter(([, s]) => s.ms !== idleMs);
+        for (const [handle] of due) live.delete(handle);
+        for (const [, s] of due) s.fn();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      },
+      idleArmings: () => idleArmings,
+      pending: () => [...live.values()].filter((s) => s.ms !== idleMs).length,
+    };
+  }
+
+  async function delegated(overrides: Partial<SummonsSessionOptions> = {}) {
+    const { transport, state, emit } = fakeTransport();
+    const { actions, reports } = fakeActions();
+    const statuses: SummonsStatus[] = [];
+    const clock = pollableClock(Number(overrides.idleTimeoutMs ?? -1));
+    const session = createSummonsSession({
+      transport,
+      reader: fakeReader().reader,
+      actions,
+      instructions: "hi",
+      idleTimeoutMs: 0,
+      timers: clock.timers,
+      onStatus: (status) => statuses.push(status),
+      ...overrides,
+    });
+    await session.start();
+    // Delegating is Guarded, so the work only starts once the user has said yes.
+    await emit({
+      type: "tool_call",
+      callId: "call_d",
+      name: "delegate",
+      args: JSON.stringify({ task: "load-test the lake", label: "loadtest" }),
+    });
+    await emit({ type: "user_transcript", text: "yes", itemId: "u1" });
+    return { session, state, emit, reports, statuses, clock, latest: () => statuses.at(-1) };
+  }
+
+  test("what is delegated shows up in the status, without anyone asking", async () => {
+    const s = await delegated();
+
+    expect(s.latest()?.delegations).toEqual([
+      { label: "loadtest", session: "demo-1", state: "running", forMs: 0 },
+    ]);
+  });
+
+  // The complaint this answers: "he didn't know when the session he spawned finished". A Summons
+  // used to launch a session and never mention its outcome again.
+  test("a session finishing is noticed, said out loud, and recorded", async () => {
+    const s = await delegated();
+    expect(s.state.prompts).toEqual([]);
+
+    s.reports.set("loadtest", { status: "finished", latest: "17k rps, no errors", turns: 9 });
+    await s.clock.tick();
+
+    expect(s.state.prompts).toHaveLength(1);
+    expect(s.state.prompts[0]).toContain("loadtest");
+    expect(s.state.prompts[0]).toContain("17k rps, no errors");
+    expect(s.latest()?.delegations[0]?.state).toBe("finished");
+  });
+
+  test("it says so once, not on every poll after", async () => {
+    const s = await delegated();
+    s.reports.set("loadtest", { status: "finished", latest: "done", turns: 9 });
+
+    await s.clock.tick();
+    await s.clock.tick();
+    await s.clock.tick();
+
+    expect(s.state.prompts).toHaveLength(1);
+  });
+
+  // `statusOf` refuses to call an unreadable registry "finished" for the same reason: a repo would
+  // be freed on that word. Announcing it would be the same mistake, out loud.
+  test("a registry it cannot read is not a session that finished", async () => {
+    const s = await delegated();
+    s.reports.set("loadtest", { status: "unknown", latest: null, turns: 0 });
+
+    await s.clock.tick();
+
+    expect(s.state.prompts).toEqual([]);
+    expect(s.latest()?.delegations[0]?.state).toBe("unknown");
+  });
+
+  // The opposite answer from a typed turn, and deliberately: a typed turn cancels the reply because
+  // the person has already moved on, and news nobody asked for has no business cutting them off.
+  test("news waits for the reply in flight rather than cutting it off", async () => {
+    const s = await delegated();
+    await s.emit({ type: "reply_started" });
+    s.reports.set("loadtest", { status: "finished", latest: "done", turns: 9 });
+
+    await s.clock.tick();
+    expect(s.state.prompts).toEqual([]);
+    expect(s.state.cancelled).toBe(0);
+
+    await s.emit({ type: "reply_done" });
+
+    expect(s.state.prompts).toHaveLength(1);
+  });
+
+  // Observed live: a Summons hung itself up on the very thing it was waiting for, so the session it
+  // spawned finished into a conversation that had already ended. The idle window is armed by what
+  // the server reports, and a delegated session running for minutes reports nothing at all.
+  test("waiting on delegated work is not idle", async () => {
+    const s = await delegated({ idleTimeoutMs: 60_000 });
+    const before = s.clock.idleArmings();
+
+    await s.clock.tick();
+
+    // The poll saw work still running, so the window is armed again rather than left to run out.
+    expect(s.clock.idleArmings()).toBeGreaterThan(before);
+    expect(s.state.closed).toBe(false);
+  });
+
+  // The other half: once there is nothing left to wait for, the ordinary window applies again — or
+  // a forgotten Summons with a finished delegate would stay open for good.
+  test("work finishing hands the idle window back", async () => {
+    const s = await delegated({ idleTimeoutMs: 60_000 });
+    s.reports.set("loadtest", { status: "finished", latest: "done", turns: 9 });
+
+    await s.clock.tick();
+
+    expect(s.clock.pending()).toBe(0);
+  });
+
+  test("hanging up stops the watch, so nothing outlives the conversation", async () => {
+    const s = await delegated();
+    expect(s.clock.pending()).toBeGreaterThan(0);
+
+    await s.session.stop();
+
+    expect(s.clock.pending()).toBe(0);
+  });
+});
 
 describe("delegating by voice is Guarded", () => {
   async function summoned(actionOverrides: Partial<SummonsActions> = {}) {
@@ -1039,6 +1214,82 @@ describe("summons audio", () => {
   });
 });
 
+describe("typing to a Summons", () => {
+  test("a typed utterance reaches the model as an ordinary user turn", async () => {
+    const s = await audioSession();
+
+    await s.session.typed("actually check ticket 3");
+
+    expect(s.sent.userTexts).toEqual(["actually check ticket 3"]);
+  });
+
+  test("an empty line is not a turn", async () => {
+    const s = await audioSession();
+
+    await s.session.typed("   ");
+
+    expect(s.sent.userTexts).toEqual([]);
+  });
+
+  // The point of typing is a muted mic and a keyboard, so typing must work with the mic shut — and
+  // must not open it again, since mute is the user's to change and nothing else's.
+  test("typing leaves the mic exactly as the user set it", async () => {
+    const s = await audioSession();
+
+    await s.session.typed("one");
+    s.advance(200);
+    s.mic(micChunk(200, 3_000));
+    expect(s.sent.audioSent).toHaveLength(1);
+
+    s.session.toggleMute();
+    await s.session.typed("two");
+    s.advance(200);
+    s.mic(micChunk(200, 3_000));
+
+    expect(s.sent.audioSent).toHaveLength(1);
+    expect(s.sent.userTexts).toEqual(["one", "two"]);
+  });
+
+  test("a Summons that has hung up cannot be typed to", async () => {
+    const s = await audioSession();
+    await s.session.stop();
+
+    await s.session.typed("hello?");
+
+    expect(s.sent.userTexts).toEqual([]);
+  });
+
+  // Typing over a reply is a barge-in by every measure but the microphone. A typed turn asks for an
+  // answer, and the API refuses a second ask while a response is in flight — so without cutting the
+  // reply off first, the line the user typed would come back as an error and go unanswered.
+  test("typing over a reply cuts the reply off, then asks", async () => {
+    const s = await audioSession();
+    await s.emit({ type: "reply_started" });
+    await s.emit({ type: "audio", pcm: micChunk(4_000), itemId: "item_1" });
+    s.advance(300);
+
+    await s.session.typed("no, the other one");
+
+    expect(s.sent.cancelled).toBe(1);
+    expect(s.sent.truncated).toEqual([{ itemId: "item_1", playedMs: 300 }]);
+    expect(s.flushes).toHaveLength(1);
+    expect(s.sent.userTexts).toEqual(["no, the other one"]);
+  });
+
+  // The sibling of the test above. Nothing is being said, so nothing is cut off — a typed turn on a
+  // quiet Summons must not truncate a message or put a barge-in in the record.
+  test("typing into silence cuts nothing off", async () => {
+    const s = await audioSession();
+
+    await s.session.typed("what is left on the board?");
+
+    expect(s.sent.cancelled).toBe(0);
+    expect(s.sent.truncated).toEqual([]);
+    expect(s.flushes).toEqual([]);
+    expect(s.sent.userTexts).toEqual(["what is left on the board?"]);
+  });
+});
+
 describe("summons idle hang-up", () => {
   /** Let the controller's async teardown settle after the timer fires. */
   const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
@@ -1131,6 +1382,15 @@ describe("summons idle hang-up", () => {
     fire();
     await settle();
     expect(sent.closed).toBe(true);
+  });
+
+  test("typing re-arms the window — a Summons being typed at is not silent", async () => {
+    const { session, armed } = build(180_000);
+    await session.start();
+
+    await session.typed("still here");
+
+    expect(armed.armedFor).toEqual([180_000, 180_000]);
   });
 
   test("an idle timeout of zero leaves the session open indefinitely", async () => {
@@ -1252,6 +1512,8 @@ describe("a session that dies while it is still starting", () => {
       truncateAudio() {},
       sendToolResult() {},
       sendAgentNote() {},
+      promptAgent() {},
+      sendUserText() {},
       async close() {
         events.push("socket-closed");
       },
@@ -1280,6 +1542,8 @@ describe("a session that dies while it is still starting", () => {
       truncateAudio() {},
       sendToolResult() {},
       sendAgentNote() {},
+      promptAgent() {},
+      sendUserText() {},
       async close() {
         events.push("socket-closed");
       },
@@ -1573,6 +1837,43 @@ describe("barging in on the agent", () => {
     expect(s.flushes).toEqual([]);
   });
 
+  test("Esc cuts the reply off, exactly as a voice barge-in does", async () => {
+    const s = await agentTalking();
+    s.advance(300);
+
+    s.session.interrupt();
+
+    expect(s.sent.cancelled).toBe(1);
+    expect(s.sent.truncated).toEqual([{ itemId: "item_1", playedMs: 300 }]);
+    expect(s.flushes).toHaveLength(1);
+  });
+
+  // The sibling of the test above it. `--no-barge-in` suppresses *guesses* about whether a person
+  // is talking, and a keypress is not a guess — so it is the one source the flag does not reach.
+  test("the keyboard is obeyed with barge-in off, unlike either detector", async () => {
+    const s = await agentTalking({ bargeIn: false });
+
+    frame(s, SPEECH, 8);
+    await s.emit({ type: "user_speaking", itemId: "utterance_9" });
+    expect(s.sent.cancelled).toBe(0);
+
+    s.session.interrupt();
+
+    expect(s.sent.cancelled).toBe(1);
+    expect(s.sent.truncated).toHaveLength(1);
+    expect(s.flushes).toHaveLength(1);
+  });
+
+  test("Esc with nothing playing cuts nothing off", async () => {
+    const s = await audioSession();
+
+    s.session.interrupt();
+
+    expect(s.sent.cancelled).toBe(0);
+    expect(s.sent.truncated).toEqual([]);
+    expect(s.flushes).toEqual([]);
+  });
+
   test("a muted mic cannot barge in — that is the whole point of muting it", async () => {
     const s = await agentTalking();
     s.session.toggleMute();
@@ -1581,6 +1882,293 @@ describe("barging in on the agent", () => {
 
     expect(s.sent.cancelled).toBe(0);
     expect(s.flushes).toEqual([]);
+  });
+
+  // A reply is cancellable from the moment the server starts it, and the first audio can be a
+  // second behind that. Until the controller knew a reply had *started*, Esc in that window did
+  // nothing at all — the one moment a user is most likely to press it, having asked for something
+  // and immediately thought better of it.
+  test("Esc cuts off a reply that has not reached the speakers yet", async () => {
+    const s = await audioSession();
+    await s.emit({ type: "reply_started" });
+
+    expect(s.session.interrupt()).toBe(true);
+
+    expect(s.sent.cancelled).toBe(1);
+    // Nothing was audible, so there is nothing to tell the server the user heard.
+    expect(s.sent.truncated).toEqual([]);
+  });
+
+  // The regression this exists to stop, found in a live run. Between the user's last word and the
+  // reply's first syllable the mic is wide open and nothing is queued to hold it shut, so a breath
+  // or a chair trips the server's voice detection — and a guess must never silently discard a reply
+  // the user has not heard a word of. Ask a question, get silence, with nothing in the log to say
+  // why.
+  test("a guess cannot kill a reply before it has been heard — only the keyboard can", async () => {
+    const s = await audioSession();
+    await s.emit({ type: "reply_started" });
+
+    // Both detectors, saying the same thing they say when somebody clears their throat.
+    await s.emit({ type: "user_speaking", itemId: "utterance_2" });
+    frame(s, SPEECH, 4);
+
+    expect(s.sent.cancelled).toBe(0);
+
+    // ...and the keyboard, which is not a guess, still cancels the same reply.
+    expect(s.session.interrupt()).toBe(true);
+    expect(s.sent.cancelled).toBe(1);
+  });
+
+  test("a reply the server has finished is not cancelled twice over", async () => {
+    const s = await audioSession();
+    await s.emit({ type: "reply_started" });
+    await s.emit({ type: "reply_done" });
+
+    expect(s.session.interrupt()).toBe(false);
+    expect(s.sent.cancelled).toBe(0);
+  });
+
+  // `Esc` means two things and only the gate can tell which: cut the reply off, or — with nothing
+  // to cut off — clear the input line. The view asks by reading the answer.
+  test("Esc answers whether there was anything to cut off", async () => {
+    const quiet = await audioSession();
+    expect(quiet.session.interrupt()).toBe(false);
+
+    const talking = await agentTalking();
+    expect(talking.session.interrupt()).toBe(true);
+  });
+});
+
+describe("what the status line is told", () => {
+  async function watched(overrides: Partial<SummonsSessionOptions> = {}) {
+    const states: SummonsStatus[] = [];
+    const s = await audioSession({ onStatus: (status) => states.push(status), ...overrides });
+    return { ...s, states, latest: () => states.at(-1) };
+  }
+
+  test("every mic frame reports its level, so the number moves while you talk", async () => {
+    const s = await watched();
+
+    s.mic(micChunk(200, 4_000));
+
+    expect(s.latest()).toEqual({
+      muted: false,
+      doing: "listening",
+      forMs: 0,
+      level: 4_000,
+      floor: null,
+      delegations: [],
+    });
+  });
+
+  test("a muted mic reports zero, because zero is what the model is hearing", async () => {
+    const s = await watched();
+    s.session.toggleMute();
+
+    s.mic(micChunk(200, 9_000));
+
+    expect(s.latest()?.muted).toBe(true);
+    expect(s.latest()?.level).toBe(0);
+  });
+
+  test("the floor the echo detector learned is reported, not just described in debug prose", async () => {
+    const s = await watched();
+    await s.emit({ type: "audio", pcm: micChunk(4_000), itemId: "item_1" });
+    expect(s.latest()?.doing).toBe("speaking");
+
+    // One frame of the agent's own voice coming back in is what characterises the room.
+    s.advance(200);
+    s.mic(micChunk(200, 600));
+
+    expect(s.latest()?.floor).toBe(600);
+    expect(s.latest()?.doing).toBe("speaking");
+  });
+
+  // The complaint this answers, from a live run: a Summons composing a reply said `listening`, which
+  // is the same word it says when it is doing nothing at all.
+  test("a reply being composed reads as thinking, not as listening", async () => {
+    const s = await watched();
+    expect(s.latest()?.doing ?? "listening").toBe("listening");
+
+    await s.emit({ type: "reply_started" });
+
+    expect(s.latest()?.doing).toBe("thinking");
+    await s.emit({ type: "reply_done" });
+    expect(s.latest()?.doing).toBe("listening");
+  });
+
+  test("thinking carries how long it has been thinking", async () => {
+    const s = await watched();
+    await s.emit({ type: "reply_started" });
+    s.advance(4_000);
+
+    s.mic(micChunk(200, 100));
+
+    expect(s.latest()?.forMs).toBe(4_000);
+  });
+
+  // Named, because "waiting" and "checking" are different answers and the user asked which.
+  test("a tool call in flight is reported by name, and cleared when it returns", async () => {
+    const seen: string[] = [];
+    const s = await audioSession({
+      onStatus: (status) =>
+        seen.push(status.tool ? `${status.doing}:${status.tool}` : status.doing),
+      reader: fakeReader({
+        async readFile() {
+          return "contents";
+        },
+      }).reader,
+    });
+
+    await s.emit({
+      type: "tool_call",
+      callId: "c1",
+      name: "read_file",
+      args: '{"path":"GOAL.md"}',
+    });
+
+    expect(seen).toContain("working:read_file");
+    expect(seen.at(-1)).toBe("listening");
+  });
+
+  // A tool that throws still has to hand the status line back, or the Summons reads as busy forever.
+  test("a tool that fails still stops reading as working", async () => {
+    const s = await watched({
+      reader: fakeReader({
+        async readFile() {
+          throw new Error("no such file");
+        },
+      }).reader,
+    });
+
+    await s.emit({
+      type: "tool_call",
+      callId: "c1",
+      name: "read_file",
+      args: '{"path":"gone.md"}',
+    });
+
+    expect(s.latest()?.doing).toBe("listening");
+  });
+
+  test("muting and unmuting are reported without waiting for the next frame", async () => {
+    const s = await watched();
+
+    s.session.toggleMute();
+    expect(s.latest()?.muted).toBe(true);
+
+    s.session.toggleMute();
+    expect(s.latest()?.muted).toBe(false);
+  });
+});
+
+describe("asking the hands to change something is Guarded", () => {
+  async function summoned(answer = "done, one file changed") {
+    const asked: string[] = [];
+    const { transport, state, emit } = fakeTransport();
+    await createSummonsSession({
+      transport,
+      reader: fakeReader().reader,
+      actions: fakeActions().actions,
+      hands: {
+        async ask(request) {
+          asked.push(request);
+          return answer;
+        },
+        async end() {},
+      },
+      instructions: "hi",
+    }).start();
+    const ask = (request: string, callId = "h1") =>
+      emit({ type: "tool_call", callId, name: "ask_hands", args: JSON.stringify({ request }) });
+    return { state, emit, asked, ask };
+  }
+
+  // The hands run with `--dangerously-skip-permissions`, so without this the gate on `delegate` is
+  // one the model walks around by asking its hands instead.
+  test("a request that would change something asks first and does nothing", async () => {
+    const s = await summoned();
+
+    await s.ask("fix the failing parser test");
+
+    expect(s.asked).toEqual([]);
+    const result = outputFor(s.state.toolResults, "h1");
+    expect(result.status).toBe("awaiting_confirmation");
+    expect(result.asked).toBe(false);
+    expect(result.instruction).toContain("yes or no");
+  });
+
+  test("a spoken yes is what asks them", async () => {
+    const s = await summoned();
+    await s.ask("rename that helper");
+
+    await s.emit({ type: "user_transcript", text: "yes go ahead", itemId: "u2" });
+
+    expect(s.asked).toHaveLength(1);
+    expect(s.asked[0]).toContain("rename that helper");
+  });
+
+  test("a no leaves the hands untouched", async () => {
+    const s = await summoned();
+    await s.ask("delete the dead file");
+
+    await s.emit({ type: "user_transcript", text: "no, leave it", itemId: "u2" });
+
+    expect(s.asked).toEqual([]);
+    expect(s.state.notes.join(" ")).toContain("declined");
+  });
+
+  // The other half, and the half that makes the gate bearable: a question is not a change, and
+  // asking about one would train the user to say yes without listening.
+  test("a question goes straight through, ungated", async () => {
+    const s = await summoned("they pass");
+
+    await s.ask("run the tests and tell me if they pass");
+
+    expect(s.asked).toHaveLength(1);
+    expect(outputFor(s.state.toolResults, "h1").answer).toBe("they pass");
+  });
+
+  // A held ask is a `tool` entry with outcome `held` — a `hands` entry would claim a round trip
+  // that has not happened.
+  test("a held ask is recorded as held, not as a round trip", async () => {
+    const entries: CallLogEntry[] = [];
+    const { transport, emit } = fakeTransport();
+    await createSummonsSession({
+      transport,
+      reader: fakeReader().reader,
+      hands: {
+        async ask() {
+          return "done";
+        },
+        async end() {},
+      },
+      callLog: { record: (entry) => entries.push(entry) },
+      instructions: "hi",
+    }).start();
+
+    await emit({
+      type: "tool_call",
+      callId: "h1",
+      name: "ask_hands",
+      args: JSON.stringify({ request: "commit what you have" }),
+    });
+
+    const tool = entries.find((e) => e.type === "tool");
+    expect(tool).toMatchObject({ name: "ask_hands", outcome: "held" });
+    expect(entries.some((e) => e.type === "hands" || e.type === "hands-asked")).toBe(false);
+  });
+
+  // One question in the air at a time: a second one accepted while the first waits means the user's
+  // "yes" releases whichever the controller happens to be holding.
+  test("it will not put a second question in the air", async () => {
+    const s = await summoned();
+    await s.ask("fix the parser");
+
+    await s.ask("delete the old tests", "h2");
+
+    expect(s.asked).toEqual([]);
+    expect(outputFor(s.state.toolResults, "h2").error).toContain("already waiting");
   });
 });
 
@@ -1829,13 +2417,13 @@ describe("steering a running session", () => {
     emit: (e: RealtimeInbound) => Promise<void>,
     args: Record<string, unknown>,
     callId = "st1",
-  ) => emit({ type: "tool_call", callId, name: "steer_session", args: JSON.stringify(args) });
+  ) => emit({ type: "tool_call", callId, name: "message_session", args: JSON.stringify(args) });
 
   test("the steering tools are offered once there is a relay and a registry to resolve against", async () => {
     const { state } = await summoned();
 
     const names = (state.spec?.tools ?? []).map((t) => t.name);
-    expect(names).toContain("steer_session");
+    expect(names).toContain("message_session");
     expect(names).toContain("stop_session");
   });
 
@@ -1849,7 +2437,7 @@ describe("steering a running session", () => {
     }).start();
 
     const names = (state.spec?.tools ?? []).map((t) => t.name);
-    expect(names).not.toContain("steer_session");
+    expect(names).not.toContain("message_session");
     expect(names).not.toContain("stop_session");
   });
 
@@ -1977,51 +2565,47 @@ describe("which sessions a Summons may steer", () => {
     emit: (e: RealtimeInbound) => Promise<void>,
     args: Record<string, unknown>,
     callId = "st1",
-  ) => emit({ type: "tool_call", callId, name: "steer_session", args: JSON.stringify(args) });
+  ) => emit({ type: "tool_call", callId, name: "message_session", args: JSON.stringify(args) });
 
   const worker = (name: string, ticket: number) => ({ name, kind: "worker" as const, ticket });
 
-  // AC 4. A session the user started by hand carries no ticket, so nothing says it is theirs to
-  // redirect — it is nameable and deliberately not addressable.
-  test("a session holding no Claim is not addressable, and the agent is told why", async () => {
-    const { state, emit, asked } = await harness([
-      { name: "demo-scratch", kind: "other", ticket: null },
-    ]);
+  // The fence is the workspace, not the Claim (ADR 0010 decision 9, as amended). These four used to
+  // assert the opposite, and a live run showed what that cost: a session named `<ws>-t128`, running
+  // here and carrying #128, was refused with "Nobody holds the Claim on #128" because the board row
+  // was missing. Writing a Claim is explicit and not every path that starts a session writes one.
+  test("a session the user started by hand is reachable — it is in this workspace", async () => {
+    const { emit, asked } = await harness([{ name: "demo-scratch", kind: "other", ticket: null }]);
 
     await steer(emit, { session: "demo-scratch", instruction: "rebase first" });
 
-    expect(asked).toEqual([]);
-    expect(outputFor(state.toolResults, "st1").error).toContain("no ticket");
+    expect(asked).toHaveLength(1);
+    expect(asked[0]).toContain("demo-scratch");
   });
 
-  test("a Worker whose ticket somebody else claimed is not addressable", async () => {
-    const { state, emit, asked } = await harness([worker("demo-t23", 23)], {
-      23: "demo-t23-redo",
-    });
+  test("a ticket nobody has claimed is a bookkeeping gap, not a wall", async () => {
+    const { emit, asked } = await harness([worker("demo-t23", 23)], { 23: null });
 
     await steer(emit, { session: "demo-t23", instruction: "rebase first" });
 
-    expect(asked).toEqual([]);
-    expect(outputFor(state.toolResults, "st1").error).toContain("demo-t23-redo");
+    expect(asked).toHaveLength(1);
   });
 
-  test("a Worker on a ticket nobody has claimed is not addressable", async () => {
-    const { state, emit, asked } = await harness([worker("demo-t23", 23)], { 23: null });
+  test("a ticket claimed by some other session is still reachable by name", async () => {
+    const { emit, asked } = await harness([worker("demo-t23", 23)], { 23: "demo-t23-redo" });
 
     await steer(emit, { session: "demo-t23", instruction: "rebase first" });
 
-    expect(asked).toEqual([]);
-    expect(outputFor(state.toolResults, "st1").error).toContain("Nobody holds the Claim");
+    expect(asked).toHaveLength(1);
   });
 
-  // Fail closed: a hub we could not reach must never be read as a ticket nobody has claimed.
-  test("a hub that could not be reached refuses the steer rather than waving it through", async () => {
-    const { state, emit, asked } = await harness([worker("demo-t23", 23)], {}, false);
+  // The Claim read is gone, so an unreachable board cannot block a message either — it was never
+  // the thing keeping the scope, and reading it here was one round trip mid-sentence.
+  test("an unreachable board does not stop a message going out", async () => {
+    const { emit, asked } = await harness([worker("demo-t23", 23)], {}, false);
 
     await steer(emit, { session: "demo-t23", instruction: "rebase first" });
 
-    expect(asked).toEqual([]);
-    expect(outputFor(state.toolResults, "st1").error).toContain("could not be reached");
+    expect(asked).toHaveLength(1);
   });
 
   // AC 5. The registry read is scoped to this workspace's directory, so another project's session
@@ -2110,7 +2694,184 @@ describe("which sessions a Summons may steer", () => {
     await steer(emit, { instruction: "rebase first" });
 
     expect(asked).toEqual([]);
-    expect(outputFor(state.toolResults, "st1").error).toContain("No session is running");
+    expect(outputFor(state.toolResults, "st1").error).toContain("carrying a ticket");
+  });
+});
+
+describe("asking a running session, and hearing the answer", () => {
+  /**
+   * A clock the test fires by hand. The answer watch is the only timer here (no idle window), so
+   * every scheduled callback is a poll.
+   */
+  function answerClock() {
+    let t = 1_000;
+    let scheduled: { handle: number; fn: () => void }[] = [];
+    let nextHandle = 1;
+    const timers: TimerPort = {
+      now: () => t,
+      setTimeout(fn) {
+        const handle = nextHandle++;
+        scheduled.push({ handle, fn });
+        return handle;
+      },
+      clearTimeout(handle) {
+        scheduled = scheduled.filter((s) => s.handle !== handle);
+      },
+    };
+    return {
+      timers,
+      advance: (ms: number) => (t += ms),
+      async tick() {
+        const due = scheduled;
+        scheduled = [];
+        for (const s of due) s.fn();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      },
+      pending: () => scheduled.length,
+    };
+  }
+
+  async function asking(latest: SessionsPort["latest"]) {
+    const asked: string[] = [];
+    const { transport, state, emit } = fakeTransport();
+    const clock = answerClock();
+    const session = createSummonsSession({
+      transport,
+      reader: fakeReader().reader,
+      timers: clock.timers,
+      idleTimeoutMs: 0,
+      sessions: {
+        list: async () => ({
+          known: true,
+          sessions: [
+            { name: "demo-t23", kind: "worker" as const, ticket: 23, status: "busy", pid: 1 },
+          ],
+        }),
+        latest,
+      },
+      hands: {
+        async ask(request) {
+          asked.push(request);
+          return "SERVANT-STEER: delivered";
+        },
+        async end() {},
+      },
+      instructions: "hi",
+    });
+    await session.start();
+    const ask = (args: Record<string, unknown>) =>
+      emit({
+        type: "tool_call",
+        callId: "q1",
+        name: "message_session",
+        args: JSON.stringify(args),
+      });
+    return { session, state, emit, asked, clock, ask };
+  }
+
+  const q = { session: "demo-t23", instruction: "how far have you got", expect_reply: true };
+
+  test("the question goes out as a question, not as an instruction", async () => {
+    const s = await asking(async () => ({ known: true, turns: 4, latest: "on it" }));
+
+    await s.ask(q);
+
+    expect(s.asked).toHaveLength(1);
+    expect(s.asked[0]).toContain("how far have you got");
+    // The reply is read from its transcript, so it has to be said rather than only acted on.
+    expect(s.asked[0]).toContain("it is read back from your transcript");
+    expect(s.asked[0]).toContain("not an instruction");
+  });
+
+  // The tool answers straight away: the target replies at its next safe point, and a voice
+  // conversation cannot sit in silence waiting for it.
+  test("the tool says the question was asked, never that it was answered", async () => {
+    const s = await asking(async () => ({ known: true, turns: 4, latest: "on it" }));
+
+    await s.ask(q);
+
+    const result = outputFor(s.state.toolResults, "q1");
+    expect(result.instruction).toContain("have asked");
+    expect(result.instruction).toContain("do not say it has answered");
+  });
+
+  test("the answer arrives when it arrives, and is said unprompted", async () => {
+    let turns = 4;
+    const s = await asking(async () => ({
+      known: true,
+      turns,
+      latest: turns > 4 ? "rebased, tests green, one file left" : "on it",
+    }));
+
+    await s.ask(q);
+    // Still working: nothing to report, and nothing invented.
+    await s.clock.tick();
+    expect(s.state.prompts).toEqual([]);
+
+    turns = 5;
+    await s.clock.tick();
+
+    expect(s.state.prompts).toHaveLength(1);
+    expect(s.state.prompts[0]).toContain("rebased, tests green, one file left");
+  });
+
+  test("said once, not on every poll after", async () => {
+    let turns = 5;
+    const s = await asking(async () => ({ known: true, turns, latest: "done" }));
+    turns = 4;
+    await s.ask(q);
+    turns = 5;
+
+    await s.clock.tick();
+    await s.clock.tick();
+    await s.clock.tick();
+
+    expect(s.state.prompts).toHaveLength(1);
+  });
+
+  // A question that is never answered has to stop being pending, or the Summons carries it for the
+  // rest of the conversation and keeps reporting it as still coming.
+  test("a question nobody answers is given up on, out loud", async () => {
+    const s = await asking(async () => ({ known: true, turns: 4, latest: "on it" }));
+
+    await s.ask(q);
+    s.clock.advance(6 * 60 * 1000);
+    await s.clock.tick();
+
+    expect(s.state.prompts).toHaveLength(1);
+    expect(s.state.prompts[0]).toContain("never answered");
+  });
+
+  // "Its transcript could not be read" and "it has said nothing" are different facts, and promising
+  // an answer that nothing can notice is the worse of the two mistakes.
+  test("a transcript that cannot be read promises no answer", async () => {
+    const s = await asking(async () => ({ known: false }));
+
+    await s.ask(q);
+
+    expect(s.asked).toHaveLength(1);
+    expect(outputFor(s.state.toolResults, "q1").instruction).toContain("could not be read");
+    expect(s.clock.pending()).toBe(0);
+  });
+
+  test("an instruction asks for no reply and waits for none", async () => {
+    const s = await asking(async () => ({ known: true, turns: 4, latest: "on it" }));
+
+    await s.ask({ session: "demo-t23", instruction: "rebase onto main first" });
+
+    expect(s.asked[0]).toContain("next safe point");
+    expect(s.asked[0]).not.toContain("not an instruction");
+    expect(s.clock.pending()).toBe(0);
+  });
+
+  test("hanging up drops the question rather than outliving the conversation", async () => {
+    const s = await asking(async () => ({ known: true, turns: 4, latest: "on it" }));
+    await s.ask(q);
+    expect(s.clock.pending()).toBeGreaterThan(0);
+
+    await s.session.stop();
+
+    expect(s.clock.pending()).toBe(0);
   });
 });
 
@@ -2155,7 +2916,7 @@ describe("what a steer writes down", () => {
     emit: (e: RealtimeInbound) => Promise<void>,
     args: Record<string, unknown>,
     callId = "st1",
-  ) => emit({ type: "tool_call", callId, name: "steer_session", args: JSON.stringify(args) });
+  ) => emit({ type: "tool_call", callId, name: "message_session", args: JSON.stringify(args) });
 
   // AC 6 and AC 9 together: the ordinary case is silent and leaves no trace on the ticket.
   test("a routine redirect goes straight out, with no confirmation asked for", async () => {
@@ -2277,7 +3038,7 @@ describe("stopping a session is Guarded", () => {
     emit: (e: RealtimeInbound) => Promise<void>,
     args: Record<string, unknown>,
     callId = "st1",
-  ) => emit({ type: "tool_call", callId, name: "steer_session", args: JSON.stringify(args) });
+  ) => emit({ type: "tool_call", callId, name: "message_session", args: JSON.stringify(args) });
 
   test("asking to stop sends nothing and comes back asking to confirm", async () => {
     const { state, emit, asked } = await harness();
@@ -2432,7 +3193,7 @@ describe("holes review found in steering", () => {
     emit: (e: RealtimeInbound) => Promise<void>,
     args: Record<string, unknown>,
     callId = "st1",
-  ) => emit({ type: "tool_call", callId, name: "steer_session", args: JSON.stringify(args) });
+  ) => emit({ type: "tool_call", callId, name: "message_session", args: JSON.stringify(args) });
 
   const stop = (emit: (e: RealtimeInbound) => Promise<void>, callId = "sp1") =>
     emit({

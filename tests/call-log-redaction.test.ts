@@ -98,12 +98,16 @@ describe("redaction is enforced by the adapters, not the caller", () => {
       outcome: "error",
       detail: "ghp_abcdefghijklmnopqrstuvwxyz0123456789 is invalid",
       durationMs: 3,
+      number: 1,
+      args: '{"path":".env"}',
+      result: '{"error":"AKIAIOSFODNN7EXAMPLE is invalid"}',
     });
     await log.close();
 
     const written = await readFile(log.path, "utf8");
     expect(written).not.toContain("sk-proj-");
     expect(written).not.toContain("ghp_");
+    expect(written).not.toContain("AKIAIOSFODNN7EXAMPLE");
     expect(written).toContain("[redacted]");
     // The surrounding sentence survives — redaction blanks the secret, not the record.
     expect(written).toContain("the .env says OPENAI_API_KEY=");

@@ -3,7 +3,11 @@
 
 import { describe, expect, test } from "bun:test";
 import { handsSessionName } from "../src/core/session-name.ts";
-import { type HandsRun, createHandsSession } from "../src/core/summons-hands.ts";
+import {
+  type HandsRun,
+  createHandsSession,
+  looksLikeWritingRequest,
+} from "../src/core/summons-hands.ts";
 
 function hands(
   answer: (run: HandsRun, index: number) => string | Promise<string> = () => "ok",
@@ -260,5 +264,69 @@ describe("the Hands session ends with the Summons", () => {
 
     await expect(session.ask("one more thing")).rejects.toThrow(/ended/i);
     expect(runs).toHaveLength(1);
+  });
+});
+
+// The Hands session runs with `--dangerously-skip-permissions` and can edit, write and run
+// anything. `delegate` is Guarded precisely because it changes things, so without this detector
+// "ask your hands to refactor the parser" walks around the one gate built to catch exactly that —
+// the same hole `looksLikeStopInstruction` closes for a stop phrased as a redirect.
+describe("does a hands request change something", () => {
+  const writes = [
+    "fix the failing parser test",
+    "can you fix the parser",
+    "please just rename that helper",
+    "refactor summons.ts to split the gate out",
+    "commit what you have with a sensible message",
+    "add a test for the empty case",
+    "delete the dead file",
+    "bun install the new dep",
+    "run git push",
+    "go ahead and revert it",
+    "update the changelog",
+    "set the flag to true in config.json",
+  ];
+  for (const request of writes) {
+    test(`asks first: "${request}"`, () => {
+      expect(looksLikeWritingRequest(request)).toBe(true);
+    });
+  }
+
+  // The other half, and the half that decides whether the gate is worth having. Too many false
+  // positives and the user says yes without listening, which is worse than the hole — so a mutating
+  // word in a question stays a question.
+  const reads = [
+    "run the tests and tell me if they pass",
+    "does that compile",
+    "what does git blame say about this line",
+    "what did that commit change",
+    "why does the fix fail",
+    "which files changed in the last commit",
+    "check whether the build passes",
+    "what did that session conclude",
+    "look at the diff and tell me what it does",
+    "how does the echo gate decide a barge-in",
+    "is the migration still failing",
+    "show me the last three commits",
+    "find where READ_ONLY_PERMISSION_MODE is used",
+    // A question about a push is not a push. The verb is there and the position says it is asking.
+    "did we push that already",
+  ];
+  for (const request of reads) {
+    test(`goes straight through: "${request}"`, () => {
+      expect(looksLikeWritingRequest(request)).toBe(false);
+    });
+  }
+
+  // "check the tests" is a question and "fix the broken one" is not, in one sentence. Reading only
+  // the first clause would wave the second one through.
+  test("a question with an instruction bolted on is an instruction", () => {
+    expect(looksLikeWritingRequest("check whether the tests pass and fix any that fail")).toBe(
+      true,
+    );
+  });
+
+  test("an empty request is not a write", () => {
+    expect(looksLikeWritingRequest("   ")).toBe(false);
   });
 });

@@ -2,8 +2,14 @@
 // single seam the feature is tested at — the Realtime socket, the sox audio pipes and the
 // filesystem all sit outside it as injected ports (see workspace ADR 0009).
 
-import { type CallLogEndReason, type CallLogPort, NULL_CALL_LOG } from "./call-log/record.ts";
+import {
+  type CallLogEndReason,
+  type CallLogPort,
+  NULL_CALL_LOG,
+  recordedText,
+} from "./call-log/record.ts";
 import { classifyConfirmation } from "./summons-confirm.ts";
+import { looksLikeWritingRequest } from "./summons-hands.ts";
 import {
   composeSteerMessage,
   composeSteerRequest,
@@ -83,7 +89,7 @@ export const DELEGATION_TOOLS: readonly SummonsTool[] = [
   {
     name: "research",
     description:
-      "Hand a read-only question — 'how does X work', 'why is Y slow', 'what calls Z' — to a fresh Claude session that can search the whole codebase. Use this instead of grinding through files yourself: it is token-hungry work and Claude has the harness for it. Launches immediately, no confirmation, because the session it starts cannot change anything. If the task would edit, run or write ANYTHING, it is not research — use delegate.",
+      "Hand a question about the code — 'how does X work', 'why is Y slow', 'what calls Z' — to a fresh Claude session that can search the whole codebase, in its own tab where the user can watch it. Use this instead of grinding through files yourself: it is token-hungry work and Claude has the harness for it, and it runs without holding this conversation shut. Launches immediately, no confirmation, because the session it starts cannot change anything. For something that comes back in seconds, use ask_hands, which answers into the conversation instead. If the task would edit, run or write ANYTHING, it is not research — use delegate.",
     parameters: {
       type: "object",
       properties: {
@@ -108,7 +114,7 @@ export const DELEGATION_TOOLS: readonly SummonsTool[] = [
   {
     name: "delegate",
     description:
-      "Hand work that CHANGES something — editing, refactoring, running commands, anything that writes — to a fresh Claude session with its full harness. Calling this launches NOTHING: it asks the user to confirm out loud first, and their spoken answer decides. For read-only questions use research instead, which needs no confirmation.",
+      "Hand work that CHANGES something — editing, refactoring, running commands, anything that writes — to a fresh Claude session with its full harness. Calling this launches NOTHING: it asks the user to confirm first, and their answer decides. For read-only questions use research instead, which needs no confirmation.",
     parameters: {
       type: "object",
       properties: {
@@ -157,6 +163,20 @@ export const DELEGATION_TOOLS: readonly SummonsTool[] = [
  * agent must never satisfy this by asking a session, which costs that session a whole turn.
  */
 export interface SessionsPort {
+  /**
+   * What a named session has said and how many turns it has taken, read from its transcript rather
+   * than asked for. The pull half of ADR 0010, extended past this conversation's own delegations:
+   * `list` says a session exists and whether it is busy, and carries nothing about its work.
+   *
+   * Unknown when the name cannot be linked to a transcript — which is not "it has said nothing".
+   *
+   * Optional, and `list` is not: listing is what makes a session addressable, and this is only what
+   * lets an answer be *noticed*. Without it a question can still be sent, and the agent is told the
+   * reply cannot be watched for rather than promised one that will never come.
+   */
+  latest?(
+    name: string,
+  ): Promise<{ known: false } | { known: true; turns: number; latest: string | null }>;
   list(): Promise<
     | { known: false }
     | {
@@ -217,7 +237,7 @@ export const HANDS_TOOLS: readonly SummonsTool[] = [
   {
     name: "ask_hands",
     description:
-      "Ask your hands — a Claude session kept for this conversation — to do one small job and tell you the answer: run the tests, check whether that compiles, look at what git blame says. It answers immediately, in one round trip, so use it for anything you need the result of before you can say the next sentence. It remembers the earlier things you asked it, so you can refer back to them. For work that carries a ticket, or that you would want to watch in its own tab, use delegate instead.",
+      "Ask your hands — a Claude session kept for this conversation — for something that comes back in SECONDS: what git blame says here, whether that compiles, what is in that file, what a session concluded. It answers into the conversation, in one round trip, and remembers the earlier things you asked it. The test is time, because a hands call holds the conversation shut while it runs — you cannot speak or be interrupted until it returns. Anything that might run for a minute (a test suite, a build, a search across everything) belongs in a session of its own instead, where the user can watch it and you two can keep talking: research when it changes nothing, delegate when it does. Asking your hands to CHANGE something is allowed but Guarded: it comes back asking the user to confirm first, so keep questions and changes in separate requests.",
     parameters: {
       type: "object",
       properties: {
@@ -256,13 +276,13 @@ export interface TicketFilingPort {
 
 /**
  * Turning the conversation into a ticket. Guarded, and through the same gate as everything else
- * Guarded — the agent proposes a title and a body, and the user's spoken yes is what files it.
+ * Guarded — the agent proposes a title and a body, and the user's yes is what files it.
  */
 export const TICKET_TOOLS: readonly SummonsTool[] = [
   {
     name: "file_ticket",
     description:
-      "Turn what you have been discussing into a ticket in this workspace's hub — 'summarize that into a ticket', 'open an issue for that'. Calling this files NOTHING: it asks the user to confirm out loud first. Say out loud the title you are about to file and ask for a plain yes or no, then stop — their spoken answer is what decides. This is the only thing you can write anywhere, so get the title and body right before you propose them.",
+      "Turn what you have been discussing into a ticket in this workspace's hub — 'summarize that into a ticket', 'open an issue for that'. Calling this files NOTHING: it asks the user to confirm out loud first. Say out loud the title you are about to file and ask for a plain yes or no, then stop — their answer is what decides. This is the only thing you can write anywhere, so get the title and body right before you propose them.",
     parameters: {
       type: "object",
       properties: {
@@ -287,7 +307,7 @@ export const TICKET_TOOLS: readonly SummonsTool[] = [
  * agent is not a Claude session, so both go out through the Hands session, which is (ADR 0010
  * decision 6). Which session may be addressed is decided here and not there — see `resolveTarget`.
  *
- * `steer_session` is not Guarded, deliberately. Sessions run in auto mode and their own permission
+ * `message_session` is not Guarded, deliberately. Sessions run in auto mode and their own permission
  * prompts are the real gate; a message is speech to another agent, not an action on the workspace,
  * and confirming every steer would make the feature unusable in the workflow it exists for.
  * `stop_session` is Guarded, because it destroys work already done and nothing downstream catches
@@ -295,26 +315,31 @@ export const TICKET_TOOLS: readonly SummonsTool[] = [
  */
 export const STEER_TOOLS: readonly SummonsTool[] = [
   {
-    name: "steer_session",
+    name: "message_session",
     description:
-      "Redirect a Claude session that is ALREADY RUNNING — 'rebase onto main first', 'drop that approach', 'also check the tests'. Use this the moment the user wants to change what a running session is doing; it is the whole point of talking while work is in flight. It launches nothing and needs no confirmation. The instruction is relayed to that session, which takes it up at its next safe point rather than immediately, so report it as passed on, never as done. To stop or abandon a session, use stop_session instead — not this.",
+      "Send a message to a Claude session that is ALREADY RUNNING — either to redirect it ('rebase onto main first', 'drop that approach', 'also check the tests') or to ask it something ('how far have you got', 'what is left', 'did the tests pass'). Use it the moment the user wants to change or find out what a running session is doing; that is the whole point of talking while work is in flight. It launches nothing and needs no confirmation. A session takes a message up at its next safe point rather than immediately, so report an instruction as passed on, never as done. For work this conversation delegated, check_delegation reads its progress for free and is the better tool — this one costs the session a turn. To stop or abandon a session, use stop_session instead.",
     parameters: {
       type: "object",
       properties: {
         session: {
           type: "string",
           description:
-            "Which session to steer, by the name list_sessions reports, or its ticket number. Omit only when there is just one session running; with several, you will be asked which.",
+            "Which session to message, by the name list_sessions reports, or its ticket number. Omit only when there is just one session running; with several, you will be asked which.",
+        },
+        expect_reply: {
+          type: "boolean",
+          description:
+            "True when the message is a question and the user wants the answer. The session's reply is read back from its transcript once it answers, which takes as long as it takes to reach a safe point — so you may be told the answer is not in yet, and it will be reported to you when it arrives. Leave it out for an instruction, which needs no reply.",
         },
         instruction: {
           type: "string",
           description:
-            "What to tell it, written out for someone who cannot hear this conversation. The user's own words and specifics, in full sentences — it is relayed verbatim.",
+            "What to say to it, written out for someone who cannot hear this conversation. The user's own words and specifics, in full sentences — it is relayed verbatim.",
         },
         changes_acceptance_criteria: {
           type: "boolean",
           description:
-            "True only when this changes what *done* means for the ticket — a new requirement, a dropped one, a different definition of finished. That gets written to the ticket, because it outlives the session. A plain course correction does not: leave this out.",
+            "True only when this changes what *done* means for the ticket — a new requirement, a dropped one, a different definition of finished. That gets written to the ticket, because it outlives the session. A plain course correction or a question does not: leave this out.",
         },
       },
       required: ["instruction"],
@@ -323,7 +348,7 @@ export const STEER_TOOLS: readonly SummonsTool[] = [
   {
     name: "stop_session",
     description:
-      "Tell a running session to stop or abandon what it is doing. Calling this stops NOTHING: it asks the user to confirm out loud first, because stopping destroys work already done and nothing else will catch it. Say out loud what you are about to stop, ask for a plain yes or no, and stop — their spoken answer is what decides.",
+      "Tell a running session to stop or abandon what it is doing. Calling this stops NOTHING: it asks the user to confirm out loud first, because stopping destroys work already done and nothing else will catch it. Say out loud what you are about to stop, ask for a plain yes or no, and stop — their answer is what decides.",
     parameters: {
       type: "object",
       properties: {
@@ -413,6 +438,13 @@ export type RealtimeInbound =
    */
   | { type: "user_transcript"; text: string; itemId?: string | undefined }
   /**
+   * The server has begun a reply. The bracket around `reply_done`, and needed for the same reason:
+   * a cancel is only legal while a response is in flight, and until this existed the only proof of
+   * one was its audio — so a reply interrupted before it reached the speakers was not cancelled at
+   * all, and a typed turn sent in that window collided with it.
+   */
+  | { type: "reply_started" }
+  /**
    * The model has finished generating a reply — there may still be minutes of it queued to play.
    * Worth knowing only so an interruption does not ask to cancel a reply that is already over,
    * which the API answers with an error the user would then hear about for nothing.
@@ -441,11 +473,24 @@ export interface RealtimeTransport {
    */
   truncateAudio(itemId: string, playedMs: number): void;
   /**
+   * A typed utterance, as an ordinary user turn — and a reply asked for, which is the whole
+   * difference from `sendAgentNote`. Nothing was heard, so no voice-activity detection has started
+   * a reply for this to steer; without asking, a typed line sits in the conversation unanswered.
+   */
+  sendUserText(text: string): void;
+  /**
    * Put a note from the controller into the conversation, for things the agent must say that no
    * tool call is waiting on — above all the verdict of the confirm-gate, which the controller
    * decides after the tool call has already been answered.
    */
   sendAgentNote(text: string): void;
+  /**
+   * A note *and* an ask: something happened that the agent should tell the user about, with nobody
+   * having spoken to prompt it. The one thing a Summons says unbidden — a delegated session
+   * finishing — and the reason it is not `sendAgentNote` is precisely that nothing is under way for
+   * a note to steer.
+   */
+  promptAgent(text: string): void;
   close(): Promise<void>;
 }
 
@@ -551,6 +596,59 @@ function peakLevel(base64Pcm: string): number {
 /** Default silence window before a Summons hangs itself up, so a forgotten mic stops billing. */
 export const DEFAULT_SUMMONS_IDLE_TIMEOUT_MS = 3 * 60 * 1000;
 
+/**
+ * What the Summons is doing, as a status line has to say it.
+ *
+ * One snapshot rather than two feeds, because it is one line: two writers racing for it means the
+ * last one wins and drops the other's news. The echo gate owns the mic half and the controller owns
+ * the conversation half, and the controller composes them.
+ *
+ * The level and the floor exist nowhere else — computed frame by frame inside the gate, and once
+ * emitted only as debug prose — and they are the two numbers that explain a barge-in that fired or
+ * did not. Watching them while talking over a reply is how the thresholds get tuned at all.
+ */
+export interface SummonsStatus {
+  /** The user has the mic shut. Nothing reaches the model until they open it again. */
+  muted: boolean;
+  /**
+   * What is happening, output-side. `listening` means idle — and means only that, which is the whole
+   * point: a Summons composing a reply or running a tool used to say the same word as one doing
+   * nothing at all, so the one question a status line exists to answer had no answer.
+   */
+  doing: "listening" | "thinking" | "working" | "speaking";
+  /** The tool in flight, when `doing` is `working`. "Waiting" and "checking" are not the same thing. */
+  tool?: string | undefined;
+  /** How long `thinking` or `working` has run — because the question being asked is "is it stuck?". */
+  forMs: number;
+  /**
+   * Peak level of the last mic frame, admitted or held back. Zero while muted: the number says what
+   * the model is hearing, and a muted mic is heard by nobody however loud the room is.
+   */
+  level: number;
+  /**
+   * The level the agent's own echo settles at, learned from the frames the gate holds back — null
+   * until the room has been characterised, which only happens once a reply has played.
+   */
+  floor: number | null;
+  /**
+   * Work handed to Claude sessions in this conversation, as it stands. Empty for the great majority
+   * of Summonses, and the answer to "am I still connected to what I asked for" for the rest.
+   */
+  delegations: readonly SummonsDelegationStatus[];
+}
+
+/** The mic half of a `SummonsStatus`, as the echo gate knows it. */
+interface GateReport {
+  muted: boolean;
+  speaking: boolean;
+  /** A reply is being generated — true from `response.created` until it is done or cancelled. */
+  generating: boolean;
+  /** When the generation in flight began, so a long silence is visibly a long one. */
+  generatingSince: number | null;
+  level: number;
+  floor: number | null;
+}
+
 /** Local, read-only access to whatever the Summons is scoped to. */
 export interface WorkspaceReader {
   readFile(path: string): Promise<string>;
@@ -604,6 +702,12 @@ export interface SummonsSessionOptions {
   /** Called with anything the API reports going wrong, so the user isn't left talking to silence. */
   onError?: ((message: string) => void) | undefined;
   /**
+   * Where the Summons reports what it is doing, so a status line needs no debug prose to parse.
+   * Called on every mic frame and on every change worth showing, so it is a status *feed*: the
+   * receiver decides how often to redraw.
+   */
+  onStatus?: ((status: SummonsStatus) => void) | undefined;
+  /**
    * Traces the decisions no other output can explain — above all what the echo detector heard and
    * what it made of it. Those thresholds are a heuristic against a real room, so tuning them needs
    * the numbers, and the numbers only exist during a live conversation.
@@ -620,6 +724,24 @@ export interface SummonsSession {
    * running and a session muted and forgotten still hangs itself up.
    */
   toggleMute(): boolean;
+  /**
+   * A typed utterance: the same turn a spoken one is, and treated as one throughout — answered in
+   * voice, and able to answer the confirm-gate. The channel is recorded so a person reading the
+   * conversation back can tell them apart, not so the agent can.
+   *
+   * Blank input is not a turn, and the mic is left exactly as the user set it — muting is theirs
+   * alone, so typing neither opens nor closes it.
+   */
+  typed(text: string): Promise<void>;
+  /**
+   * Cut the reply off from the keyboard — `Esc`. The third barge-in source, and the only one that
+   * is not a guess about whether a person is talking, so it is obeyed even with barge-in switched
+   * off.
+   *
+   * Answers whether there was a reply to cut off, since `Esc` on a quiet Summons means something
+   * else entirely — clearing the input line — and the view cannot tell the two apart on its own.
+   */
+  interrupt(): boolean;
   /**
    * Record something only the outside knows — an audio subsystem dying, say. Without this the Call
    * log of a session killed by a dead speaker read as an ordinary hang-up, and the one line that
@@ -696,6 +818,33 @@ interface TrackedDelegation {
   /** Set once the session has been observed to have finished, which frees its repo. */
   finished: boolean;
   queuedBehind: string | null;
+  /** When its session started, so a Summons can show how long the work has been running. */
+  launchedAt: number | null;
+  /** The last status anyone read off it, so the footer has something to show between polls. */
+  lastSeen: DelegationStatus | null;
+}
+
+/** How often the Summons looks at what it delegated. About not being noisy: the read is ~20ms. */
+const DELEGATION_POLL_MS = 10_000;
+
+/** One delegation, as a status line shows it. */
+export interface SummonsDelegationStatus {
+  label: string;
+  /** null while queued behind another task on the same repo. */
+  session: string | null;
+  state: "queued" | "running" | "finished" | "unknown";
+  /** How long since its session started. Zero while queued. */
+  forMs: number;
+}
+
+/** A delegated session having stopped — the one thing a Summons says without being asked. */
+export interface FinishedDelegation {
+  label: string;
+  session: string;
+  /** The last thing the session said, which is the answer the user is waiting for. */
+  latest: string | null;
+  /** A queued task this one finishing let start, if there was one. */
+  alsoStarted: string | null;
 }
 
 /** Compare labels the way a person says them — case, punctuation and "the" do not count. */
@@ -729,7 +878,7 @@ interface GatedAction {
   askedAfterItemId: string | null;
   /** What did not happen, said back when the answer is anything but a clear yes. */
   nothingHappened: string;
-  /** Runs on a spoken yes, and returns the note the agent is given. */
+  /** Runs on a yes, and returns the note the agent is given. */
   run(): Promise<string>;
   /** How a failure of `run` is put to the user. */
   failed(message: string): string;
@@ -764,9 +913,10 @@ function createGate(opts: SummonsSessionOptions) {
     },
 
     /**
-     * The user has spoken while something is held. Only an unambiguous yes releases it: a no and
-     * anything unclear both decline, because a misheard sentence must never act. Returns false when
-     * the utterance was not an answer at all, leaving the gate held.
+     * The user has answered while something is held — spoken or typed, which is the same thing.
+     * Only an unambiguous yes releases it: a no and anything unclear both decline, because a
+     * misheard sentence must never act. Returns false when the utterance was not an answer at all,
+     * leaving the gate held.
      */
     async resolve(text: string, itemId: string | null): Promise<boolean> {
       const action = pending;
@@ -814,7 +964,17 @@ type Gate = ReturnType<typeof createGate>;
  * Delegation: holding a proposed job at the gate until the user says yes, tracking what has been
  * handed out, and keeping two tasks on one repo from running at once.
  */
-function createDelegations(opts: SummonsSessionOptions, gate: Gate) {
+function createDelegations(
+  opts: SummonsSessionOptions,
+  gate: Gate,
+  timers: TimerPort,
+  /**
+   * Anything that changed what the roster says. `finished` is set only for the one change worth
+   * saying out loud; every other one — a launch, a queue, a poll that saw a session go unreadable —
+   * is a redraw and nothing more.
+   */
+  onChange: (finished: FinishedDelegation | null) => void,
+) {
   const actions = opts.actions;
   const log = opts.callLog ?? NULL_CALL_LOG;
   const tracked: TrackedDelegation[] = [];
@@ -850,6 +1010,10 @@ function createDelegations(opts: SummonsSessionOptions, gate: Gate) {
     if (!actions) throw new Error("This Summons has nothing to delegate to.");
     entry.handle = await actions.delegate(entry.request);
     entry.queuedBehind = null;
+    entry.launchedAt = timers.now();
+    entry.lastSeen = "running";
+    watch();
+    onChange(null);
   }
 
   /**
@@ -917,20 +1081,81 @@ function createDelegations(opts: SummonsSessionOptions, gate: Gate) {
     request: DelegationRequest,
     result:
       | { status: "launched"; session: string | null }
+      | { status: "finished"; session: string; detail?: string | undefined }
       | { status: "queued"; detail: string }
       | { status: "failed"; detail: string },
   ): void {
+    const named = result.status === "launched" || result.status === "finished";
     log.record({
       type: "delegation",
       mode: request.readOnly ? "research" : "delegate",
       label: request.label,
       task: request.task,
-      session: result.status === "launched" ? result.session : null,
+      session: named ? result.session : null,
       status: result.status,
-      ...(result.status === "launched" ? {} : { detail: result.detail }),
+      ...(named ? {} : { detail: result.detail }),
+      ...(result.status === "finished" && result.detail ? { detail: result.detail } : {}),
       ...(request.ticket ? { ticket: request.ticket } : {}),
       ...(request.repo ? { repo: request.repo } : {}),
     });
+  }
+
+  /** Everything launched and not yet known to have stopped — what there is to watch. */
+  function running(): TrackedDelegation[] {
+    return tracked.filter((t) => t.handle && !t.finished);
+  }
+
+  let watchHandle: unknown = null;
+
+  /**
+   * Look at what was delegated, on a clock, so a session stopping is something the Summons *notices*
+   * rather than something only a later question would have uncovered. It was the one thing a Summons
+   * did whose outcome it never mentioned.
+   *
+   * Scheduled only while something is running, and cleared when the Summons hangs up — a poll timer
+   * outliving the conversation is a process that will not exit.
+   */
+  function watch(): void {
+    if (watchHandle !== null || !actions || running().length === 0) return;
+    watchHandle = timers.setTimeout(() => {
+      watchHandle = null;
+      void poll();
+    }, DELEGATION_POLL_MS);
+  }
+
+  async function poll(): Promise<void> {
+    let changed = false;
+    for (const entry of running()) {
+      if (!entry.handle || !actions) continue;
+      let report: DelegationReport;
+      try {
+        report = await actions.observe(entry.handle);
+      } catch {
+        // An unreadable registry is not a finished session (`statusOf` is careful about this for the
+        // same reason) — so this looks again next time rather than announcing anything.
+        continue;
+      }
+      entry.lastSeen = report.status;
+      if (report.status !== "finished") continue;
+      changed = true;
+      entry.finished = true;
+      const alsoStarted = await drain(entry.request.repo);
+      recordDelegation(entry.request, {
+        status: "finished",
+        session: entry.handle.sessionName,
+        ...(alsoStarted ? { detail: `freed the repo, so "${alsoStarted}" started` } : {}),
+      });
+      onChange({
+        label: labelOf(entry),
+        session: entry.handle.sessionName,
+        latest: report.latest,
+        alsoStarted,
+      });
+    }
+    // A poll that saw nothing finish can still have changed what the roster says — a session going
+    // unreadable, or an age ticking over — so the redraw is unconditional and the announcement is not.
+    if (!changed) onChange(null);
+    watch();
   }
 
   /** Track and launch. Throws only if the launch itself failed, leaving nothing tracked. */
@@ -940,6 +1165,8 @@ function createDelegations(opts: SummonsSessionOptions, gate: Gate) {
       handle: null,
       finished: false,
       queuedBehind: null,
+      launchedAt: null,
+      lastSeen: null,
     };
     tracked.push(entry);
     try {
@@ -952,6 +1179,7 @@ function createDelegations(opts: SummonsSessionOptions, gate: Gate) {
         return { launched: true, label: request.label, session };
       }
       recordDelegation(request, { status: "queued", detail: outcome.behind });
+      onChange(null);
       return { launched: false, label: request.label, queuedBehind: outcome.behind };
     } catch (err) {
       tracked.pop();
@@ -1038,9 +1266,31 @@ function createDelegations(opts: SummonsSessionOptions, gate: Gate) {
         launched: false,
         label,
         instruction:
-          "Nothing has been launched. Say out loud, in one sentence, what you are about to hand to Claude, then ask the user to answer yes or no. Do not call delegate again — their spoken answer is what decides.",
+          "Nothing has been launched. Say out loud, in one sentence, what you are about to hand to Claude, then ask the user to answer yes or no. Do not call delegate again — their answer is what decides.",
       });
       return { outcome: "held", detail: label };
+    },
+
+    /** What is delegated and how it stands, for the status line. Never asks anyone: reads what the watch loop last saw. */
+    roster(): SummonsDelegationStatus[] {
+      return tracked.map((entry) => ({
+        label: labelOf(entry),
+        session: entry.handle?.sessionName ?? null,
+        state: entry.finished
+          ? ("finished" as const)
+          : !entry.handle
+            ? ("queued" as const)
+            : entry.lastSeen === "unknown"
+              ? ("unknown" as const)
+              : ("running" as const),
+        forMs: entry.launchedAt === null ? 0 : Math.max(0, timers.now() - entry.launchedAt),
+      }));
+    },
+
+    /** Hanging up stops the watch: a poll timer outliving its Summons is a process that never exits. */
+    stopWatching(): void {
+      timers.clearTimeout(watchHandle);
+      watchHandle = null;
     },
 
     /** Silent, and never gated — observing changes nothing, so nothing is confirmed. */
@@ -1157,7 +1407,7 @@ function createFiling(opts: SummonsSessionOptions, gate: Gate) {
         filed: false,
         title,
         instruction:
-          "Nothing has been filed. Say the title out loud, in one sentence, then ask the user to answer yes or no. Do not call file_ticket again — their spoken answer is what decides.",
+          "Nothing has been filed. Say the title out loud, in one sentence, then ask the user to answer yes or no. Do not call file_ticket again — their answer is what decides.",
       });
       return { outcome: "held", detail: title };
     },
@@ -1187,29 +1437,60 @@ interface SteerTarget {
  * left to the agent's instructions. The Hands prompt still carries the rule, as a backstop that is
  * not load-bearing.
  */
-function createSteering(opts: SummonsSessionOptions, gate: Gate, timers: TimerPort) {
-  const log = opts.callLog ?? NULL_CALL_LOG;
+/** How often a Summons looks for the answer to a question it asked a running session. */
+const ANSWER_POLL_MS = 3_000;
 
-  /** Everything the registry says is running here, workspace-scoped by construction (AC 5). */
-  async function candidates(): Promise<
-    { known: false } | { known: true; targets: SteerTarget[]; unaddressable: string[] }
-  > {
+/**
+ * How long it keeps looking. A session takes a message up at its next safe point, which can be a
+ * long edit away — but a question nobody ever answers has to stop being pending, or the Summons
+ * carries it for the rest of the conversation and reports it as still coming.
+ */
+const ANSWER_DEADLINE_MS = 5 * 60 * 1000;
+
+/** A question sent to a running session, waiting for its transcript to show the reply. */
+interface PendingAnswer {
+  target: string;
+  question: string;
+  /** Turns the target had taken when the question went out — the reply is the turn after that. */
+  askedTurns: number;
+  askedAt: number;
+}
+
+/** A running session having answered — or having failed to, which is also worth saying. */
+export interface SessionAnswer {
+  target: string;
+  question: string;
+  /** null when the deadline passed with no new turn from it. */
+  answer: string | null;
+}
+
+function createSteering(
+  opts: SummonsSessionOptions,
+  gate: Gate,
+  timers: TimerPort,
+  /** Where an answer goes when it arrives after the tool call has already been answered. */
+  onAnswer: (answer: SessionAnswer) => void,
+) {
+  const log = opts.callLog ?? NULL_CALL_LOG;
+  const pending: PendingAnswer[] = [];
+  let watchHandle: unknown = null;
+
+  /**
+   * Everything the registry says is running here — and all of it is addressable.
+   *
+   * This filter *is* the fence (ADR 0010 decision 9, as amended): the registry is scoped to this
+   * workspace's root, so another workspace's session and another project's session were never
+   * candidates. A session the user started by hand used to be listed here and refused, because it
+   * carries no ticket and so holds no Claim; it is in this workspace and the person talking is the
+   * one who started it, so refusing it protected nobody.
+   */
+  async function candidates(): Promise<{ known: false } | { known: true; targets: SteerTarget[] }> {
     const report = await opts.sessions?.list();
     if (!report || !report.known) return { known: false };
-    const targets: SteerTarget[] = [];
-    const unaddressable: string[] = [];
-    for (const session of report.sessions) {
-      if (session.kind === "worker" && session.ticket !== null) {
-        targets.push({ name: session.name, ticket: session.ticket });
-      } else if (session.kind === "hands") {
-        targets.push({ name: session.name, ticket: null });
-      } else {
-        // A session the user started by hand carries no ticket and so holds no Claim. Nameable,
-        // deliberately not addressable — the agent has to be able to say why (AC 4).
-        unaddressable.push(session.name);
-      }
-    }
-    return { known: true, targets, unaddressable };
+    return {
+      known: true,
+      targets: report.sessions.map((session) => ({ name: session.name, ticket: session.ticket })),
+    };
   }
 
   /** How a person names a session out loud: its name, or the ticket it carries. */
@@ -1248,19 +1529,14 @@ function createSteering(opts: SummonsSessionOptions, gate: Gate, timers: TimerPo
       // conversation's own errand-runner.
       const workers = found.targets.filter((t) => t.ticket !== null);
       if (workers.length === 0) {
+        const others = found.targets.map((t) => t.name);
         return refuse(
-          found.unaddressable.length > 0
-            ? `Nothing addressable is running. ${found.unaddressable.join(", ")} ${found.unaddressable.length === 1 ? "is" : "are"} running but ${found.unaddressable.length === 1 ? "carries" : "carry"} no ticket, so ${found.unaddressable.length === 1 ? "it holds" : "they hold"} no Claim and cannot be steered.`
-            : "No session is running that this workspace can steer.",
+          others.length > 0
+            ? `No session here is carrying a ticket, so there is no obvious one to mean. ${others.join(", ")} ${others.length === 1 ? "is" : "are"} running — name one of them if that is who the user meant.`
+            : "Nothing is running in this workspace to send anything to.",
         );
       }
       // AC 11: picking one would send the user's instruction into work they did not mean.
-      //
-      // Counted over sessions carrying a ticket, not over sessions whose Claim has been read —
-      // reading every Claim here would be one `gh` round trip per session while the user is
-      // mid-sentence. The cost is asking "which one?" in the rare case where several are running
-      // and only one is actually claimed; the Claim is still checked on whichever they name, so
-      // the scope never widens, only the question gets asked once more than it had to.
       if (workers.length > 1) {
         return {
           ok: false,
@@ -1278,32 +1554,26 @@ function createSteering(opts: SummonsSessionOptions, gate: Gate, timers: TimerPo
 
     const matched = found.targets.filter((t) => matches(t, wanted));
     if (matched.length !== 1) {
-      const named = found.unaddressable.some((name) => name.toLowerCase() === wanted.toLowerCase());
       return refuse(
-        named
-          ? `"${wanted}" is running here but carries no ticket, so it holds no Claim and cannot be steered. Say that, and offer to ask your hands instead.`
+        matched.length > 1
+          ? `"${wanted}" matches more than one session running here. Call list_sessions and use one exact name.`
           : `There is no session called "${wanted}" running in this workspace. Call list_sessions and use a name from it — you cannot reach sessions in other workspaces or other projects.`,
       );
     }
-    const target = matched[0] as SteerTarget;
-    if (target.ticket === null) return { ok: true, target };
-
-    // AC 4, and the reason `claim` degrades to unknown rather than to null: a hub we could not
-    // reach must refuse, not wave the instruction through.
-    const claim = await opts.tickets?.claim(target.ticket);
-    if (!claim || !claim.known) {
-      return refuse(
-        `The hub could not be reached to check who holds #${target.ticket}, so nothing was sent. Say that plainly rather than assuming it went.`,
-      );
-    }
-    if (claim.session !== target.name) {
-      return refuse(
-        claim.session
-          ? `#${target.ticket} is claimed by ${claim.session}, not ${target.name}, so ${target.name} was not steered.`
-          : `Nobody holds the Claim on #${target.ticket}, so ${target.name} cannot be steered. Only sessions carrying a claimed ticket can be.`,
-      );
-    }
-    return { ok: true, target };
+    /**
+     * The fence is the workspace, and it was crossed long before this line: the candidate list is
+     * built from the session registry filtered to this workspace's root, so a session in another
+     * workspace or another project was never a candidate.
+     *
+     * A Claim used to be required on top (ADR 0010 decision 9, now amended). It was a second fence
+     * inside the first, and it fenced out the wrong thing — a session named `<ws>-t128`, running
+     * here, carrying ticket 128, was refused with "Nobody holds the Claim on #128" because the board
+     * row was missing. Writing a Claim is explicit and not every path that starts a session writes
+     * one, so the Claim is bookkeeping about who carries a ticket, and reading it as a permission
+     * turned a bookkeeping gap into a wall. Stopping keeps its own protection, which never depended
+     * on this: `stop_session` is Guarded, and the spoken confirm-gate stands in front of it.
+     */
+    return { ok: true, target: matched[0] as SteerTarget };
   }
 
   /** One relayed instruction: recorded going out, recorded coming back, whatever happened. */
@@ -1311,9 +1581,10 @@ function createSteering(opts: SummonsSessionOptions, gate: Gate, timers: TimerPo
     target: SteerTarget,
     instruction: string,
     stop: boolean,
+    question = false,
   ): Promise<{ result: Record<string, unknown>; outcome: ToolOutcome }> {
     const startedAt = timers.now();
-    const message = composeSteerMessage({ instruction, stop });
+    const message = composeSteerMessage({ instruction, stop, question });
     // Written before the round trip, not after it: a relay can run for a minute or two, and the
     // Call log is the only place a headless session's work is visible while it is happening.
     log.record({ type: "steer-sent", target: target.name, instruction });
@@ -1422,8 +1693,8 @@ function createSteering(opts: SummonsSessionOptions, gate: Gate, timers: TimerPo
     let instruction: string;
     let args: Record<string, unknown>;
     try {
-      args = parseArgs(rawArgs, "steer_session");
-      instruction = requireString(args, "instruction", "steer_session");
+      args = parseArgs(rawArgs, "message_session");
+      instruction = requireString(args, "instruction", "message_session");
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);
       answer({ error: detail });
@@ -1450,7 +1721,27 @@ function createSteering(opts: SummonsSessionOptions, gate: Gate, timers: TimerPo
     // session; dropping it because the relay went quiet rounds "we do not know" down to "it did not
     // happen", which is the conflation this whole feature exists to avoid. Only an outright
     // failure — where nothing was sent — leaves the ticket alone.
-    const { result, outcome } = await deliver(resolved.target, instruction, false);
+    const asking = args.expect_reply === true;
+    // Read *before* the question goes out: the answer is the turn after this one, and a count taken
+    // afterwards could already include the reply or miss it, either way silently.
+    const before = asking ? await opts.sessions?.latest?.(resolved.target.name) : undefined;
+    const { result, outcome } = await deliver(resolved.target, instruction, false, asking);
+    if (asking && result.status !== "failed") {
+      if (before?.known) {
+        pending.push({
+          target: resolved.target.name,
+          question: instruction,
+          askedTurns: before.turns,
+          askedAt: timers.now(),
+        });
+        watchAnswers();
+        result.instruction = `The question is in ${resolved.target.name}'s inbox. Say you have asked and that you will pass the answer on the moment it comes — it answers at its next safe point, which may be a minute or two. Do not invent an answer, and do not say it has answered.`;
+      } else {
+        // Nothing to compare a reply against, so nothing could recognise one. Better to say the
+        // question went and the answer cannot be watched for than to promise an answer forever.
+        result.instruction = `The question was sent to ${resolved.target.name}, but its transcript could not be read, so nothing here can notice the reply. Say that, and offer to check again with check_delegation or list_sessions.`;
+      }
+    }
     if (args.changes_acceptance_criteria === true && result.status !== "failed") {
       await noteOnTicket(resolved.target, instruction, result.status === "unconfirmed");
     }
@@ -1511,16 +1802,64 @@ function createSteering(opts: SummonsSessionOptions, gate: Gate, timers: TimerPo
       status: "awaiting_confirmation",
       session: target.name,
       ...(target.ticket === null ? {} : { ticket: target.ticket }),
-      instruction: `Nothing has been sent. Say out loud that you are about to stop ${target.name}${target.ticket === null ? "" : ` on #${target.ticket}`} and that work it has already done may be lost, then ask for a plain yes or no and stop. Their spoken answer is what decides.`,
+      instruction: `Nothing has been sent. Say out loud that you are about to stop ${target.name}${target.ticket === null ? "" : ` on #${target.ticket}`} and that work it has already done may be lost, then ask for a plain yes or no and stop. Their answer is what decides.`,
     });
     return { outcome: "held", detail: label };
   }
 
-  return { steer, stop };
+  /**
+   * Waiting for an answer, by reading rather than asking.
+   *
+   * The reply cannot come back through the relay: the Hands session is a one-shot headless call and
+   * has already returned by the time the target reaches a safe point. So the question goes out as a
+   * push — the only thing cross-session messaging does — and the answer is found where it lands
+   * anyway, in the target's own transcript, one assistant turn later than when it was asked.
+   */
+  function watchAnswers(): void {
+    if (watchHandle !== null || pending.length === 0) return;
+    watchHandle = timers.setTimeout(() => {
+      watchHandle = null;
+      void pollAnswers();
+    }, ANSWER_POLL_MS);
+  }
+
+  async function pollAnswers(): Promise<void> {
+    // A copy, because an answered question is spliced out of `pending` inside the loop.
+    const asked = pending.slice();
+    for (const question of asked) {
+      const seen = await opts.sessions?.latest?.(question.target);
+      // A transcript that cannot be read is not a session that said nothing, so this looks again.
+      const answered = seen?.known && seen.turns > question.askedTurns ? seen.latest : null;
+      const expired = timers.now() - question.askedAt >= ANSWER_DEADLINE_MS;
+      if (!answered && !expired) continue;
+      pending.splice(pending.indexOf(question), 1);
+      log.record({
+        type: "note",
+        level: "info",
+        text: answered
+          ? `${question.target} answered "${question.question}": ${answered}`
+          : `${question.target} did not answer "${question.question}" in time.`,
+      });
+      onAnswer({ target: question.target, question: question.question, answer: answered });
+    }
+    watchAnswers();
+  }
+
+  /** Hanging up stops the watch — a poll timer outliving its conversation never lets the process go. */
+  function stopWatching(): void {
+    timers.clearTimeout(watchHandle);
+    watchHandle = null;
+    pending.length = 0;
+  }
+
+  return { steer, stop, stopWatching };
 }
 
-/** Which half of the subsystem noticed the interruption, as the Call log reports it. */
-type BargeInHeardBy = "over the speakers" | "the model's voice detection";
+/**
+ * Which of the three noticed the interruption, as the Call log reports it. Two are guesses about
+ * whether a person is talking; the keyboard is not, which is the whole reason they are told apart.
+ */
+type BargeInHeardBy = "over the speakers" | "the model's voice detection" | "the keyboard";
 
 /**
  * The half-duplex subsystem: what reaches the model's ears, and what happens when the user talks
@@ -1533,7 +1872,11 @@ type BargeInHeardBy = "over the speakers" | "the model's voice detection";
  * drifted: the flush cleared the speaker while the window it was gating on stood, and the mic stayed
  * shut through the sentence the user had just interrupted with.
  */
-function createMicGate(opts: SummonsSessionOptions, timers: TimerPort) {
+function createMicGate(
+  opts: SummonsSessionOptions,
+  timers: TimerPort,
+  onReport: (report: GateReport) => void,
+) {
   const log = opts.callLog ?? NULL_CALL_LOG;
   /** When the audio queued so far will have finished playing out of the speakers. */
   let speakingUntil = 0;
@@ -1541,6 +1884,8 @@ function createMicGate(opts: SummonsSessionOptions, timers: TimerPort) {
   let playing: { itemId: string | null; startedAt: number; queuedMs: number } | null = null;
   /** True while the model is still producing the reply, so there is something left to cancel. */
   let generating = false;
+  /** When the reply in flight began being generated. Maintained only by `setGenerating`. */
+  let generatingSince: number | null = null;
   /** The level the agent's own echo settles at, learned from the frames the echo gate holds back. */
   let echoFloor: number | null = null;
   /** Frames of echo seen so far. Until there are enough, the room is not yet characterised. */
@@ -1548,6 +1893,31 @@ function createMicGate(opts: SummonsSessionOptions, timers: TimerPort) {
   let loudFrames = 0;
   let lastInterruptAt = Number.NEGATIVE_INFINITY;
   let muted = false;
+  /** The level of the most recent frame, so a redraw asked for at any moment has a number to show. */
+  let lastLevel = 0;
+
+  /** Hand the status feed what the gate knows. Cheap, and called from everywhere the gate changes. */
+  function report(): void {
+    onReport({
+      muted,
+      speaking: timers.now() < speakingUntil,
+      generating,
+      generatingSince,
+      level: muted ? 0 : lastLevel,
+      floor: echoFloor,
+    });
+  }
+
+  /**
+   * The one writer of `generating`, so its clock cannot drift from it. Four places turn it on or off
+   * — a reply starting, its first audio, its last byte, and a cancel — and the status line needs to
+   * know how long the current one has run, which is a fact only the transitions have.
+   */
+  function setGenerating(on: boolean): void {
+    if (on === generating) return;
+    generating = on;
+    generatingSince = on ? timers.now() : null;
+  }
 
   /**
    * Forget a reply that has finished playing. Nothing pushes this — playback ends by a clock running
@@ -1558,7 +1928,7 @@ function createMicGate(opts: SummonsSessionOptions, timers: TimerPort) {
   function settle(): void {
     if (!playing || timers.now() < speakingUntil) return;
     playing = null;
-    generating = false;
+    setGenerating(false);
     loudFrames = 0;
   }
 
@@ -1576,7 +1946,7 @@ function createMicGate(opts: SummonsSessionOptions, timers: TimerPort) {
    * 400ms of opening words. So a one-word "stop" reaches the model as nothing at all, which is the
    * right outcome: what it asked for was silence.
    */
-  function detect(pcm: string): void {
+  function detect(pcm: string, level: number): void {
     if (!playing) return;
     /**
      * A frame that *began* before this reply reached the speakers holds no echo — it is the room
@@ -1590,7 +1960,6 @@ function createMicGate(opts: SummonsSessionOptions, timers: TimerPort) {
      * It is not evidence either way: not a floor sample, and not a candidate.
      */
     if (timers.now() - playbackDurationMs(pcm) < playing.startedAt) return;
-    const level = peakLevel(pcm);
     if (framesObserved < ECHO_WARMUP_FRAMES) {
       framesObserved += 1;
       echoFloor = Math.max(echoFloor ?? 0, level);
@@ -1633,15 +2002,27 @@ function createMicGate(opts: SummonsSessionOptions, timers: TimerPort) {
         playing = { itemId, startedAt: startsAt, queuedMs: duration };
       }
       speakingUntil = startsAt + duration;
-      generating = true;
+      setGenerating(true);
       opts.audio?.play(pcm);
+      report();
+    },
+
+    /**
+     * The server has started a reply. Known so an interruption arriving before the first audio does
+     * cancels the reply rather than silently doing nothing — which is also what makes a typed turn
+     * sent in that window safe, since the API refuses a second ask while a response is in flight.
+     */
+    replyStartedGenerating(): void {
+      setGenerating(true);
+      report();
     },
 
     replyFinishedGenerating(): void {
-      generating = false;
+      setGenerating(false);
       // Every byte of the reply is in, so the speaker is told where it ends — which is what lets it
       // play the last syllable rather than holding it back waiting for audio that will never come.
       opts.audio?.endReply();
+      report();
     },
 
     /**
@@ -1649,8 +2030,15 @@ function createMicGate(opts: SummonsSessionOptions, timers: TimerPort) {
      * the user muted it, or the agent is still audible in the room.
      */
     admit(pcm: string): void {
-      if (muted) return;
+      if (muted) {
+        report();
+        return;
+      }
       settle();
+      // Read once, here, whether the frame is going to the model or being held back to be measured:
+      // it is the same number either way, and the status line wants it either way.
+      const level = peakLevel(pcm);
+      lastLevel = level;
       // Judged on when the frame *began*, not when it arrived. A frame is ~200ms of history, so the
       // first frame admitted after the window closed still opens inside it — and one frame of the
       // agent's own voice is all the model's voice detection needs to make it interrupt itself.
@@ -1658,25 +2046,48 @@ function createMicGate(opts: SummonsSessionOptions, timers: TimerPort) {
         !opts.headphones &&
         timers.now() - playbackDurationMs(pcm) < speakingUntil + PLAYBACK_TAIL_MS
       ) {
-        detect(pcm);
+        detect(pcm, level);
+        report();
         return;
       }
       loudFrames = 0;
       opts.transport.sendAudio(pcm);
+      report();
     },
 
-    /** The user is talking over the agent — one path, whichever detector noticed. */
-    interrupt(heardBy: BargeInHeardBy): void {
+    /**
+     * The user is talking over the agent — one path, whichever detector noticed. Answers whether
+     * there was anything to cut off, because `Esc` has a second meaning when there is not (it
+     * clears the input line) and only the gate knows which of the two happened.
+     */
+    interrupt(heardBy: BargeInHeardBy): boolean {
       settle();
-      if (opts.bargeIn === false) {
+      // `--no-barge-in` suppresses the two detectors that guess, and only those: a keypress is
+      // explicit intent, and a flag about how eagerly a room is listened to has no say over it.
+      if (opts.bargeIn === false && heardBy !== "the keyboard") {
         opts.onDebug?.(`echo: heard an interruption (${heardBy}), but barge-in is off`);
-        return;
+        return false;
       }
-      if (!playing) return;
+      /**
+       * A reply nobody has heard yet can only be cancelled from the keyboard.
+       *
+       * There are two windows. Once audio is queued, any source may cut in — that is barge-in as it
+       * has always been. Before the first syllable reaches the room the reply is still cancellable,
+       * and `Esc` (or a typed turn, which has to cancel or the API refuses its ask) must be able to,
+       * because a person who has changed their mind should not have to wait to be spoken to first.
+       *
+       * The two detectors must not. Both *guess* whether a person is talking, and the gap between
+       * "the user stopped speaking" and "the first audio delta" is a gap with the mic wide open and
+       * nothing queued to hold it shut — so a breath, a chair, or the user's own trailing word trips
+       * the server's voice detection and kills the answer to the question they just asked. Observed
+       * live: ask a question, get silence. A guess may interrupt something the user can hear and
+       * judge; it may not silently discard a reply they never got.
+       */
+      if (!playing && !(generating && heardBy === "the keyboard")) return false;
       // A reply the model has finished generating has nothing left to cancel, and asking anyway is
       // an API error the user would be told about for no reason. The queued audio still has to go.
       if (generating) opts.transport.cancelResponse();
-      if (playing.itemId) {
+      if (playing?.itemId) {
         const heard = Math.min(Math.max(0, timers.now() - playing.startedAt), playing.queuedMs);
         opts.transport.truncateAudio(playing.itemId, Math.round(heard));
       }
@@ -1686,15 +2097,22 @@ function createMicGate(opts: SummonsSessionOptions, timers: TimerPort) {
       // left standing would swallow the sentence the user interrupted with.
       speakingUntil = 0;
       playing = null;
-      generating = false;
+      setGenerating(false);
       loudFrames = 0;
       lastInterruptAt = timers.now();
       opts.onDebug?.(`echo: cut the reply off (${heardBy})`);
       log.record({
         type: "note",
         level: "info",
-        text: `The user talked over the reply and it was cut off (${heardBy}).`,
+        // Nobody talked over anything when the interruption came from a key, and a log that says
+        // they did reads as the echo detector having fired.
+        text:
+          heardBy === "the keyboard"
+            ? "The reply was cut off from the keyboard."
+            : `The user talked over the reply and it was cut off (${heardBy}).`,
       });
+      report();
+      return true;
     },
 
     toggleMute(): boolean {
@@ -1708,6 +2126,7 @@ function createMicGate(opts: SummonsSessionOptions, timers: TimerPort) {
           ? "The mic was muted. Input is suspended until it is unmuted; the idle window keeps running."
           : "The mic was unmuted.",
       });
+      report();
       return muted;
     },
   };
@@ -1737,15 +2156,115 @@ export function createSummonsSession(opts: SummonsSessionOptions): SummonsSessio
   const timers = opts.timers ?? realTimers;
   const idleTimeoutMs = opts.idleTimeoutMs ?? DEFAULT_SUMMONS_IDLE_TIMEOUT_MS;
   const log = opts.callLog ?? NULL_CALL_LOG;
+  // Declared before the collaborators below, because their callbacks read it. A `let` read during
+  // construction would be a temporal-dead-zone crash, and the one place that would surface is a
+  // live conversation.
+  let stopped = false;
+  let idleHandle: unknown = null;
+  /** The mic half of the status, as the gate last reported it. */
+  let gateReport: GateReport = {
+    muted: false,
+    speaking: false,
+    generating: false,
+    generatingSince: null,
+    level: 0,
+    floor: null,
+  };
+  /** The tool call in flight, if there is one. What "working" is working on. */
+  let working: { tool: string; since: number } | null = null;
+
+  /**
+   * Announcements waiting for the reply in flight to finish. The API refuses a second ask while a
+   * response is active, and unlike a typed turn — where cancelling is right, because the person has
+   * already moved on — news can wait. Cutting the agent off mid-sentence to interrupt with something
+   * nobody asked for is the one reading of this that would be rude.
+   *
+   * One at a time: flushing the queue in a burst would collide with itself on the second ask.
+   */
+  const waitingToBeSaid: string[] = [];
+
   const gate = createGate(opts);
-  const delegations = createDelegations(opts, gate);
+  const delegations = createDelegations(opts, gate, timers, (finished) => {
+    reportStatus();
+    /**
+     * A Summons waiting on work it asked for is not idle.
+     *
+     * The idle window is armed by what the *server* reports — speech, a reply, a tool call — and a
+     * delegated session runs for minutes with none of those happening. So a Summons hung itself up
+     * on the very thing it was waiting for, and the announcement below could never arrive: observed
+     * live. Every roster change re-arms it, and the watch loop makes one on every poll for as long
+     * as anything is still running.
+     *
+     * The consequence, stated plainly: a delegated session that runs for hours keeps its Summons
+     * open for hours. That is the right way round — hanging up on the work you are waiting for is
+     * worse than a socket left open — but the idle window no longer bounds a forgotten Summons whose
+     * delegate is stuck.
+     */
+    markActive();
+    if (!finished) return;
+    announce(
+      `The session "${finished.session}" you delegated as "${finished.label}" has just finished. ` +
+        "Tell the user now, in one short sentence, and offer to go through what it did. " +
+        `The last thing it said was: ${finished.latest ?? "(nothing it said was readable)"}` +
+        (finished.alsoStarted
+          ? ` That freed its repo, so the queued task "${finished.alsoStarted}" has started.`
+          : ""),
+    );
+  });
   // Steering needs all three: a registry to resolve a name against, a hub to check the Claim on,
   // and hands to relay through. Missing any one, the tools are not offered at all (below).
-  const steering = createSteering(opts, gate, timers);
+  const steering = createSteering(opts, gate, timers, (answered) => {
+    markActive();
+    announce(
+      answered.answer
+        ? `${answered.target} has answered the question "${answered.question}". Tell the user now, in your own words, keeping the specifics: ${answered.answer}`
+        : `${answered.target} never answered the question "${answered.question}" — it has taken no turn since it was asked. Say so, and offer to ask again or to look at what it last said.`,
+    );
+  });
   const filing = createFiling(opts, gate);
-  const mic = createMicGate(opts, timers);
-  let idleHandle: unknown = null;
-  let stopped = false;
+  /**
+   * The two halves of the status line, joined here because this is the only place that holds both.
+   *
+   * `working` beats `speaking` beats `thinking`: a named tool is more use than "busy", and audible
+   * beats being composed because the user can hear the difference themselves.
+   */
+  function reportStatus(): void {
+    if (!opts.onStatus) return;
+    const doing = working
+      ? "working"
+      : gateReport.speaking
+        ? "speaking"
+        : gateReport.generating
+          ? "thinking"
+          : "listening";
+    const since = working ? working.since : (gateReport.generatingSince ?? 0);
+    opts.onStatus({
+      muted: gateReport.muted,
+      doing,
+      ...(working ? { tool: working.tool } : {}),
+      forMs: doing === "working" || doing === "thinking" ? Math.max(0, timers.now() - since) : 0,
+      level: gateReport.level,
+      floor: gateReport.floor,
+      delegations: delegations.roster(),
+    });
+  }
+
+  /** The only thing a Summons says unbidden. */
+  function announce(text: string): void {
+    if (stopped) return;
+    if (gateReport.generating) {
+      waitingToBeSaid.push(text);
+      return;
+    }
+    opts.transport.promptAgent(text);
+  }
+
+  const mic = createMicGate(opts, timers, (report) => {
+    gateReport = report;
+    reportStatus();
+  });
+  /** Numbers already handed out, so the next call gets one no earlier call had. */
+  let toolCalls = 0;
   /** The utterance the server is currently hearing — the gate's evidence of what came from where. */
   let lastUserItemId: string | null = null;
 
@@ -1771,10 +2290,45 @@ export function createSummonsSession(opts: SummonsSessionOptions): SummonsSessio
    * failed is exactly the case the user cannot see any other way, so the failure goes where the
    * answer would have gone.
    */
+  /** One round trip to the hands, recorded whatever came back. Shared by the direct and gated paths. */
+  async function runHandsRequest(request: string, startedAt: number): Promise<string> {
+    // Recorded before the call goes out, not after it returns. A round trip can run for minutes,
+    // and until this line existed the live view showed nothing at all while it did — the user
+    // heard "just a moment" and had no way to tell working from hung.
+    log.record({ type: "hands-asked", request });
+    try {
+      const answer = await opts.hands!.ask(request);
+      log.record({
+        type: "hands",
+        request,
+        response: answer,
+        outcome: "ok",
+        durationMs: timers.now() - startedAt,
+      });
+      return answer;
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      log.record({
+        type: "hands",
+        request,
+        response: detail,
+        outcome: "error",
+        durationMs: timers.now() - startedAt,
+      });
+      throw err;
+    }
+  }
+
+  /**
+   * Answers with an outcome only when the caller should record a plain `tool` entry — which is the
+   * Guarded case, where no round trip has happened yet. Otherwise it writes its own `hands` entries,
+   * because what was asked and what came back *is* the record of the call.
+   */
   async function handleHandsCall(
     call: Extract<RealtimeInbound, { type: "tool_call" }>,
     startedAt: number,
-  ): Promise<void> {
+    lastUserItemId: string | null,
+  ): Promise<ToolOutcome | null> {
     let request = "";
     const fail = (detail: string) => {
       opts.transport.sendToolResult(call.callId, JSON.stringify({ error: detail }));
@@ -1790,51 +2344,108 @@ export function createSummonsSession(opts: SummonsSessionOptions): SummonsSessio
       request = requireString(parseArgs(call.args, call.name), "request", call.name);
     } catch (err) {
       fail(err instanceof Error ? err.message : String(err));
-      return;
+      return null;
     }
     if (!opts.hands) {
       fail("This Summons has no hands — it was started without a Hands session.");
-      return;
+      return null;
     }
-    // Recorded before the call goes out, not after it returns. A round trip can run for minutes,
-    // and until this line existed the live view showed nothing at all while it did — the user
-    // heard "just a moment" and had no way to tell working from hung.
-    log.record({ type: "hands-asked", request });
-    try {
-      const answer = await opts.hands.ask(request);
-      opts.transport.sendToolResult(call.callId, JSON.stringify({ answer }));
-      log.record({
-        type: "hands",
-        request,
-        response: answer,
-        outcome: "ok",
-        durationMs: timers.now() - startedAt,
+    /**
+     * A hands request that would change something is Guarded, exactly as `delegate` is.
+     *
+     * The hands run with `--dangerously-skip-permissions` and can edit, write and run anything, so
+     * without this the gate on `delegate` is a gate the model can walk around by asking its hands
+     * instead — and ADR-009's own principle is that a model deciding its own gating has not been
+     * gated. Same shape as the stop-phrased-as-a-redirect check: the words are read here, and the
+     * tool descriptions are the signpost rather than the enforcement.
+     */
+    if (looksLikeWritingRequest(request)) {
+      const blocked = gate.blocked();
+      if (blocked) {
+        fail(blocked);
+        return null;
+      }
+      const heldRequest = request;
+      gate.hold({
+        label: `ask your hands to ${heldRequest}`,
+        askedAfterItemId: lastUserItemId,
+        nothingHappened: "Your hands were not asked, and nothing was changed.",
+        async run() {
+          const answer = await runHandsRequest(heldRequest, timers.now());
+          return `Your hands answered: ${answer}. Tell the user what came back.`;
+        },
+        failed: (message) =>
+          `Asking your hands to "${heldRequest}" failed: ${message}. Nothing came back, and you do not know whether anything changed. Tell the user plainly.`,
       });
+      opts.transport.sendToolResult(
+        call.callId,
+        JSON.stringify({
+          status: "awaiting_confirmation",
+          asked: false,
+          request: heldRequest,
+          instruction:
+            "Nothing has been asked yet, because this would change something. Say out loud, in one sentence, what you are about to have your hands do, then ask the user to answer yes or no. Do not call ask_hands again — their answer is what decides.",
+        }),
+      );
+      // Recorded as a `tool` entry with outcome `held`, the same way a held delegation is: what the
+      // gate did with it is the `gate` entry, and a `hands` entry would claim a round trip that has
+      // not happened.
+      return { outcome: "held", detail: heldRequest };
+    }
+    try {
+      const answer = await runHandsRequest(request, startedAt);
+      opts.transport.sendToolResult(call.callId, JSON.stringify({ answer }));
     } catch (err) {
       fail(err instanceof Error ? err.message : String(err));
     }
+    return null;
   }
 
   // Tool failures are conversation, not crashes: the agent hears what went wrong and can say so.
   async function handleToolCall(call: Extract<RealtimeInbound, { type: "tool_call" }>) {
     const startedAt = timers.now();
+    // Said before the work, not after it. A tool call is recorded when it *finishes*, which is the
+    // right thing for a record and useless while you are waiting — a Summons spawning a session or
+    // reading a transcript looked exactly like one that had gone quiet. The status line says which,
+    // by name, for as long as it takes.
+    working = { tool: call.name, since: startedAt };
+    reportStatus();
+    try {
+      await runToolCall(call, startedAt);
+    } finally {
+      working = null;
+      reportStatus();
+    }
+  }
+
+  async function runToolCall(
+    call: Extract<RealtimeInbound, { type: "tool_call" }>,
+    startedAt: number,
+  ) {
     // Every tool call is recorded, whatever it did — the point of the Call log is that nothing the
-    // agent does on the user's behalf happens invisibly.
-    const recordCall = ({ outcome, detail }: ToolOutcome) =>
+    // agent does on the user's behalf happens invisibly. `result` reaches this only from the calls
+    // the controller answers itself; the rest is explained on the entry kind.
+    const recordCall = ({ outcome, detail }: ToolOutcome, result?: string) => {
+      toolCalls += 1;
       log.record({
         type: "tool",
         name: call.name,
         target: toolTarget(call.name, call.args),
         outcome,
         durationMs: timers.now() - startedAt,
+        number: toolCalls,
+        ...(call.args ? { args: recordedText(call.args) } : {}),
         ...(detail ? { detail } : {}),
+        ...(result === undefined ? {} : { result: recordedText(result) }),
       });
+    };
 
     // The Hands session is recorded as a `hands` entry rather than a `tool` one: what was asked and
     // what came back *is* the record of the call, and the round trip is the only trace a session
     // with no tab leaves anywhere (workspace ADR 0010).
     if (call.name === "ask_hands") {
-      await handleHandsCall(call, startedAt);
+      const held = await handleHandsCall(call, startedAt, lastUserItemId);
+      if (held) recordCall(held);
       return;
     }
 
@@ -1852,7 +2463,7 @@ export function createSummonsSession(opts: SummonsSessionOptions): SummonsSessio
     // whether it landed is the record of the call, the same way `ask_hands` is. A call that never
     // got that far leaves no `steer` entry, so it is recorded as a plain tool call instead:
     // an instruction refused for scope is exactly what the user needs to see in the log.
-    if (call.name === "steer_session") {
+    if (call.name === "message_session") {
       const outcome = await steering.steer(call.callId, call.args, lastUserItemId);
       if (!outcome.relayed) recordCall(outcome);
       return;
@@ -1876,9 +2487,10 @@ export function createSummonsSession(opts: SummonsSessionOptions): SummonsSessio
     } catch (err) {
       result = { error: err instanceof Error ? err.message : String(err) };
     }
-    opts.transport.sendToolResult(call.callId, JSON.stringify(result));
+    const output = JSON.stringify(result);
+    opts.transport.sendToolResult(call.callId, output);
     const failure = typeof result.error === "string" ? result.error : null;
-    recordCall(failure ? { outcome: "error", detail: failure } : { outcome: "ok" });
+    recordCall(failure ? { outcome: "error", detail: failure } : { outcome: "ok" }, output);
   }
 
   async function stop(reason: CallLogEndReason = "hung up"): Promise<void> {
@@ -1898,6 +2510,8 @@ export function createSummonsSession(opts: SummonsSessionOptions): SummonsSessio
       });
     }
     log.record({ type: "ended", reason });
+    delegations.stopWatching();
+    steering.stopWatching();
     timers.clearTimeout(idleHandle);
     idleHandle = null;
     await opts.audio?.stop();
@@ -1920,9 +2534,16 @@ export function createSummonsSession(opts: SummonsSessionOptions): SummonsSessio
       case "audio":
         mic.queuePlayback(event.pcm, event.itemId ?? null);
         return;
-      case "reply_done":
-        mic.replyFinishedGenerating();
+      case "reply_started":
+        mic.replyStartedGenerating();
         return;
+      case "reply_done": {
+        mic.replyFinishedGenerating();
+        // Now, and not before: the ask below is the second one the API would have refused.
+        const waited = waitingToBeSaid.shift();
+        if (waited !== undefined) announce(waited);
+        return;
+      }
       case "error":
         log.record({ type: "note", level: "error", text: event.message });
         opts.onError?.(event.message);
@@ -1938,7 +2559,8 @@ export function createSummonsSession(opts: SummonsSessionOptions): SummonsSessio
         return;
       case "user_transcript":
         log.record({ type: "said", who: "user", text: event.text });
-        // The one place a spoken word decides something: releasing whatever the gate is holding.
+        // Where a heard word decides something: releasing whatever the gate is holding. A typed
+        // one does it too, through the same call (`typed`).
         await gate.resolve(event.text, event.itemId ?? null);
         delegations.remember("user", event.text);
         return;
@@ -1965,7 +2587,9 @@ export function createSummonsSession(opts: SummonsSessionOptions): SummonsSessio
             ...(opts.actions ? DELEGATION_TOOLS : []),
             ...(opts.hands ? HANDS_TOOLS : []),
             ...(opts.sessions ? SESSIONS_TOOLS : []),
-            ...(opts.hands && opts.sessions && opts.tickets ? STEER_TOOLS : []),
+            // No hub needed any more: addressing a session is a registry read, and only the
+            // acceptance-criteria write wants a ticket — which already skips itself without one.
+            ...(opts.hands && opts.sessions ? STEER_TOOLS : []),
             ...(opts.filing ? TICKET_TOOLS : []),
           ],
         },
@@ -1987,6 +2611,45 @@ export function createSummonsSession(opts: SummonsSessionOptions): SummonsSessio
     },
 
     toggleMute: () => mic.toggleMute(),
+
+    async typed(text) {
+      const utterance = text.trim();
+      if (stopped || !utterance) return;
+      // Typing is conversation, so it re-arms the idle window: a Summons being typed at for an hour
+      // with the mic muted is not a Summons that has been abandoned.
+      markActive();
+      /**
+       * Typing over a reply cuts the reply off, exactly as `Esc` would.
+       *
+       * A typed turn asks for an answer, and the API refuses a second ask while a response is in
+       * flight — so this had to be decided one of three ways: cancel the reply, queue the ask until
+       * the reply is over, or send the words without asking. Cancelling is the only one that
+       * matches what the person did. They were listening, they started typing instead, and they
+       * pressed enter: that is a barge-in in every sense but the microphone, and the keyboard is
+       * the one barge-in source that is never a guess (ADR-009). Queueing would let the agent
+       * finish saying something already overtaken and then answer late; sending without asking
+       * would leave the line sitting unanswered until something else provoked a reply, which reads
+       * as the Summons having ignored you.
+       *
+       * The Call log says the keyboard cut it off, which is true and is also the trail back to why
+       * the reply stops mid-sentence in the transcript.
+       */
+      mic.interrupt("the keyboard");
+      // Recorded before it is sent, so a turn that dies on the way out is still in the record.
+      log.record({ type: "said", who: "user", text: utterance, channel: "typed" });
+      opts.transport.sendUserText(utterance);
+      // Everything below is what a heard turn does, in the same order, because a typed turn is the
+      // same turn. No item id: the stale-utterance guard exists for transcription lag, and there is
+      // none — what was typed was typed now.
+      await gate.resolve(utterance, null);
+      delegations.remember("user", utterance);
+    },
+
+    interrupt() {
+      // Guarded like `typed`: a key pressed after the hang-up would otherwise put a barge-in in the
+      // record below the line that says the Summons ended.
+      return stopped ? false : mic.interrupt("the keyboard");
+    },
 
     note: (text, level = "error") => log.record({ type: "note", level, text }),
 
