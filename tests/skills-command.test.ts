@@ -30,15 +30,35 @@ async function git(repo: string, ...args: string[]): Promise<string> {
   return proc.stdout.toString().trim();
 }
 
-/** Run the `skills` command group the way the CLI does, capturing what it printed. */
+/** Run the `skills` command group the way the CLI does, capturing what it printed on stdout. */
 async function run(...rawArgs: string[]): Promise<string> {
+  return capture(() => runCommand(skillsCommand, { rawArgs: [...rawArgs, "--root", servantRoot] }));
+}
+
+/** The same, but capturing stderr — where status notes go so stdout stays parseable. */
+async function runStderr(...rawArgs: string[]): Promise<string> {
+  return capture(
+    () => runCommand(skillsCommand, { rawArgs: [...rawArgs, "--root", servantRoot] }),
+    "error",
+  );
+}
+
+async function capture(
+  fn: () => Promise<unknown>,
+  stream: "log" | "error" = "log",
+): Promise<string> {
   const lines: string[] = [];
-  const original = console.log;
-  console.log = (...args: unknown[]) => lines.push(args.map(String).join(" "));
+  const originalLog = console.log;
+  const originalErr = console.error;
+  const sink = (...args: unknown[]) => lines.push(args.map(String).join(" "));
+  const noop = () => undefined;
+  console.log = stream === "log" ? sink : noop;
+  console.error = stream === "error" ? sink : noop;
   try {
-    await runCommand(skillsCommand, { rawArgs: [...rawArgs, "--root", servantRoot] });
+    await fn();
   } finally {
-    console.log = original;
+    console.log = originalLog;
+    console.error = originalErr;
   }
   return lines.join("\n");
 }
@@ -90,6 +110,23 @@ afterAll(async () => {
   if (priorClaudeConfigDir === undefined) delete process.env.CLAUDE_CONFIG_DIR;
   else process.env.CLAUDE_CONFIG_DIR = priorClaudeConfigDir;
   await rm(scratch, { recursive: true, force: true });
+});
+
+describe("the move out of ~/.claude/skills", () => {
+  test("sweeps a stale copy the old layout left behind, and says where skills live now", async () => {
+    const stale = join(claudeHome, "skills", "servant-leftover");
+    const mine = join(claudeHome, "skills", "my-own-skill");
+    await mkdir(stale, { recursive: true });
+    await mkdir(mine, { recursive: true });
+    await writeFile(join(stale, "SKILL.md"), "old location\n");
+    await writeFile(join(mine, "SKILL.md"), "the user's own\n");
+
+    const out = await runStderr("list");
+    expect(out).toContain("removed the old copy: ~/.claude/skills/servant-leftover");
+    expect(out).toContain(join(servantRoot, ".claude", "skills"));
+    expect(existsSync(stale)).toBe(false);
+    expect(existsSync(mine)).toBe(true);
+  });
 });
 
 describe("an empty store", () => {
@@ -147,6 +184,13 @@ describe("servant skills install", () => {
 });
 
 describe("servant skills list", () => {
+  test("--json stays parseable when a repair happened on the way in", async () => {
+    await rm(enabledSkillDir("tdd"), { recursive: true, force: true });
+    const parsed = JSON.parse(await run("list", "--json"));
+    expect(Array.isArray(parsed)).toBe(true);
+    expect(existsSync(enabledSkillDir("tdd"))).toBe(true);
+  });
+
   test("prints the state | source | name | score | update? columns", async () => {
     const out = await run("list");
     const [header, ...rows] = out.split("\n");
@@ -185,6 +229,15 @@ describe("servant skills enable / disable", () => {
     expect(await readFile(join(enabledSkillDir("teach"), "SKILL.md"), "utf8")).toContain(
       "Goes well with /tdd.",
     );
+  });
+
+  // tdd is installed and enabled by this point, so no install is needed to break its copy.
+  test("re-materializes an enabled skill whose copy went missing", async () => {
+    expect((await listJson()).find((s) => s.name === "tdd")?.enabled).toBe(true);
+    await rm(enabledSkillDir("tdd"), { recursive: true, force: true });
+
+    expect(await runStderr("list")).toContain("restored the enabled copy: tdd");
+    expect(existsSync(enabledSkillDir("tdd"))).toBe(true);
   });
 
   test("disable removes the copy and says the skill is still installed", async () => {

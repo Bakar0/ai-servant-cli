@@ -1,12 +1,13 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { $ } from "bun";
 import {
-  ENABLED_SKILL_PREFIX,
+  LEGACY_ENABLED_SKILL_PREFIX,
   enabledSkillDir,
+  servantSkillsDir,
   setRootOverride,
   skillStoreDir,
   skillsManifestPath,
@@ -24,6 +25,7 @@ import {
   parseSource,
   readManifest,
   skillName,
+  reconcileEnabledCopies,
 } from "../src/core/skills.ts";
 
 let scratch: string;
@@ -235,7 +237,10 @@ describe("enable and disable", () => {
     expect(swappedOut).toBeUndefined();
 
     const copy = enabledSkillDir("tdd");
-    expect(copy).toBe(join(claudeHome, "skills", `${ENABLED_SKILL_PREFIX}tdd`));
+    // Under the servant root, unprefixed — the user's own skills directory is never written to.
+    expect(copy).toBe(join(servantSkillsDir(), "tdd"));
+    expect(servantSkillsDir()).toBe(join(servantRoot, ".claude", "skills"));
+    expect(copy.startsWith(claudeHome)).toBe(false);
     expect(await readFile(join(copy, "SKILL.md"), "utf8")).toContain("red, green, refactor");
     // The copy is byte-identical to the store, which is what makes the recorded hash true of both.
     expect(await hashSkillDir(copy)).toBe(skill.hash);
@@ -257,7 +262,7 @@ describe("enable and disable", () => {
     await expect(enableSkill("no-such-skill")).rejects.toThrow(/is not installed/);
   });
 
-  test("never touches a skill servant did not install", async () => {
+  test("never writes into the user's own skills directory", async () => {
     const handmade = join(userClaudeSkillsDir(), "hand-installed");
     await mkdir(handmade, { recursive: true });
     await writeFile(join(handmade, "SKILL.md"), "the user's own\n");
@@ -268,6 +273,32 @@ describe("enable and disable", () => {
     await disableSkill("teach");
 
     expect(await readFile(join(handmade, "SKILL.md"), "utf8")).toBe("the user's own\n");
+    expect(await readdir(userClaudeSkillsDir())).toEqual(["hand-installed"]);
+  });
+
+  test("sweeps the copies the old layout left, and only those", async () => {
+    const stale = join(userClaudeSkillsDir(), `${LEGACY_ENABLED_SKILL_PREFIX}tdd`);
+    await mkdir(stale, { recursive: true });
+    await writeFile(join(stale, "SKILL.md"), "left over from ~/.claude/skills\n");
+
+    expect((await reconcileEnabledCopies()).removedLegacy).toEqual([
+      `${LEGACY_ENABLED_SKILL_PREFIX}tdd`,
+    ]);
+    expect(existsSync(stale)).toBe(false);
+    expect(existsSync(join(userClaudeSkillsDir(), "hand-installed"))).toBe(true);
+    expect((await reconcileEnabledCopies()).removedLegacy).toEqual([]);
+  });
+
+  test("restores a copy for a skill recorded as enabled but missing one", async () => {
+    await enableSkill("tdd");
+    await rm(enabledSkillDir("tdd"), { recursive: true, force: true });
+    // The record still claims Claude can see it — that claim has to be made true, not reported.
+    expect((await listSkills()).find((s) => s.name === "tdd")?.enabled).toBe(true);
+
+    expect((await reconcileEnabledCopies()).restored).toEqual(["tdd"]);
+    expect(existsSync(enabledSkillDir("tdd"))).toBe(true);
+    expect((await reconcileEnabledCopies()).restored).toEqual([]);
+    await disableSkill("tdd");
   });
 });
 

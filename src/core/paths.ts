@@ -283,24 +283,34 @@ export function userClaudeSettingsPath(): string {
   return join(userClaudeDir(), "settings.json");
 }
 
-/** Claude's personal skills directory — flat, and shared with the user's hand-installed skills. */
+/**
+ * Where enabling an installed skill copies it (ADR-0002). A directory servant owns outright, beside
+ * the slash commands it already ships from here — so a session under the servant root sees these
+ * skills and a session anywhere else does not.
+ */
+export function servantSkillsDir(): string {
+  return join(claudeDir(), "skills");
+}
+
+/**
+ * One enabled skill. Unprefixed: nothing else writes to this directory, so containment does the work
+ * a name prefix used to, and the copy's directory matches the `name:` in its own frontmatter.
+ */
+export function enabledSkillDir(name: string): string {
+  return join(servantSkillsDir(), name);
+}
+
+/** Claude's personal skills directory — the user's own, which servant no longer writes to. */
 export function userClaudeSkillsDir(): string {
   return join(userClaudeDir(), "skills");
 }
 
 /**
- * The prefix every materialized (enabled) skill directory carries.
- *
- * Load-bearing, not cosmetic: `~/.claude/skills/` is flat and holds the user's own hand-installed
- * skills, and true `name:skill` namespacing is plugin-only. The prefix is what makes enable/disable
- * mechanically incapable of touching anything servant did not put there.
+ * The prefix servant used while it materialized skills into `~/.claude/skills/` (ADR-0002 moved them
+ * under the servant root). Kept for exactly one purpose: recognizing those copies so they can be
+ * swept up. It is the prefix's last useful act.
  */
-export const ENABLED_SKILL_PREFIX = "servant-";
-
-/** Where enabling an installed skill copies it so Claude can see it. */
-export function enabledSkillDir(name: string): string {
-  return join(userClaudeSkillsDir(), `${ENABLED_SKILL_PREFIX}${name}`);
-}
+export const LEGACY_ENABLED_SKILL_PREFIX = "servant-";
 
 export function statuslineScriptPath(): string {
   return join(aiServantRoot(), "claude", "statusline.sh");

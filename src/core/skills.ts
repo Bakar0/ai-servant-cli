@@ -10,12 +10,13 @@
 import { existsSync } from "node:fs";
 import { cp, mkdir, mkdtemp, readdir, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { $ } from "bun";
 import { contentStamp } from "./content-stamp.ts";
 import {
-  ENABLED_SKILL_PREFIX,
+  LEGACY_ENABLED_SKILL_PREFIX,
   enabledSkillDir,
+  servantSkillsDir,
   skillStoreDir,
   skillsCheckCachePath,
   skillsManifestPath,
@@ -525,30 +526,64 @@ export async function installFromSource(
   }
 }
 
-/**
- * Copy a store directory into Claude's skills directory. The only writer of an enabled copy, and
- * the only place the `servant-` prefix is applied.
- */
+/** Copy a store directory into the servant skills directory. The only writer of an enabled copy. */
 async function materialize(storeDir: string, name: string): Promise<void> {
   const dest = enabledSkillDir(name);
   await removeEnabledCopy(dest);
-  await mkdir(userClaudeSkillsDir(), { recursive: true });
+  await mkdir(servantSkillsDir(), { recursive: true });
   await cp(storeDir, dest, { recursive: true });
 }
 
 /**
- * Delete an enabled copy, refusing any path servant did not create.
+ * Delete an enabled copy, refusing anything that is not a direct child of the servant skills
+ * directory.
  *
- * The user's own hand-installed skills sit in the same flat directory. This guard is the reason the
- * prefix exists: no argument and no future caller can make disable reach them.
+ * Containment is the guard (ADR-0002): servant owns that directory outright, so there is nothing
+ * of the user's inside it to reach. A traversing or absolute `name` cannot escape it, which is
+ * strictly stronger than the name prefix this replaced.
  */
 async function removeEnabledCopy(dir: string): Promise<void> {
-  if (!basename(dir).startsWith(ENABLED_SKILL_PREFIX)) {
+  const root = servantSkillsDir();
+  if (resolve(dir) !== join(root, basename(dir)) || basename(dir).length === 0) {
     throw new Error(
-      `servant skills: refusing to remove ${dir} — only ${ENABLED_SKILL_PREFIX}* directories are servant's.`,
+      `servant skills: refusing to remove ${dir} — only directories directly under ${root} are servant's.`,
     );
   }
   await rm(dir, { recursive: true, force: true });
+}
+
+/**
+ * Make the enabled set true again: sweep the copies the pre-ADR-0002 layout left in the user's
+ * personal skills directory, and re-materialize any skill recorded as enabled that has no copy where
+ * one now belongs.
+ *
+ * Both halves are needed, and the second is what makes the first safe. `enabled: true` is a claim
+ * that Claude can see the skill; sweeping the old copy without writing the new one would leave that
+ * claim false, and the listing would happily report `on` for a skill loaded from nowhere.
+ */
+export async function reconcileEnabledCopies(): Promise<{
+  removedLegacy: string[];
+  restored: string[];
+}> {
+  const legacyDir = userClaudeSkillsDir();
+  const removedLegacy: string[] = [];
+  if (existsSync(legacyDir)) {
+    for (const e of await readdir(legacyDir, { withFileTypes: true })) {
+      // Only ever the prefix servant itself wrote — everything else in there is the user's.
+      if (!e.isDirectory() || !e.name.startsWith(LEGACY_ENABLED_SKILL_PREFIX)) continue;
+      await rm(join(legacyDir, e.name), { recursive: true, force: true });
+      removedLegacy.push(e.name);
+    }
+  }
+
+  const restored: string[] = [];
+  for (const skill of await listSkills()) {
+    if (!skill.enabled || existsSync(enabledSkillDir(skill.name))) continue;
+    if (!existsSync(skill.storeDir)) continue;
+    await materialize(skill.storeDir, skill.name);
+    restored.push(skill.name);
+  }
+  return { removedLegacy: removedLegacy.sort(), restored: restored.sort() };
 }
 
 export type EnableResult = {

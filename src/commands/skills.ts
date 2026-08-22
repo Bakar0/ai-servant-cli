@@ -1,5 +1,10 @@
 import { defineCommand } from "citty";
-import { applyRootOverride, enabledSkillDir, skillsStoreRoot } from "../core/paths.ts";
+import {
+  applyRootOverride,
+  enabledSkillDir,
+  servantSkillsDir,
+  skillsStoreRoot,
+} from "../core/paths.ts";
 import {
   type CatalogEntry,
   type CheckCache,
@@ -14,6 +19,7 @@ import {
   readCheckResults,
   readSkillDoc,
   skillName,
+  reconcileEnabledCopies,
 } from "../core/skills.ts";
 import { type PickerOpts, pickMultipleFromList } from "../ui/picker.ts";
 
@@ -114,6 +120,23 @@ async function loadRows(): Promise<{
   return { skills, checks, ...buildRows(skills, checks) };
 }
 
+/**
+ * Make the enabled set true before reporting or changing it (ADR-0002). Runs on every such command
+ * rather than as a one-shot migration, because a servant binary predating the move can recreate the
+ * old copies at any time, and a skill loading from two places — or from none — has no symptom.
+ */
+async function reconcile(): Promise<void> {
+  const { removedLegacy, restored } = await reconcileEnabledCopies();
+  // Status, not data: stdout stays pure so `list --json` is parseable even when a repair happened.
+  if (removedLegacy.length > 0) {
+    console.error(`servant: servant's skills now live in ${servantSkillsDir()}`);
+    for (const name of removedLegacy) {
+      console.error(`  removed the old copy: ~/.claude/skills/${name}`);
+    }
+  }
+  for (const name of restored) console.error(`  restored the enabled copy: ${name}`);
+}
+
 function reportEmptyStore(): void {
   console.log(`servant: no skills installed — the store at ${skillsStoreRoot()} is empty.`);
   console.log("  Install one with `servant skills install <source>` (e.g. owner/repo).");
@@ -127,6 +150,7 @@ const listCommand = defineCommand({
   },
   async run({ args }) {
     applyRootOverride(args.root);
+    await reconcile();
     const { skills, checks, rows, header } = await loadRows();
     if (args.json) {
       console.log(
@@ -286,6 +310,7 @@ const enableCommand = defineCommand({
   },
   async run({ args }) {
     applyRootOverride(args.root);
+    await reconcile();
     const { skill, swappedOut } = await enableSkill(String(args.skill));
     console.log(
       `servant: enabled ${skill.name} (${skill.source}) → ${enabledSkillDir(skill.name)}`,
@@ -311,6 +336,7 @@ const disableCommand = defineCommand({
   },
   async run({ args }) {
     applyRootOverride(args.root);
+    await reconcile();
     const skill = await disableSkill(String(args.skill));
     console.log(
       `servant: disabled ${skill.name} (${skill.source}) — still installed at ${skill.storeDir}`,
@@ -387,6 +413,7 @@ const BROWSE_HINT = "tab marks · enter flips the marked rows (or the current on
  * between two full-screen redraws is a line nobody reads. The trail prints once, on the way out.
  */
 export async function browseSkills(pick: SkillPicker = pickMultipleFromList): Promise<void> {
+  await reconcile();
   const trail: string[] = [];
   for (;;) {
     const { skills, checks, rows, header } = await loadRows();
