@@ -234,6 +234,32 @@ export function headlessSessionsPath(): string {
   return join(cacheDir(), "headless-sessions.json");
 }
 
+/**
+ * The skill store: every installed skill, namespaced by source. Authoritative — what Claude loads
+ * is a copy taken from here (ADR-0001).
+ */
+export function skillsStoreRoot(): string {
+  return join(aiServantRoot(), "skills");
+}
+
+/** The store's record: one entry per installed skill. */
+export function skillsManifestPath(): string {
+  return join(skillsStoreRoot(), "skills.json");
+}
+
+/** Where one installed skill's directory lives inside the store. */
+export function skillStoreDir(sourceSlug: string, name: string): string {
+  return join(skillsStoreRoot(), sourceSlug, name);
+}
+
+/**
+ * Last `servant skills check` result per skill. Derived and disposable, so it lives in the cache
+ * tier rather than in skills.json — the record holds identity, never a network observation.
+ */
+export function skillsCheckCachePath(): string {
+  return join(cacheDir(), "skills-check.json");
+}
+
 export function claudeDir(): string {
   return join(aiServantRoot(), ".claude");
 }
@@ -242,12 +268,38 @@ export function claudeCommandsDir(): string {
   return join(claudeDir(), "commands");
 }
 
+/**
+ * The user's Claude home (`~/.claude`), overridable via `CLAUDE_CONFIG_DIR` — Claude Code's own
+ * relocation variable. `setRootOverride` does not reach here: this directory is the user's, not
+ * servant's, so a test or throwaway root must pin `CLAUDE_CONFIG_DIR` to avoid writing into it.
+ */
 export function userClaudeDir(): string {
+  const override = process.env.CLAUDE_CONFIG_DIR;
+  if (override && override.length > 0) return override;
   return join(homedir(), ".claude");
 }
 
 export function userClaudeSettingsPath(): string {
   return join(userClaudeDir(), "settings.json");
+}
+
+/** Claude's personal skills directory — flat, and shared with the user's hand-installed skills. */
+export function userClaudeSkillsDir(): string {
+  return join(userClaudeDir(), "skills");
+}
+
+/**
+ * The prefix every materialized (enabled) skill directory carries.
+ *
+ * Load-bearing, not cosmetic: `~/.claude/skills/` is flat and holds the user's own hand-installed
+ * skills, and true `name:skill` namespacing is plugin-only. The prefix is what makes enable/disable
+ * mechanically incapable of touching anything servant did not put there.
+ */
+export const ENABLED_SKILL_PREFIX = "servant-";
+
+/** Where enabling an installed skill copies it so Claude can see it. */
+export function enabledSkillDir(name: string): string {
+  return join(userClaudeSkillsDir(), `${ENABLED_SKILL_PREFIX}${name}`);
 }
 
 export function statuslineScriptPath(): string {

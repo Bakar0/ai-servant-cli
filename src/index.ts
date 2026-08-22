@@ -14,6 +14,7 @@ import { recallCommand } from "./commands/recall.ts";
 import { repoCommand } from "./commands/repo/index.ts";
 import { resumeCommand } from "./commands/resume.ts";
 import { sessionsCommand } from "./commands/sessions.ts";
+import { skillsCommand } from "./commands/skills.ts";
 import { spawnCommand } from "./commands/spawn.ts";
 import { statuslineCommand } from "./commands/statusline.ts";
 import { summonCommand } from "./commands/summon.ts";
@@ -37,6 +38,7 @@ const main = defineCommand({
     sessions: sessionsCommand,
     recall: recallCommand,
     memories: memoriesCommand,
+    skills: skillsCommand,
     tasks: tasksCommand,
     ticket: ticketCommand,
     board: boardCommand,

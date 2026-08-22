@@ -1,0 +1,596 @@
+// The skill store (ADR-0001). Installed skills live under the servant root, namespaced by source,
+// and *enabling* one copies its directory into Claude's personal skills directory as
+// `servant-<name>/`. It never symlinks: the recorded content hash has to stay true, and a symlink
+// hands ownership of the bytes Claude loads to whatever the link points at.
+//
+// Nothing here knows any skill by name, and there is no curated source list — a source is only ever
+// an argument to `install`. That is the whole point of the surface: skills are data servant manages,
+// not behavior it knows.
+
+import { existsSync } from "node:fs";
+import { cp, mkdir, mkdtemp, readdir, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { basename, dirname, join } from "node:path";
+import { $ } from "bun";
+import { contentStamp } from "./content-stamp.ts";
+import {
+  ENABLED_SKILL_PREFIX,
+  enabledSkillDir,
+  skillStoreDir,
+  skillsCheckCachePath,
+  skillsManifestPath,
+  skillsStoreRoot,
+  userClaudeSkillsDir,
+} from "./paths.ts";
+
+/** The file that makes a directory a skill. */
+export const SKILL_FILE = "SKILL.md";
+
+/** How deep below a source's root we look for skill directories. */
+const DISCOVERY_MAX_DEPTH = 3;
+
+/**
+ * One installed skill, as recorded in `skills.json`.
+ *
+ * `ref` is the source commit this content was last *verified* against — written at install time and
+ * advanced by `check` when upstream moved without the skill's own bytes changing. It exists so the
+ * cheap `git ls-remote` question ("did the source move?") can be asked before the expensive one
+ * ("did this skill change?").
+ */
+export type SkillEntry = {
+  source: string;
+  ref: string;
+  /** The skill directory's path within the source repo (`"."` when the repo *is* one skill). */
+  path: string;
+  hash: string;
+  enabled: boolean;
+};
+
+export type SkillManifest = {
+  version: number;
+  skills: SkillEntry[];
+};
+
+export const SKILL_MANIFEST_VERSION = 1;
+
+/** An entry joined with everything derivable from it — what every read surface actually wants. */
+export type InstalledSkill = SkillEntry & {
+  name: string;
+  sourceSlug: string;
+  storeDir: string;
+  /**
+   * True when another source has a skill of the same name installed. Only one of them may be
+   * enabled at a time, because they would materialize into the same `servant-<name>/`.
+   */
+  contested: boolean;
+};
+
+/** A source's identity: what the user typed, the store namespace, and the URL git is given. */
+export type SkillSource = {
+  raw: string;
+  slug: string;
+  gitUrl: string;
+};
+
+/**
+ * Git operations the store needs, as one injectable port. Every call is read-only against the
+ * source: servant clones into a temp dir and copies out, and never writes to a source repo.
+ */
+export type SkillGitOps = {
+  /** Head commit of the source's default branch, or null when the source is unreachable. */
+  lsRemoteHead(gitUrl: string): Promise<string | null>;
+  /** Shallow-clone the whole source into `dest` (skills repos are small Markdown trees). */
+  shallowClone(gitUrl: string, dest: string): Promise<void>;
+  /**
+   * Fetch only `path` from the source's head into `dest`, for re-hashing one skill without pulling
+   * the whole source. Returns the commit it landed on — the sha the resulting hash describes.
+   */
+  sparseFetch(gitUrl: string, path: string, dest: string): Promise<string>;
+  headOf(repoDir: string): Promise<string>;
+};
+
+async function git(
+  args: string[],
+  cwd?: string,
+): Promise<{ ok: boolean; out: string; err: string }> {
+  const proc = cwd
+    ? await $`git -C ${cwd} ${args}`.nothrow().quiet()
+    : await $`git ${args}`.nothrow().quiet();
+  return {
+    ok: proc.exitCode === 0,
+    out: proc.stdout.toString(),
+    err: proc.stderr.toString(),
+  };
+}
+
+export const defaultGitOps: SkillGitOps = {
+  async lsRemoteHead(gitUrl) {
+    const res = await git(["ls-remote", gitUrl, "HEAD"]);
+    if (!res.ok) return null;
+    const sha = res.out.trim().split(/\s+/)[0];
+    return sha && /^[0-9a-f]{7,40}$/.test(sha) ? sha : null;
+  },
+  async shallowClone(gitUrl, dest) {
+    const res = await git(["clone", "--depth", "1", gitUrl, dest]);
+    if (!res.ok) {
+      throw new Error(`git clone of ${gitUrl} failed: ${res.err.trim() || "(no output)"}`);
+    }
+  },
+  async sparseFetch(gitUrl, path, dest) {
+    await mkdir(dest, { recursive: true });
+    // Fetch `HEAD` rather than the sha `ls-remote` just reported: a server only serves an arbitrary
+    // sha with `uploadpack.allowAnySHA1InWant` set, and the sha we actually landed on is reported
+    // back, so nothing is assumed about the two agreeing.
+    const steps: string[][] = [
+      ["init", "-q"],
+      ["remote", "add", "origin", gitUrl],
+      ["sparse-checkout", "set", "--no-cone", path === "." ? "/*" : `/${path}`],
+      ["fetch", "-q", "--depth", "1", "origin", "HEAD"],
+      ["checkout", "-q", "FETCH_HEAD"],
+    ];
+    for (const step of steps) {
+      const res = await git(step, dest);
+      if (!res.ok) {
+        throw new Error(
+          `git ${step[0]} while fetching ${path} from ${gitUrl} failed: ${res.err.trim() || "(no output)"}`,
+        );
+      }
+    }
+    return this.headOf(dest);
+  },
+  async headOf(repoDir) {
+    const res = await git(["rev-parse", "HEAD"], repoDir);
+    if (!res.ok) throw new Error(`git rev-parse in ${repoDir} failed: ${res.err.trim()}`);
+    return res.out.trim();
+  },
+};
+
+/**
+ * Normalize whatever the user typed into a source identity.
+ *
+ * `owner/repo` is read as GitHub, because that is what a bare slug means everywhere else in this
+ * CLI. Anything with a scheme, or a filesystem path, is handed to git as-is.
+ */
+export function parseSource(raw: string): SkillSource {
+  const trimmed = raw.trim().replace(/\/+$/, "");
+  if (trimmed.length === 0) throw new Error("servant skills: a source is required.");
+
+  if (/^[\w.-]+\/[\w.-]+$/.test(trimmed) && !trimmed.startsWith(".")) {
+    return {
+      raw: trimmed,
+      slug: trimmed.replace("/", "__"),
+      gitUrl: `https://github.com/${trimmed}.git`,
+    };
+  }
+
+  // A URL or a filesystem path: its last two path segments name it.
+  const segments = trimmed
+    .replace(/\.git$/, "")
+    .split(/[/:]/)
+    .filter(Boolean);
+  const slug = segments
+    .slice(-2)
+    .join("__")
+    .replace(/[^\w.-]/g, "-");
+  return { raw: trimmed, slug: slug || "source", gitUrl: trimmed };
+}
+
+/** A skill's name: its directory name in the source, or the source's own when the repo is a skill. */
+export function skillName(entry: Pick<SkillEntry, "source" | "path">): string {
+  if (entry.path !== "." && entry.path.length > 0) return basename(entry.path);
+  const parts = parseSource(entry.source).slug.split("__");
+  return parts[parts.length - 1] ?? entry.source;
+}
+
+/**
+ * The content hash of a skill directory: sha256 over every file's relative path and bytes in
+ * sorted-path order, truncated to 12 hex. Path-sensitive, so a rename is a change; order-stable, so
+ * the same tree hashes the same on any machine. Fields are NUL-separated because that is the one
+ * byte that cannot appear in either a path or a Markdown file.
+ */
+export async function hashSkillDir(dir: string): Promise<string> {
+  const files = (await walkFiles(dir)).sort();
+  const parts: string[] = [];
+  for (const rel of files) {
+    parts.push(rel, "\0", await Bun.file(join(dir, rel)).text(), "\0");
+  }
+  return contentStamp(parts.join(""));
+}
+
+async function walkFiles(dir: string, prefix = ""): Promise<string[]> {
+  const out: string[] = [];
+  for (const e of await readdir(join(dir, prefix), { withFileTypes: true })) {
+    if (e.name === ".git") continue;
+    const rel = prefix ? `${prefix}/${e.name}` : e.name;
+    if (e.isDirectory()) out.push(...(await walkFiles(dir, rel)));
+    else if (e.isFile()) out.push(rel);
+  }
+  return out;
+}
+
+export async function readManifest(): Promise<SkillManifest> {
+  const file = Bun.file(skillsManifestPath());
+  if (!(await file.exists())) return { version: SKILL_MANIFEST_VERSION, skills: [] };
+  try {
+    return coerceManifest(await file.json());
+  } catch {
+    return { version: SKILL_MANIFEST_VERSION, skills: [] };
+  }
+}
+
+function coerceManifest(raw: unknown): SkillManifest {
+  const out: SkillManifest = { version: SKILL_MANIFEST_VERSION, skills: [] };
+  if (!raw || typeof raw !== "object") return out;
+  const obj = raw as Record<string, unknown>;
+  if (!Array.isArray(obj.skills)) return out;
+  for (const item of obj.skills) {
+    if (!item || typeof item !== "object") continue;
+    const e = item as Record<string, unknown>;
+    if (typeof e.source !== "string" || typeof e.path !== "string") continue;
+    out.skills.push({
+      source: e.source,
+      ref: typeof e.ref === "string" ? e.ref : "",
+      path: e.path,
+      hash: typeof e.hash === "string" ? e.hash : "",
+      enabled: e.enabled === true,
+    });
+  }
+  return out;
+}
+
+export async function writeManifest(manifest: SkillManifest): Promise<void> {
+  await mkdir(skillsStoreRoot(), { recursive: true });
+  const skills = [...manifest.skills].sort((a, b) => {
+    const byName = skillName(a).localeCompare(skillName(b));
+    return byName !== 0 ? byName : a.source.localeCompare(b.source);
+  });
+  await Bun.write(
+    skillsManifestPath(),
+    `${JSON.stringify({ version: SKILL_MANIFEST_VERSION, skills }, null, 2)}\n`,
+  );
+}
+
+/** Every installed skill, joined with its derived fields. */
+export async function listSkills(): Promise<InstalledSkill[]> {
+  const { skills } = await readManifest();
+  const counts = new Map<string, number>();
+  for (const e of skills) {
+    const n = skillName(e);
+    counts.set(n, (counts.get(n) ?? 0) + 1);
+  }
+  return skills.map((e) => {
+    const name = skillName(e);
+    const sourceSlug = parseSource(e.source).slug;
+    return {
+      ...e,
+      name,
+      sourceSlug,
+      storeDir: skillStoreDir(sourceSlug, name),
+      contested: (counts.get(name) ?? 0) > 1,
+    };
+  });
+}
+
+/**
+ * Resolve a selector to one installed skill. A bare name is enough until two sources ship it, at
+ * which point the caller has to say which one — silently picking would enable the wrong bytes.
+ */
+export async function resolveSkill(selector: string): Promise<InstalledSkill> {
+  const all = await listSkills();
+  const qualified = all.filter(
+    (s) => `${s.source}/${s.name}` === selector || `${s.sourceSlug}/${s.name}` === selector,
+  );
+  if (qualified.length === 1) return qualified[0] as InstalledSkill;
+
+  const byName = all.filter((s) => s.name === selector);
+  if (byName.length === 1) return byName[0] as InstalledSkill;
+  if (byName.length === 0) {
+    throw new Error(`servant skills: "${selector}" is not installed. Run \`servant skills list\`.`);
+  }
+  const options = byName.map((s) => `  ${s.source}/${s.name}`).join("\n");
+  throw new Error(
+    `servant skills: "${selector}" is installed from more than one source — name one:\n${options}`,
+  );
+}
+
+/** Relative paths of every skill directory in a checkout, `"."` when the repo itself is a skill. */
+export async function discoverSkills(repoDir: string): Promise<string[]> {
+  if (existsSync(join(repoDir, SKILL_FILE))) return ["."];
+  const found: string[] = [];
+  const walk = async (rel: string, depth: number): Promise<void> => {
+    if (depth > DISCOVERY_MAX_DEPTH) return;
+    for (const e of await readdir(join(repoDir, rel), { withFileTypes: true })) {
+      if (!e.isDirectory() || e.name.startsWith(".")) continue;
+      const child = rel ? `${rel}/${e.name}` : e.name;
+      if (existsSync(join(repoDir, child, SKILL_FILE))) found.push(child);
+      else await walk(child, depth + 1);
+    }
+  };
+  await walk("", 1);
+  return found.sort();
+}
+
+export type InstallOutcome = {
+  name: string;
+  path: string;
+  hash: string;
+  /** The hash this skill previously carried, when it was already installed from this source. */
+  previousHash?: string;
+  /** True when the enabled copy was refreshed as part of this install. */
+  refreshedEnabled: boolean;
+};
+
+export type InstallResult = {
+  source: SkillSource;
+  ref: string;
+  installed: InstallOutcome[];
+};
+
+/**
+ * Clone a source into a temp dir and hand its discovered skills to `select`, which returns the
+ * paths to install. The clone is deleted before this returns — the store is the only copy that
+ * outlives it.
+ *
+ * Installing is how an upstream change is *reached* (ADR-0001: detected, never applied silently).
+ * Re-installing an already-enabled skill therefore also refreshes its enabled copy, so the bytes
+ * Claude loads never lag the store.
+ */
+export async function installFromSource(
+  rawSource: string,
+  select: (candidates: string[]) => Promise<string[] | null>,
+  opts: { git?: SkillGitOps } = {},
+): Promise<InstallResult | null> {
+  const gitOps = opts.git ?? defaultGitOps;
+  const source = parseSource(rawSource);
+  const tmp = await mkdtemp(join(tmpdir(), "servant-skills-"));
+  const checkout = join(tmp, "src");
+  try {
+    await gitOps.shallowClone(source.gitUrl, checkout);
+    const ref = await gitOps.headOf(checkout);
+    const candidates = await discoverSkills(checkout);
+    if (candidates.length === 0) {
+      throw new Error(
+        `servant skills: no ${SKILL_FILE} found in ${source.raw} — it does not look like a skills source.`,
+      );
+    }
+    const chosen = await select(candidates);
+    if (!chosen || chosen.length === 0) return null;
+
+    const unknown = chosen.filter((p) => !candidates.includes(p));
+    if (unknown.length > 0) {
+      const available = candidates.map((c) => skillName({ source: source.raw, path: c }));
+      throw new Error(
+        `servant skills: ${source.raw} has no skill ${unknown.join(", ")}.\n  Available: ${available.join(", ")}`,
+      );
+    }
+
+    const manifest = await readManifest();
+    const installed: InstallOutcome[] = [];
+    for (const path of chosen) {
+      const name = skillName({ source: source.raw, path });
+      const dest = skillStoreDir(source.slug, name);
+      const prior = manifest.skills.find((e) => e.source === source.raw && skillName(e) === name);
+      await rm(dest, { recursive: true, force: true });
+      await mkdir(dirname(dest), { recursive: true });
+      await cp(path === "." ? checkout : join(checkout, path), dest, {
+        recursive: true,
+        filter: (src) => basename(src) !== ".git",
+      });
+      const hash = await hashSkillDir(dest);
+      const enabled = prior?.enabled ?? false;
+      manifest.skills = manifest.skills.filter((e) => e !== prior);
+      manifest.skills.push({ source: source.raw, ref, path, hash, enabled });
+      if (enabled) await materialize(dest, name);
+      installed.push({
+        name,
+        path,
+        hash,
+        ...(prior ? { previousHash: prior.hash } : {}),
+        refreshedEnabled: enabled,
+      });
+    }
+    await writeManifest(manifest);
+    await forgetCheckResults(installed.map((i) => `${source.raw}/${i.name}`));
+    return { source, ref, installed };
+  } finally {
+    await rm(tmp, { recursive: true, force: true });
+  }
+}
+
+/**
+ * Copy a store directory into Claude's skills directory. The only writer of an enabled copy, and
+ * the only place the `servant-` prefix is applied.
+ */
+async function materialize(storeDir: string, name: string): Promise<void> {
+  const dest = enabledSkillDir(name);
+  await removeEnabledCopy(dest);
+  await mkdir(userClaudeSkillsDir(), { recursive: true });
+  await cp(storeDir, dest, { recursive: true });
+}
+
+/**
+ * Delete an enabled copy, refusing any path servant did not create.
+ *
+ * The user's own hand-installed skills sit in the same flat directory. This guard is the reason the
+ * prefix exists: no argument and no future caller can make disable reach them.
+ */
+async function removeEnabledCopy(dir: string): Promise<void> {
+  if (!basename(dir).startsWith(ENABLED_SKILL_PREFIX)) {
+    throw new Error(
+      `servant skills: refusing to remove ${dir} — only ${ENABLED_SKILL_PREFIX}* directories are servant's.`,
+    );
+  }
+  await rm(dir, { recursive: true, force: true });
+}
+
+export type EnableResult = {
+  skill: InstalledSkill;
+  /** The same-named skill from another source that had to be disabled to make room. */
+  swappedOut?: InstalledSkill;
+};
+
+export async function enableSkill(selector: string): Promise<EnableResult> {
+  const target = await resolveSkill(selector);
+  if (!existsSync(target.storeDir)) {
+    throw new Error(
+      `servant skills: ${target.name} is recorded but missing from the store (${target.storeDir}). Reinstall it.`,
+    );
+  }
+
+  const manifest = await readManifest();
+  // One name, one enabled skill: two sources' versions would materialize into the same directory.
+  const rival = manifest.skills.find(
+    (e) => e.enabled && skillName(e) === target.name && e.source !== target.source,
+  );
+  const swappedOut = rival
+    ? (await listSkills()).find((s) => s.source === rival.source && s.name === target.name)
+    : undefined;
+  if (rival) rival.enabled = false;
+
+  for (const e of manifest.skills) {
+    if (e.source === target.source && skillName(e) === target.name) e.enabled = true;
+  }
+  await materialize(target.storeDir, target.name);
+  await writeManifest(manifest);
+  return { skill: { ...target, enabled: true }, ...(swappedOut ? { swappedOut } : {}) };
+}
+
+export async function disableSkill(selector: string): Promise<InstalledSkill> {
+  const target = await resolveSkill(selector);
+  const manifest = await readManifest();
+  for (const e of manifest.skills) {
+    if (e.source === target.source && skillName(e) === target.name) e.enabled = false;
+  }
+  await removeEnabledCopy(enabledSkillDir(target.name));
+  await writeManifest(manifest);
+  return { ...target, enabled: false };
+}
+
+export type CheckStatus = "current" | "outdated" | "unreachable";
+
+export type CheckResult = {
+  name: string;
+  source: string;
+  status: CheckStatus;
+  /** The source's head at check time (absent when unreachable). */
+  head?: string;
+  /** Upstream's hash for this skill, when it differs from the installed one. */
+  upstreamHash?: string;
+};
+
+/** What the last `check` observed, keyed by `<source>/<name>`. Derived, so it lives in the cache. */
+export type CheckCache = Record<string, { ts: number; status: CheckStatus; upstreamHash?: string }>;
+
+export async function readCheckResults(): Promise<CheckCache> {
+  const file = Bun.file(skillsCheckCachePath());
+  if (!(await file.exists())) return {};
+  try {
+    const raw: unknown = await file.json();
+    return raw && typeof raw === "object" ? (raw as CheckCache) : {};
+  } catch {
+    return {};
+  }
+}
+
+async function writeCheckResults(cache: CheckCache): Promise<void> {
+  const path = skillsCheckCachePath();
+  await mkdir(dirname(path), { recursive: true });
+  await Bun.write(path, `${JSON.stringify(cache, null, 2)}\n`);
+}
+
+/** Drop stale observations for skills that were just re-installed. */
+async function forgetCheckResults(keys: string[]): Promise<void> {
+  const cache = await readCheckResults();
+  const present = keys.filter((k) => k in cache);
+  if (present.length === 0) return;
+  for (const key of present) delete cache[key];
+  await writeCheckResults(cache);
+}
+
+/**
+ * Ask every installed skill's source whether it moved, and only then whether the skill itself
+ * changed: one `ls-remote` per source, and a sparse fetch of exactly the skills whose source did
+ * move. Never re-pulls a whole source, and never applies what it finds.
+ *
+ * A source that moved without changing a skill's bytes advances that entry's `ref`, so the same
+ * unchanged skill is not re-fetched on every check.
+ */
+export async function checkForUpdates(opts: { git?: SkillGitOps } = {}): Promise<CheckResult[]> {
+  const gitOps = opts.git ?? defaultGitOps;
+  const skills = await listSkills();
+  const heads = new Map<string, string | null>();
+  for (const source of new Set(skills.map((s) => s.source))) {
+    heads.set(source, await gitOps.lsRemoteHead(parseSource(source).gitUrl));
+  }
+
+  const manifest = await readManifest();
+  const results: CheckResult[] = [];
+
+  for (const skill of skills) {
+    const head = heads.get(skill.source) ?? null;
+    if (head === null) {
+      results.push({ name: skill.name, source: skill.source, status: "unreachable" });
+      continue;
+    }
+    if (head === skill.ref) {
+      results.push({ name: skill.name, source: skill.source, status: "current", head });
+      continue;
+    }
+
+    const upstream = await hashUpstream(gitOps, skill);
+    if (upstream.hash === skill.hash) {
+      // Upstream moved but this skill's bytes did not: advance the verified ref so the next check
+      // stops at the cheap `ls-remote` question instead of re-fetching an unchanged skill.
+      const entry = manifest.skills.find(
+        (e) => e.source === skill.source && skillName(e) === skill.name,
+      );
+      if (entry) entry.ref = upstream.ref;
+      results.push({ name: skill.name, source: skill.source, status: "current", head });
+    } else {
+      results.push({
+        name: skill.name,
+        source: skill.source,
+        status: "outdated",
+        head,
+        upstreamHash: upstream.hash,
+      });
+    }
+  }
+
+  await writeManifest(manifest);
+
+  const cache = await readCheckResults();
+  const ts = Date.now();
+  for (const r of results) {
+    cache[`${r.source}/${r.name}`] = {
+      ts,
+      status: r.status,
+      ...(r.upstreamHash ? { upstreamHash: r.upstreamHash } : {}),
+    };
+  }
+  await writeCheckResults(cache);
+  return results;
+}
+
+async function hashUpstream(
+  gitOps: SkillGitOps,
+  skill: InstalledSkill,
+): Promise<{ hash: string; ref: string }> {
+  const tmp = await mkdtemp(join(tmpdir(), "servant-skills-check-"));
+  try {
+    const ref = await gitOps.sparseFetch(parseSource(skill.source).gitUrl, skill.path, tmp);
+    const hash = await hashSkillDir(skill.path === "." ? tmp : join(tmp, skill.path));
+    return { hash, ref };
+  } finally {
+    await rm(tmp, { recursive: true, force: true });
+  }
+}
+
+/** A skill's SKILL.md, for the picker's preview. */
+export async function readSkillDoc(storeDir: string): Promise<string> {
+  try {
+    return await readFile(join(storeDir, SKILL_FILE), "utf8");
+  } catch {
+    return `(no ${SKILL_FILE} in ${storeDir})`;
+  }
+}

@@ -9,17 +9,12 @@
 // refreshed, which meant an existing workspace would keep instructing agents to run `gh issue
 // create` forever. They now carry a content stamp, and `writeStamped` rewrites them when it moves.
 
-import { createHash } from "node:crypto";
+import { contentStamp } from "./content-stamp.ts";
 
 export const AGENT_SKILLS_MARKER = "<!-- servant:agent-skills -->";
 
 /** Marks a servant-generated agent doc, and carries the hash of the content it was generated from. */
 const STAMP_PREFIX = "<!-- servant:agent-doc v=";
-
-/** 12 hex chars of sha256 — the same shape as the insights setup fingerprint. */
-function contentStamp(body: string): string {
-  return createHash("sha256").update(body).digest("hex").slice(0, 12);
-}
 
 /**
  * A generated doc with its content stamp on the first line.
