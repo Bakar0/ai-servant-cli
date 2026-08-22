@@ -444,3 +444,52 @@ describe("a sox that dies on its own", () => {
     expect(failures).toEqual([]);
   });
 });
+
+// The live bug: type at a Summons while it is still speaking and two replies came out of the
+// speakers at once. `endReply` retires a finished reply to *drain* — it stops being the current
+// speaker and keeps playing, which is what plays the last syllable — and both the flush and the
+// next reply's speaker only ever knew about the current one.
+describe("only one reply is ever audible", () => {
+  test("flushing silences a reply left draining, not just the one being generated", () => {
+    const { audio: port, speakers } = createAudio();
+    port.play(audio(700));
+    port.endReply();
+    expect(speakers).toHaveLength(1);
+    expect(speakers[0]?.killed).toBe(false);
+
+    port.flush();
+
+    expect(speakers[0]?.killed).toBe(true);
+  });
+
+  test("a new reply silences the last one before opening its own device", () => {
+    const { audio: port, speakers } = createAudio();
+    port.play(audio(700));
+    port.endReply();
+
+    // No interruption at all — the next reply simply begins while the previous one is still playing,
+    // which is what an announcement fired at `reply_done` does.
+    port.play(audio(700));
+
+    expect(speakers).toHaveLength(2);
+    expect(speakers[0]?.killed).toBe(true);
+    expect(speakers[1]?.killed).toBe(false);
+  });
+
+  test("an ordinary reply is still drained rather than cut, so its last syllable plays", () => {
+    const { audio: port, speakers } = createAudio();
+    port.play(audio(700));
+
+    port.endReply();
+
+    expect(speakers[0]?.killed).toBe(false);
+    expect(speakers[0]?.ended).toBe(true);
+  });
+
+  test("flushing an empty speaker path is harmless", () => {
+    const { audio: port, speakers } = createAudio();
+
+    expect(() => port.flush()).not.toThrow();
+    expect(speakers).toHaveLength(0);
+  });
+});
