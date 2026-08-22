@@ -376,35 +376,53 @@ const SUBCOMMANDS = {
   check: checkCommand,
 };
 
-/** Toggle each picked skill's enablement — the same gesture the repo and memory pickers use. */
+const BROWSE_HINT = "tab marks · enter flips the marked rows (or the current one) · esc closes";
+
+/**
+ * Flip the enablement of each marked skill, then reopen with the new state — deciding what to enable
+ * is comparing skills against each other, and being ejected after one flip makes that comparison
+ * impossible. Escape is the way out, so leaving is a deliberate keystroke rather than the default.
+ *
+ * The reopened list is the confirmation, which is why nothing is printed per flip: a `console.log`
+ * between two full-screen redraws is a line nobody reads. The trail prints once, on the way out.
+ */
 export async function browseSkills(pick: SkillPicker = pickMultipleFromList): Promise<void> {
-  const { skills, checks, rows, header } = await loadRows();
-  if (skills.length === 0) {
-    reportEmptyStore();
-    return;
-  }
-  const docs = new Map<string, string>();
-  await Promise.all(skills.map(async (s) => docs.set(s.storeDir, await readSkillDoc(s.storeDir))));
+  const trail: string[] = [];
+  for (;;) {
+    const { skills, checks, rows, header } = await loadRows();
+    if (skills.length === 0) {
+      reportEmptyStore();
+      break;
+    }
+    const docs = new Map<string, string>();
+    await Promise.all(
+      skills.map(async (s) => docs.set(s.storeDir, await readSkillDoc(s.storeDir))),
+    );
 
-  const picked = await pick(rows, {
-    format: (r) => r.label,
-    preview: (r) => preview(r.skill, checks, docs.get(r.skill.storeDir) ?? ""),
-    prompt: "skill",
-    header: `${header}   —   tab to toggle, enter to flip enable/disable`,
-  });
-  if (!picked) return;
+    const picked = await pick(rows, {
+      format: (r) => r.label,
+      preview: (r) => preview(r.skill, checks, docs.get(r.skill.storeDir) ?? ""),
+      prompt: "skill",
+      header: `${BROWSE_HINT}\n${header}`,
+    });
+    if (!picked || picked.length === 0) break;
 
-  for (const { skill } of picked) {
-    const selector = skill.contested ? `${skill.source}/${skill.name}` : skill.name;
-    if (skill.enabled) {
-      await disableSkill(selector);
-      console.log(`  off  ${skill.name}  (${skill.source})`);
-    } else {
-      const { swappedOut } = await enableSkill(selector);
-      const swap = swappedOut ? `  (replacing ${swappedOut.source}'s)` : "";
-      console.log(`  on   ${skill.name}  (${skill.source})${swap}`);
+    for (const { skill } of picked) {
+      const selector = skill.contested ? `${skill.source}/${skill.name}` : skill.name;
+      if (skill.enabled) {
+        await disableSkill(selector);
+        trail.push(`  off  ${skill.name}  (${skill.source})`);
+      } else {
+        const { swappedOut } = await enableSkill(selector);
+        const swap = swappedOut ? `  (replacing ${swappedOut.source}'s)` : "";
+        trail.push(`  on   ${skill.name}  (${skill.source})${swap}`);
+      }
     }
   }
+
+  if (trail.length === 0) return;
+  console.log("servant: skills changed —");
+  for (const line of trail) console.log(line);
 }
 
 export const skillsCommand = defineCommand({

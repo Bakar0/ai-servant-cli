@@ -196,18 +196,31 @@ describe("servant skills enable / disable", () => {
 });
 
 describe("the browse surface", () => {
-  /** Pick the rows naming `wanted`, and hand back what the picker was shown. */
-  function fakePicker(wanted: string[]): {
+  /**
+   * Pick the rows naming `wanted` on each round, then close (null) — one entry per round. The
+   * browser reopens after every flip, so a picker that never returns null never returns at all.
+   */
+  function fakePicker(...rounds: string[][]): {
     pick: SkillPicker;
-    seen: { rows: SkillRow[]; previews: string[] };
+    opened: number;
+    seen: { rows: SkillRow[]; headers: string[]; previews: string[] };
   } {
-    const seen = { rows: [] as SkillRow[], previews: [] as string[] };
+    const seen = { rows: [] as SkillRow[], headers: [] as string[], previews: [] as string[] };
+    const state = { opened: 0 };
     const pick: SkillPicker = async (rows, opts) => {
       seen.rows = rows;
+      seen.headers.push(opts.header ?? "");
       seen.previews = rows.map((r) => opts.preview?.(r) ?? "");
-      return rows.filter((r) => wanted.includes(r.skill.name));
+      const round = rounds[state.opened++];
+      return round ? rows.filter((r) => round.includes(r.skill.name)) : null;
     };
-    return { pick, seen };
+    return {
+      pick,
+      get opened() {
+        return state.opened;
+      },
+      seen,
+    };
   }
 
   async function browse(pick: SkillPicker): Promise<string> {
@@ -223,7 +236,7 @@ describe("the browse surface", () => {
   }
 
   test("previews a skill's SKILL.md alongside its hash and score", async () => {
-    const { pick, seen } = fakePicker([]);
+    const { pick, seen } = fakePicker();
     await browse(pick);
     const tdd = seen.previews.find((p) => p.startsWith("tdd"));
     expect(tdd).toContain("red, green, refactor");
@@ -255,9 +268,40 @@ describe("the browse surface", () => {
     expect(await listJson()).toEqual(before);
   });
 
-  test("restores the state the check tests expect", async () => {
-    await browse(fakePicker(["tdd", "teach"]).pick);
-    expect((await listJson()).find((s) => s.name === "tdd")?.enabled).toBe(true);
+  test("stays open after a flip, and closes on the key that returns nothing", async () => {
+    const picker = fakePicker(["tdd"], ["tdd"]);
+    await browse(picker.pick);
+    // Two flip rounds plus the round that closed it: the browser reopened rather than exiting.
+    expect(picker.opened).toBe(3);
+    expect((await listJson()).find((s) => s.name === "tdd")?.enabled).toBe(false);
+  });
+
+  test("each reopen shows the state the last flip produced", async () => {
+    const seenStates: string[] = [];
+    let round = 0;
+    await browseSkills(async (rows) => {
+      seenStates.push(rows.find((r) => r.skill.name === "tdd")?.label.split(/\s+/)[0] ?? "");
+      return round++ < 1 ? rows.filter((r) => r.skill.name === "tdd") : null;
+    });
+    expect(seenStates).toEqual(["off", "on"]);
+  });
+
+  test("says how to leave, and what the columns are", async () => {
+    const { pick, seen } = fakePicker();
+    await browse(pick);
+    expect(seen.headers[0]).toContain("esc closes");
+    expect(seen.headers[0]).toContain("STATE");
+  });
+
+  // Browsing mutates shared state, so hand the check tests the arrangement they assume — tdd loaded,
+  // teach not — instead of relying on how many times the flips above happened to fire.
+  test("leaves tdd enabled and teach disabled for what follows", async () => {
+    await run("enable", "tdd");
+    if ((await listJson()).find((s) => s.name === "teach")?.enabled) await run("disable", "teach");
+
+    const after = await listJson();
+    expect(after.find((s) => s.name === "tdd")?.enabled).toBe(true);
+    expect(after.find((s) => s.name === "teach")?.enabled).toBe(false);
   });
 });
 
