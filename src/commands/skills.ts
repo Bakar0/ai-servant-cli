@@ -6,6 +6,7 @@ import {
   skillsStoreRoot,
 } from "../core/paths.ts";
 import {
+  CORE_SOURCE,
   type CatalogEntry,
   type CheckCache,
   type CheckResult,
@@ -15,6 +16,8 @@ import {
   disableSkill,
   enableSkill,
   installFromSource,
+  ensureCoreSkills,
+  listInstalledSkills,
   listSkills,
   readCheckResults,
   readSkillDoc,
@@ -56,7 +59,9 @@ function buildRows(
 ): { rows: SkillRow[]; header: string } {
   const cells = skills.map((s) => ({
     skill: s,
-    state: s.enabled ? "on" : "off",
+    // `core` sits in the STATE column rather than beside the source, because the question that
+    // column answers is "can I flip this?" — and for a core skill the answer is no.
+    state: s.source === CORE_SOURCE ? "core" : s.enabled ? "on" : "off",
     source: s.source,
     name: s.contested ? `${s.name} (contested)` : s.name,
     score: SCORE_UNSCORED,
@@ -97,10 +102,12 @@ function preview(skill: InstalledSkill, checks: CheckCache, doc: string): string
     `${skill.name}  (${skill.enabled ? "enabled" : "disabled"})`,
     `source:  ${skill.source}`,
     `hash:    ${skill.hash}${skill.drift === "clean" ? "" : `  (as installed; local ${skill.localHash ?? "gone"})`}`,
-    `ref:     ${skill.ref || "(unknown)"}`,
+    skill.source === CORE_SOURCE ? "" : `ref:     ${skill.ref || "(unknown)"}`,
     `score:   ${SCORE_UNSCORED}`,
     `update:  ${updateCell(skill, checks)}`,
-    `store:   ${skill.storeDir}`,
+    skill.source === CORE_SOURCE
+      ? "store:   ships inside the servant binary — always on, never removable"
+      : `store:   ${skill.storeDir}`,
     skill.enabled ? `loaded:  ${enabledSkillDir(skill.name)}` : "",
     "",
     doc,
@@ -126,6 +133,7 @@ async function loadRows(): Promise<{
  * old copies at any time, and a skill loading from two places — or from none — has no symptom.
  */
 async function reconcile(): Promise<void> {
+  await ensureCoreSkills();
   const { removedLegacy, restored } = await reconcileEnabledCopies();
   // Status, not data: stdout stays pure so `list --json` is parseable even when a repair happened.
   if (removedLegacy.length > 0) {
@@ -138,7 +146,7 @@ async function reconcile(): Promise<void> {
 }
 
 function reportEmptyStore(): void {
-  console.log(`servant: no skills installed — the store at ${skillsStoreRoot()} is empty.`);
+  console.log(`servant: nothing installed — the store at ${skillsStoreRoot()} is empty.`);
   console.log("  Install one with `servant skills install <source>` (e.g. owner/repo).");
 }
 
@@ -174,12 +182,12 @@ const listCommand = defineCommand({
       );
       return;
     }
-    if (skills.length === 0) {
-      reportEmptyStore();
-      return;
-    }
     console.log(header);
     for (const r of rows) console.log(r.label);
+    if (skills.every((s) => s.source === CORE_SOURCE)) {
+      console.log("");
+      reportEmptyStore();
+    }
   },
 });
 
@@ -383,7 +391,7 @@ const checkCommand = defineCommand({
   },
   async run({ args }) {
     applyRootOverride(args.root);
-    if ((await listSkills()).length === 0) {
+    if ((await listInstalledSkills()).length === 0) {
       reportEmptyStore();
       return;
     }
@@ -417,10 +425,6 @@ export async function browseSkills(pick: SkillPicker = pickMultipleFromList): Pr
   const trail: string[] = [];
   for (;;) {
     const { skills, checks, rows, header } = await loadRows();
-    if (skills.length === 0) {
-      reportEmptyStore();
-      break;
-    }
     const docs = new Map<string, string>();
     await Promise.all(
       skills.map(async (s) => docs.set(s.storeDir, await readSkillDoc(s.storeDir))),
@@ -435,6 +439,10 @@ export async function browseSkills(pick: SkillPicker = pickMultipleFromList): Pr
     if (!picked || picked.length === 0) break;
 
     for (const { skill } of picked) {
+      if (skill.source === CORE_SOURCE) {
+        trail.push(`  --   ${skill.name}  (core)  ships with servant — always on`);
+        continue;
+      }
       const selector = skill.contested ? `${skill.source}/${skill.name}` : skill.name;
       if (skill.enabled) {
         await disableSkill(selector);

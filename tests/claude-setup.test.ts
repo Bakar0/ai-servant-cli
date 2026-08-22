@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { setRootOverride } from "../src/core/paths.ts";
 
 let tmpRoot: string;
@@ -22,7 +22,9 @@ beforeEach(async () => {
 });
 
 const { ensureServantAssets } = await import("../src/core/claude-setup.ts");
-const { aiServantRoot, claudeDir, claudeCommandsDir } = await import("../src/core/paths.ts");
+const { aiServantRoot, claudeDir, claudeCommandsDir, servantSkillsDir } = await import(
+  "../src/core/paths.ts"
+);
 
 describe("ensureServantAssets", () => {
   test("creates .claude/commands/servant/goal.md under the servant root", async () => {
@@ -80,12 +82,24 @@ describe("ensureServantAssets", () => {
     expect(await Bun.file(retiredDelegate).exists()).toBe(false);
   });
 
-  test("ships the recall and extract-memories slash commands", async () => {
+  test("ships the extract-memories slash command", async () => {
     await ensureServantAssets();
-    const recall = join(claudeCommandsDir(), "servant", "recall.md");
     const extract = join(claudeCommandsDir(), "servant", "extract-memories.md");
-    expect(await readFile(recall, "utf8")).toContain("/servant:recall");
     expect(await readFile(extract, "utf8")).toContain("--reconcile");
+  });
+
+  test("ships recall as a core skill, and retires the command it used to be", async () => {
+    const retiredRecall = join(claudeCommandsDir(), "servant", "recall.md");
+    await mkdir(dirname(retiredRecall), { recursive: true });
+    await writeFile(retiredRecall, "stale copy from an older servant\n");
+
+    await ensureServantAssets();
+
+    const skill = await readFile(join(servantSkillsDir(), "servant-recall", "SKILL.md"), "utf8");
+    expect(skill).toContain("name: servant-recall");
+    expect(skill).toContain("servant recall");
+    // Two copies of one instruction, one of them stale, is worse than either alone.
+    expect(await Bun.file(retiredRecall).exists()).toBe(false);
   });
 
   // A skill nobody can invoke has not shipped, so the asset-sync path is asserted per command

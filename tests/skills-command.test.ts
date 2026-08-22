@@ -76,6 +76,11 @@ type ListedSkill = {
 
 const listJson = async (): Promise<ListedSkill[]> => JSON.parse(await run("list", "--json"));
 
+// Core skills are in every listing by construction. Assertions about what a *source* put in the
+// store filter them out; the core rows have their own describe block.
+const installedJson = async (): Promise<ListedSkill[]> =>
+  (await listJson()).filter((s) => s.source !== "core");
+
 beforeAll(async () => {
   scratch = await realpath(await mkdtemp(join(tmpdir(), "servant-skills-cmd-")));
   servantRoot = join(scratch, ".ai_servant");
@@ -130,9 +135,51 @@ describe("the move out of ~/.claude/skills", () => {
 });
 
 describe("an empty store", () => {
-  test("says so, and says how to fill it", async () => {
-    expect(await run("list")).toContain("no skills installed");
+  test("says so, and says how to fill it — beneath the core skills that are always there", async () => {
+    const out = await run("list");
+    expect(out).toContain("servant-recall");
+    expect(out).toContain("nothing installed");
     expect(await run("check")).toContain("servant skills install");
+  });
+});
+
+describe("core skills", () => {
+  test("are listed as core, always on, and never flippable", async () => {
+    const core = (await listJson()).filter((s) => s.source === "core");
+    expect(core.map((s) => s.name)).toContain("servant-recall");
+    expect(core.every((s) => s.enabled)).toBe(true);
+    expect(await run("list")).toMatch(/core\s+core\s+servant-recall/);
+
+    await expect(run("disable", "servant-recall")).rejects.toThrow(/always on/);
+    await expect(run("enable", "servant-recall")).rejects.toThrow(/always on/);
+  });
+
+  test("are materialized by a listing, so `on` is never a claim about a file that is not there", async () => {
+    const dir = join(servantRoot, ".claude", "skills", "servant-recall");
+    await rm(dir, { recursive: true, force: true });
+    await run("list");
+    expect(existsSync(join(dir, "SKILL.md"))).toBe(true);
+  });
+
+  test("reserve their name: a source shipping one cannot install or shadow it", async () => {
+    const rival = join(scratch, "rival-skills");
+    await $`git init -q -b main ${rival}`.quiet();
+    await git(rival, "config", "user.email", "test@example.com");
+    await git(rival, "config", "user.name", "Test");
+    await mkdir(join(rival, "servant-recall"), { recursive: true });
+    await writeFile(
+      join(rival, "servant-recall", "SKILL.md"),
+      "---\nname: servant-recall\ndescription: An impostor.\n---\nnot ours\n",
+    );
+    await git(rival, "add", "-A");
+    await git(rival, "commit", "-qm", "initial");
+
+    await expect(run("install", rival, "--all")).rejects.toThrow(/core skill/);
+    // The refusal happened before anything was written.
+    expect((await listJson()).filter((s) => s.source === rival)).toEqual([]);
+    expect(
+      await readFile(join(servantRoot, ".claude", "skills", "servant-recall", "SKILL.md"), "utf8"),
+    ).toContain("servant knowledge base");
   });
 });
 
@@ -143,7 +190,7 @@ describe("servant skills catalog", () => {
     expect(out).toContain("Test-driven development.");
     expect(out).toContain("[mentions: tdd]");
     expect(out).toContain(`servant skills install ${source} --skill <name>`);
-    expect(await listJson()).toEqual([]);
+    expect(await installedJson()).toEqual([]);
   });
 
   test("--json gives the agent name, path, purpose and siblings", async () => {
@@ -161,7 +208,7 @@ describe("servant skills install", () => {
     expect(out).toContain("installed tdd");
     expect(out).toContain("installed teach");
 
-    const listed = await listJson();
+    const listed = await installedJson();
     expect(listed.map((s) => s.name)).toEqual(["tdd", "teach"]);
     expect(listed.every((s) => s.source === source)).toBe(true);
     expect(listed.every((s) => /^[0-9a-f]{12}$/.test(s.hash))).toBe(true);
@@ -361,7 +408,7 @@ describe("the browse surface", () => {
 describe("servant skills check", () => {
   test("reports everything current while the source has not moved", async () => {
     expect(await run("check")).toContain("0 outdated");
-    expect((await listJson()).every((s) => s.lastCheck?.status === "current")).toBe(true);
+    expect((await installedJson()).every((s) => s.lastCheck?.status === "current")).toBe(true);
   });
 
   test("reports the moved skill, and tells the user the reinstall that reaches it", async () => {

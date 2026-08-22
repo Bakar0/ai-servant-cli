@@ -5,6 +5,7 @@ import { TEMPLATES } from "../templates/index.generated.ts";
 import { composeAssetForRel, isFineTuneAsset } from "./fine-tune.ts";
 import { appendChange } from "./insights/changes.ts";
 import { aiServantRoot, claudeCommandsDir } from "./paths.ts";
+import { ensureCoreSkills } from "./skills.ts";
 
 // Templates synced into the servant root live under the `servant_root/` prefix in the
 // embedded manifest; the part after it is the path relative to `~/.ai_servant/`.
@@ -16,7 +17,14 @@ const SERVANT_ROOT_PREFIX = "servant_root/";
 // we know we retired: the pre-namespace flat copies, plus `servant/delegate.md` — delegation is
 // now the mattpocock `/handoff` → `servant spawn` flow, so the bespoke command is gone.
 const LEGACY_FLAT_COMMANDS = ["goal.md", "delegate.md"];
-const RETIRED_NAMESPACED_COMMANDS = ["servant/delegate.md"];
+// `recall` is now a core *skill* (`servant-recall`), so the command it used to be must go — two
+// copies of the same instructions, one of them stale, is worse than either alone.
+const RETIRED_NAMESPACED_COMMANDS = ["servant/delegate.md", "servant/recall.md"];
+
+// Core skills also live under `servant_root/`, but the generic sync below is not their writer:
+// `ensureCoreSkills` is, so that the `servant skills` commands can refresh them without dragging
+// the whole asset sync (and its change ledger) along.
+const CORE_SKILLS_PREFIX = "servant_root/.claude/skills/";
 
 /**
  * Sync the bundled servant-root templates into `~/.ai_servant/`. This includes
@@ -31,7 +39,9 @@ const RETIRED_NAMESPACED_COMMANDS = ["servant/delegate.md"];
  */
 export async function ensureServantAssets(): Promise<void> {
   const target = aiServantRoot();
-  const sources = TEMPLATES.filter((t) => t.rel.startsWith(SERVANT_ROOT_PREFIX));
+  const sources = TEMPLATES.filter(
+    (t) => t.rel.startsWith(SERVANT_ROOT_PREFIX) && !t.rel.startsWith(CORE_SKILLS_PREFIX),
+  );
   const changedAssets: string[] = [];
   for (const src of sources) {
     const rel = src.rel.slice(SERVANT_ROOT_PREFIX.length);
@@ -53,6 +63,7 @@ export async function ensureServantAssets(): Promise<void> {
     // an existing install, where the asset materially moved the effective setup.
     if (existing !== null) changedAssets.push(rel);
   }
+  for (const name of await ensureCoreSkills()) changedAssets.push(`.claude/skills/${name}`);
   await removeLegacyFlatCommands();
   // Record asset changes in the insights ledger (the before/after primitive). Best-effort.
   if (changedAssets.length > 0 && existsSync(join(target, "insights"))) {

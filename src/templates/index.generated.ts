@@ -6,7 +6,7 @@ import t2 from "./servant_root/.claude/commands/servant/fine-tune.md" with { typ
 import t3 from "./servant_root/.claude/commands/servant/goal.md" with { type: "text" };
 import t4 from "./servant_root/.claude/commands/servant/handoff.md" with { type: "text" };
 import t5 from "./servant_root/.claude/commands/servant/lead.md" with { type: "text" };
-import t6 from "./servant_root/.claude/commands/servant/recall.md" with { type: "text" };
+import t6 from "./servant_root/.claude/skills/servant-recall/SKILL.md" with { type: "text" };
 import t7 from "./servant_root/CLAUDE.md" with { type: "text" };
 
 export interface ServantTemplate {
@@ -24,6 +24,6 @@ export const TEMPLATES: ServantTemplate[] = [
   { rel: "servant_root/.claude/commands/servant/goal.md", content: t3 },
   { rel: "servant_root/.claude/commands/servant/handoff.md", content: t4 },
   { rel: "servant_root/.claude/commands/servant/lead.md", content: t5 },
-  { rel: "servant_root/.claude/commands/servant/recall.md", content: t6 },
+  { rel: "servant_root/.claude/skills/servant-recall/SKILL.md", content: t6 },
   { rel: "servant_root/CLAUDE.md", content: t7 },
 ];

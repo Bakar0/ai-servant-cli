@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { toCodexPrompt } from "../src/core/codex-setup.ts";
+import { codexPromptBodies, toCodexPrompt } from "../src/core/codex-setup.ts";
 
 describe("toCodexPrompt", () => {
   test("renames the servant slash-command namespace from `:` to `-`", () => {
@@ -43,10 +43,27 @@ describe("ensureCodexAssets", () => {
       const goal = await readFile(join(home, "prompts", "servant-goal.md"), "utf8");
       expect(goal).toContain("/servant-goal");
       expect(goal).not.toContain("/servant:goal");
+
+      // recall is a core skill now, not a slash command. Codex has no skills mechanism, so its
+      // prompt has to come from the skill template — the same string, from the other location.
+      const recall = await readFile(join(home, "prompts", "servant-recall.md"), "utf8");
+      expect(recall).toContain("name: servant-recall");
     } finally {
       if (prevHome === undefined) delete process.env.CODEX_HOME;
       else process.env.CODEX_HOME = prevHome;
       await rm(home, { recursive: true, force: true });
     }
+  });
+});
+
+describe("codexPromptBodies", () => {
+  test("a core skill replaces the command of the same id, so a half-converted set has no gap", () => {
+    const bodies = codexPromptBodies();
+    // Converted: served from the skill.
+    expect(bodies.get("recall")).toContain("name: servant-recall");
+    // Not yet converted: still served from the command it remains.
+    expect(bodies.get("goal")).toContain("/servant:goal");
+    // The id never carries the directory's `servant-` prefix, or the filename would double it.
+    expect([...bodies.keys()].some((k) => k.startsWith("servant-"))).toBe(false);
   });
 });

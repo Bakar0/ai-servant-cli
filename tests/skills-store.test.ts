@@ -16,11 +16,16 @@ import {
 import {
   catalogSource,
   checkForUpdates,
+  coreSkillNames,
+  coreSkills,
+  ensureCoreSkills,
+  isCoreSkillName,
   disableSkill,
   discoverSkills,
   enableSkill,
   hashSkillDir,
   installFromSource,
+  listInstalledSkills,
   listSkills,
   parseSource,
   readManifest,
@@ -446,5 +451,55 @@ describe("local adaptation", () => {
     await rm(store, { recursive: true, force: true });
     expect((await listSkills()).find((s) => s.name === "teach")?.drift).toBe("missing");
     await expect(enableSkill(`${alpha}/teach`)).rejects.toThrow(/missing from the store/);
+  });
+});
+
+describe("core skills — the ones that ship inside the binary", () => {
+  test("every one carries the servant- prefix, which is the invocation", () => {
+    const names = coreSkillNames();
+    expect(names.length).toBeGreaterThan(0);
+    expect(names.every((n) => n.startsWith("servant-"))).toBe(true);
+    expect(names).toContain("servant-recall");
+    expect(isCoreSkillName("servant-recall")).toBe(true);
+    expect(isCoreSkillName("tdd")).toBe(false);
+  });
+
+  test("they are in listSkills but never in listInstalledSkills — nothing installed them", async () => {
+    await ensureCoreSkills();
+    expect((await listSkills()).some((s) => s.name === "servant-recall")).toBe(true);
+    expect((await listInstalledSkills()).some((s) => s.source === "core")).toBe(false);
+  });
+
+  test("their store is the binary, so a hand-edit reads as drift and the next write undoes it", async () => {
+    await ensureCoreSkills();
+    const doc = join(enabledSkillDir("servant-recall"), "SKILL.md");
+    const shipped = await readFile(doc, "utf8");
+    expect((await coreSkills()).find((s) => s.name === "servant-recall")?.drift).toBe("clean");
+
+    await writeFile(doc, `${shipped}\nhand-edited\n`);
+    expect((await coreSkills()).find((s) => s.name === "servant-recall")?.drift).toBe("modified");
+
+    expect(await ensureCoreSkills()).toContain("servant-recall");
+    expect(await readFile(doc, "utf8")).toBe(shipped);
+    expect((await coreSkills()).find((s) => s.name === "servant-recall")?.drift).toBe("clean");
+  });
+
+  test("a deleted copy reads as missing, and a listing puts it back", async () => {
+    await rm(enabledSkillDir("servant-recall"), { recursive: true, force: true });
+    expect((await coreSkills()).find((s) => s.name === "servant-recall")?.drift).toBe("missing");
+    await ensureCoreSkills();
+    expect((await coreSkills()).find((s) => s.name === "servant-recall")?.drift).toBe("clean");
+  });
+
+  test("reconcile leaves them alone — its restore path is for installed copies", async () => {
+    await ensureCoreSkills();
+    const { restored } = await reconcileEnabledCopies();
+    expect(restored).not.toContain("servant-recall");
+    expect(existsSync(join(enabledSkillDir("servant-recall"), "SKILL.md"))).toBe(true);
+  });
+
+  test("neither enable nor disable applies to them", async () => {
+    await expect(enableSkill("servant-recall")).rejects.toThrow(/always on/);
+    await expect(disableSkill("servant-recall")).rejects.toThrow(/always on/);
   });
 });

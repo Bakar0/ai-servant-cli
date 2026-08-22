@@ -12,6 +12,7 @@ import { cp, mkdir, mkdtemp, readdir, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { $ } from "bun";
+import { TEMPLATES } from "../templates/index.generated.ts";
 import { contentStamp } from "./content-stamp.ts";
 import {
   LEGACY_ENABLED_SKILL_PREFIX,
@@ -202,13 +203,25 @@ export function skillName(entry: Pick<SkillEntry, "source" | "path">): string {
  * byte that cannot appear in either a path or a Markdown file.
  */
 export async function hashSkillDir(dir: string): Promise<string> {
-  const files = (await walkFiles(dir)).sort();
+  const files = await walkFiles(dir);
+  return hashFiles(
+    await Promise.all(
+      files.map(async (rel) => ({ rel, content: await Bun.file(join(dir, rel)).text() })),
+    ),
+  );
+}
+
+/** The same hash over files held in memory — what a core skill has instead of a directory. */
+function hashFiles(files: readonly SkillFile[]): string {
   const parts: string[] = [];
-  for (const rel of files) {
-    parts.push(rel, "\0", await Bun.file(join(dir, rel)).text(), "\0");
+  for (const f of [...files].sort((a, b) => (a.rel < b.rel ? -1 : a.rel > b.rel ? 1 : 0))) {
+    parts.push(f.rel, "\0", f.content, "\0");
   }
   return contentStamp(parts.join(""));
 }
+
+/** One file of a skill: its path relative to the skill directory, and its bytes. */
+type SkillFile = { rel: string; content: string };
 
 async function walkFiles(dir: string, prefix = ""): Promise<string[]> {
   const out: string[] = [];
@@ -219,6 +232,153 @@ async function walkFiles(dir: string, prefix = ""): Promise<string[]> {
     else if (e.isFile()) out.push(rel);
   }
   return out;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Core skills — the ones that ship inside the binary rather than arriving from a source.
+//
+// They are listed and scored like any other skill (CONTEXT.md, *Core skill*) but they are never
+// disableable and never removable: there is nothing to remove, because their only copy on disk is
+// the materialized one and servant rewrites it from the binary. Their names are reserved, so an
+// installed skill can never materialize over one — both would land in the same directory.
+// ---------------------------------------------------------------------------------------------
+
+/** The source recorded for a skill that ships with servant. Not a git source; nothing fetches it. */
+export const CORE_SOURCE = "core";
+
+/** Where core skills live in the embedded template manifest. */
+const CORE_SKILL_TEMPLATE_PREFIX = "servant_root/.claude/skills/";
+
+/**
+ * The `servant-` prefix every core skill's directory carries.
+ *
+ * Claude Code invokes a skill by its directory name, so this is the invocation: `/servant-recall`.
+ * It is identity, not safety — ADR-0002 dropped the prefix from *installed* copies because
+ * containment replaced it as a guard. Here it groups servant's own set, keeps generic words like
+ * `goal` and `skills` from being claimed, and makes the Claude and Codex invocations the same
+ * string (Codex prompts are flat files named `servant-<id>.md`).
+ */
+export const CORE_SKILL_PREFIX = "servant-";
+
+/** Every core skill's shipped files, keyed by the skill's directory name. */
+function coreSkillFiles(): Map<string, SkillFile[]> {
+  const out = new Map<string, SkillFile[]>();
+  for (const t of TEMPLATES) {
+    if (!t.rel.startsWith(CORE_SKILL_TEMPLATE_PREFIX)) continue;
+    const rest = t.rel.slice(CORE_SKILL_TEMPLATE_PREFIX.length);
+    const slash = rest.indexOf("/");
+    // A loose file directly under skills/ belongs to no skill.
+    if (slash <= 0) continue;
+    const name = rest.slice(0, slash);
+    const files = out.get(name) ?? [];
+    files.push({ rel: rest.slice(slash + 1), content: t.content });
+    out.set(name, files);
+  }
+  return out;
+}
+
+/** The name of every core skill, sorted. Cheap — this is what the reserved-name guard reads. */
+export function coreSkillNames(): string[] {
+  return [...coreSkillFiles().keys()].sort();
+}
+
+/** True when `name` belongs to a core skill, and so may not be taken by an installed one. */
+export function isCoreSkillName(name: string): boolean {
+  return coreSkillFiles().has(name);
+}
+
+/**
+ * Write every core skill into the servant skills directory, and the only writer that does.
+ *
+ * Called from `ensureServantAssets` (so a spawn refreshes them) and from the `servant skills`
+ * commands (so a listing never reports a skill that is not there). Rewrites a file only when its
+ * bytes moved, which is also what makes a hand-edit of a core skill temporary rather than silent.
+ *
+ * It does not delete. A core skill that is *retired* would linger and keep loading — handle that
+ * with an explicit retired-name list when it first happens, the way retired slash commands are.
+ */
+export async function ensureCoreSkills(): Promise<string[]> {
+  const written: string[] = [];
+  for (const [name, files] of coreSkillFiles()) {
+    const dir = enabledSkillDir(name);
+    let touched = false;
+    for (const f of files) {
+      const dest = join(dir, f.rel);
+      const existing = await readTextOr(dest, null);
+      if (existing === f.content) continue;
+      await mkdir(dirname(dest), { recursive: true });
+      await Bun.write(dest, f.content);
+      touched = true;
+    }
+    if (touched) written.push(name);
+  }
+  return written.sort();
+}
+
+async function readTextOr(path: string, fallback: string | null): Promise<string | null> {
+  const file = Bun.file(path);
+  if (!(await file.exists())) return fallback;
+  return file.text();
+}
+
+/**
+ * The core skills as listing rows. Derived entirely from the binary and the directory they are
+ * written to — nothing about them is recorded in `skills.json`, which stays a record of what was
+ * *installed*.
+ *
+ * `storeDir` is the materialized directory because that is the only copy on disk; a core skill's
+ * store is the binary. `drift` therefore answers a real question: has this copy been hand-edited
+ * since servant last wrote it (until the next write puts it back).
+ */
+export async function coreSkills(): Promise<InstalledSkill[]> {
+  const rows = await Promise.all(
+    [...coreSkillFiles()].map(async ([name, files]) => {
+      const dir = enabledSkillDir(name);
+      const hash = hashFiles(files);
+      const localHash = existsSync(dir) ? await hashSkillDir(dir) : null;
+      return {
+        source: CORE_SOURCE,
+        ref: "",
+        path: `${CORE_SKILL_TEMPLATE_PREFIX}${name}`,
+        hash,
+        enabled: true,
+        name,
+        sourceSlug: CORE_SOURCE,
+        storeDir: dir,
+        contested: false,
+        drift: (localHash === null
+          ? "missing"
+          : localHash === hash
+            ? "clean"
+            : "modified") as SkillDrift,
+        localHash,
+      };
+    }),
+  );
+  return rows.sort((a, b) => a.name.localeCompare(b.name));
+}
+
+/**
+ * Refuse to let an installed skill take a core skill's name.
+ *
+ * Both would materialize into the same directory, and `materialize` deletes the destination before
+ * copying — so a same-named install does not shadow a core skill, it destroys it, and the next
+ * asset sync leaves a hybrid of the two. Refusing at install and again at enable means the
+ * collision is a message rather than a repair.
+ */
+function assertCoreNameFree(name: string, what: string): void {
+  if (!isCoreSkillName(name)) return;
+  throw new Error(
+    `servant skills: "${name}" is the name of a core skill that ships with servant. ${what} would overwrite it — rename it upstream or leave it uninstalled.`,
+  );
+}
+
+/** Refuse an operation that would treat a core skill as installed. */
+function assertNotCore(skill: InstalledSkill, verb: string): void {
+  if (skill.source !== CORE_SOURCE) return;
+  throw new Error(
+    `servant skills: ${skill.name} ships with servant and is always on — it cannot be ${verb}.`,
+  );
 }
 
 export async function readManifest(): Promise<SkillManifest> {
@@ -264,13 +424,24 @@ export async function writeManifest(manifest: SkillManifest): Promise<void> {
 }
 
 /**
+ * Every skill servant knows about: the core set first, then everything installed from a source.
+ *
+ * This is what a read surface wants — `servant skills list`, the picker, `resolveSkill`. Anything
+ * that acts on a *source* (update checks, re-materializing an enabled copy) wants
+ * {@link listInstalledSkills} instead: a core skill has no source to ask and no copy to restore.
+ */
+export async function listSkills(): Promise<InstalledSkill[]> {
+  return [...(await coreSkills()), ...(await listInstalledSkills())];
+}
+
+/**
  * Every installed skill, joined with its derived fields.
  *
  * Each store directory is re-hashed on the way out, so a local edit is never invisible: the recorded
  * hash is what upstream shipped, and drift is the difference. Skills are small Markdown trees, so
  * paying for the read on every listing is what buys the guarantee.
  */
-export async function listSkills(): Promise<InstalledSkill[]> {
+export async function listInstalledSkills(): Promise<InstalledSkill[]> {
   const { skills } = await readManifest();
   const counts = new Map<string, number>();
   for (const e of skills) {
@@ -487,6 +658,12 @@ export async function installFromSource(
       );
     }
 
+    // Refuse the whole install rather than part of it: a reserved name is a fact about the source
+    // and the binary, knowable before anything is written.
+    for (const path of chosen) {
+      assertCoreNameFree(skillName({ source: source.raw, path }), "Installing it");
+    }
+
     const manifest = await readManifest();
     const installed: InstallOutcome[] = [];
     for (const path of chosen) {
@@ -577,7 +754,7 @@ export async function reconcileEnabledCopies(): Promise<{
   }
 
   const restored: string[] = [];
-  for (const skill of await listSkills()) {
+  for (const skill of await listInstalledSkills()) {
     if (!skill.enabled || existsSync(enabledSkillDir(skill.name))) continue;
     if (!existsSync(skill.storeDir)) continue;
     await materialize(skill.storeDir, skill.name);
@@ -594,6 +771,8 @@ export type EnableResult = {
 
 export async function enableSkill(selector: string): Promise<EnableResult> {
   const target = await resolveSkill(selector);
+  assertNotCore(target, "enabled");
+  assertCoreNameFree(target.name, "Enabling it");
   if (!existsSync(target.storeDir)) {
     throw new Error(
       `servant skills: ${target.name} is recorded but missing from the store (${target.storeDir}). Reinstall it.`,
@@ -606,7 +785,7 @@ export async function enableSkill(selector: string): Promise<EnableResult> {
     (e) => e.enabled && skillName(e) === target.name && e.source !== target.source,
   );
   const swappedOut = rival
-    ? (await listSkills()).find((s) => s.source === rival.source && s.name === target.name)
+    ? (await listInstalledSkills()).find((s) => s.source === rival.source && s.name === target.name)
     : undefined;
   if (rival) rival.enabled = false;
 
@@ -620,6 +799,7 @@ export async function enableSkill(selector: string): Promise<EnableResult> {
 
 export async function disableSkill(selector: string): Promise<InstalledSkill> {
   const target = await resolveSkill(selector);
+  assertNotCore(target, "disabled");
   const manifest = await readManifest();
   for (const e of manifest.skills) {
     if (e.source === target.source && skillName(e) === target.name) e.enabled = false;
@@ -686,7 +866,7 @@ async function forgetCheckResults(keys: string[]): Promise<void> {
  */
 export async function checkForUpdates(opts: { git?: SkillGitOps } = {}): Promise<CheckResult[]> {
   const gitOps = opts.git ?? defaultGitOps;
-  const skills = await listSkills();
+  const skills = await listInstalledSkills();
   const heads = new Map<string, string | null>();
   for (const source of new Set(skills.map((s) => s.source))) {
     heads.set(source, await gitOps.lsRemoteHead(parseSource(source).gitUrl));
