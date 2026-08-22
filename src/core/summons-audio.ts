@@ -211,6 +211,19 @@ export function createSoxAudio(opts: SoxAudioOptions = {}): AudioPort {
    * the old input buffer used to hold back.
    */
   function startSpeaker(primed: Buffer): SpeakerProcess {
+    // At most one `sox` may be audible, and this is the only place that can hold that invariant.
+    //
+    // `endReply` retires a finished reply to *drain*: it stops being `speaker` and keeps playing,
+    // sometimes for seconds, which is what plays the last syllable. Opening the next reply's speaker
+    // on top of a drainer puts two replies out of the speakers at once — observed live, as two
+    // voices talking over each other. It became reachable the moment a Summons could be typed into,
+    // because the mic gate holds a *spoken* turn back until playback is over and nothing holds a
+    // typed one; an announcement fired at `reply_done` reaches it too.
+    //
+    // The cost is a tail: a drainer within a few milliseconds of exiting loses them. Accepted,
+    // because it is only ever paid when a new reply genuinely arrives while an old one is audible —
+    // never in the spoken path, where the gate means the drainer has already gone.
+    cutDraining();
     const proc = processes.speaker(["-q", ...RAW_PCM_ARGS, IGNORE_INPUT_LENGTH, "-", "-d"]);
     speaker = proc;
     alive.add(proc);
@@ -249,6 +262,19 @@ export function createSoxAudio(opts: SoxAudioOptions = {}): AudioPort {
     priming.length = 0;
     primingBytes = 0;
     return gathered;
+  }
+
+  /**
+   * Silence every speaker still playing — including ones already retired to drain, which are no
+   * longer `speaker` and are exactly what gets left talking otherwise. Reaping is left to each
+   * process's own `exited` handler, so `stop()` still has everything it has to wait for.
+   */
+  function cutDraining(): void {
+    for (const proc of alive) {
+      if (proc === speaker) continue;
+      void proc.stdin.end();
+      proc.kill();
+    }
   }
 
   /** Retire the current speaker, either letting it finish or cutting it off. */
@@ -299,6 +325,9 @@ export function createSoxAudio(opts: SoxAudioOptions = {}): AudioPort {
     },
 
     flush() {
+      // Both halves: the reply being generated, and any earlier one still draining. Cutting only
+      // the first left a finished reply talking over the interruption that was meant to stop it.
+      cutDraining();
       release("cut");
       takePriming();
       opts.onDebug?.("speaker: queued playback flushed");
