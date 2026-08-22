@@ -53,6 +53,15 @@ export type SkillManifest = {
 
 export const SKILL_MANIFEST_VERSION = 1;
 
+/**
+ * How the store directory compares to the hash recorded for it.
+ *
+ * `modified` is what makes local adaptation honest: a skill the agent rewrote after installing it no
+ * longer matches its recorded hash, and the recorded hash still describes what upstream shipped. The
+ * two questions — "did we diverge?" and "did upstream move?" — stay separately answerable.
+ */
+export type SkillDrift = "clean" | "modified" | "missing";
+
 /** An entry joined with everything derivable from it — what every read surface actually wants. */
 export type InstalledSkill = SkillEntry & {
   name: string;
@@ -63,6 +72,9 @@ export type InstalledSkill = SkillEntry & {
    * enabled at a time, because they would materialize into the same `servant-<name>/`.
    */
   contested: boolean;
+  drift: SkillDrift;
+  /** The store directory's hash right now — differs from `hash` exactly when drift is `modified`. */
+  localHash: string | null;
 };
 
 /** A source's identity: what the user typed, the store namespace, and the URL git is given. */
@@ -250,7 +262,13 @@ export async function writeManifest(manifest: SkillManifest): Promise<void> {
   );
 }
 
-/** Every installed skill, joined with its derived fields. */
+/**
+ * Every installed skill, joined with its derived fields.
+ *
+ * Each store directory is re-hashed on the way out, so a local edit is never invisible: the recorded
+ * hash is what upstream shipped, and drift is the difference. Skills are small Markdown trees, so
+ * paying for the read on every listing is what buys the guarantee.
+ */
 export async function listSkills(): Promise<InstalledSkill[]> {
   const { skills } = await readManifest();
   const counts = new Map<string, number>();
@@ -258,17 +276,25 @@ export async function listSkills(): Promise<InstalledSkill[]> {
     const n = skillName(e);
     counts.set(n, (counts.get(n) ?? 0) + 1);
   }
-  return skills.map((e) => {
-    const name = skillName(e);
-    const sourceSlug = parseSource(e.source).slug;
-    return {
-      ...e,
-      name,
-      sourceSlug,
-      storeDir: skillStoreDir(sourceSlug, name),
-      contested: (counts.get(name) ?? 0) > 1,
-    };
-  });
+  return Promise.all(
+    skills.map(async (e) => {
+      const name = skillName(e);
+      const sourceSlug = parseSource(e.source).slug;
+      const storeDir = skillStoreDir(sourceSlug, name);
+      const localHash = existsSync(storeDir) ? await hashSkillDir(storeDir) : null;
+      const drift: SkillDrift =
+        localHash === null ? "missing" : localHash === e.hash ? "clean" : "modified";
+      return {
+        ...e,
+        name,
+        sourceSlug,
+        storeDir,
+        contested: (counts.get(name) ?? 0) > 1,
+        drift,
+        localHash,
+      };
+    }),
+  );
 }
 
 /**
@@ -310,6 +336,98 @@ export async function discoverSkills(repoDir: string): Promise<string[]> {
   return found.sort();
 }
 
+/** One skill a source offers, as read without installing it. */
+export type CatalogEntry = {
+  name: string;
+  path: string;
+  /** The `description:` from the skill's own frontmatter — what it says it is for. */
+  description: string;
+  /** Names this skill's prose mentions as `/other-skill`, so a consumer can ask about them. */
+  mentions: string[];
+};
+
+export type SourceCatalog = {
+  source: SkillSource;
+  ref: string;
+  skills: CatalogEntry[];
+};
+
+/**
+ * Read what a source offers without installing any of it: every skill's name, path, stated purpose,
+ * and the other skills its prose points at.
+ *
+ * This is a read, not a decision. Which of them to install — and what to do about a skill that leans
+ * on three others — is a conversation had above this layer, which is why nothing here filters,
+ * ranks, or follows a mention.
+ */
+export async function catalogSource(
+  rawSource: string,
+  opts: { git?: SkillGitOps } = {},
+): Promise<SourceCatalog> {
+  const gitOps = opts.git ?? defaultGitOps;
+  const source = parseSource(rawSource);
+  const tmp = await mkdtemp(join(tmpdir(), "servant-skills-catalog-"));
+  const checkout = join(tmp, "src");
+  try {
+    await gitOps.shallowClone(source.gitUrl, checkout);
+    const ref = await gitOps.headOf(checkout);
+    const paths = await discoverSkills(checkout);
+    if (paths.length === 0) {
+      throw new Error(
+        `servant skills: no ${SKILL_FILE} found in ${source.raw} — it does not look like a skills source.`,
+      );
+    }
+    const skills = await Promise.all(
+      paths.map(async (path) => {
+        const dir = path === "." ? checkout : join(checkout, path);
+        const doc = await readFile(join(dir, SKILL_FILE), "utf8");
+        return {
+          name: skillName({ source: source.raw, path }),
+          path,
+          description: readFrontmatterDescription(doc),
+          mentions: readSkillMentions(doc, paths, source.raw),
+        };
+      }),
+    );
+    return { source, ref, skills };
+  } finally {
+    await rm(tmp, { recursive: true, force: true });
+  }
+}
+
+/** A skill's stated purpose, from its YAML frontmatter. */
+function readFrontmatterDescription(doc: string): string {
+  const match = doc.match(/^---\r?\n([\s\S]*?)\r?\n---/);
+  if (!match?.[1]) return "";
+  try {
+    const parsed: unknown = Bun.YAML.parse(match[1]);
+    if (parsed && typeof parsed === "object") {
+      const value = (parsed as Record<string, unknown>).description;
+      if (typeof value === "string") return value.trim().replace(/\s+/g, " ");
+    }
+  } catch {
+    // Malformed frontmatter is the source's problem, not a reason to fail the catalog.
+  }
+  return "";
+}
+
+/**
+ * Sibling skills this one's prose points at, as `/name`.
+ *
+ * Only names the same source actually offers are reported — a `/handoff` that resolves to nothing
+ * here is a dangling reference the consumer would have to guess about, and guessing is what this
+ * layer must not do. Whether a mention means "also install that" is never decided here.
+ */
+function readSkillMentions(doc: string, paths: string[], source: string): string[] {
+  const siblings = new Set(paths.map((p) => skillName({ source, path: p })));
+  const self = doc.match(/^---\r?\n[\s\S]*?\r?\n---/)?.[0] ?? "";
+  const found = new Set<string>();
+  for (const [, name] of doc.matchAll(/(?:^|[\s(`])\/([a-z][\w-]*)/g)) {
+    if (name && siblings.has(name) && !self.includes(`name: ${name}`)) found.add(name);
+  }
+  return [...found].sort();
+}
+
 export type InstallOutcome = {
   name: string;
   path: string;
@@ -334,11 +452,15 @@ export type InstallResult = {
  * Installing is how an upstream change is *reached* (ADR-0001: detected, never applied silently).
  * Re-installing an already-enabled skill therefore also refreshes its enabled copy, so the bytes
  * Claude loads never lag the store.
+ *
+ * A store directory that has drifted from its recorded hash holds work someone did deliberately, so
+ * overwriting it takes `force`. Without that, "reach the new upstream version" and "throw away our
+ * adaptation" would be the same keystroke.
  */
 export async function installFromSource(
   rawSource: string,
   select: (candidates: string[]) => Promise<string[] | null>,
-  opts: { git?: SkillGitOps } = {},
+  opts: { git?: SkillGitOps; force?: boolean } = {},
 ): Promise<InstallResult | null> {
   const gitOps = opts.git ?? defaultGitOps;
   const source = parseSource(rawSource);
@@ -370,6 +492,12 @@ export async function installFromSource(
       const name = skillName({ source: source.raw, path });
       const dest = skillStoreDir(source.slug, name);
       const prior = manifest.skills.find((e) => e.source === source.raw && skillName(e) === name);
+      if (prior && !opts.force && existsSync(dest) && (await hashSkillDir(dest)) !== prior.hash) {
+        throw new Error(
+          `servant skills: ${name} has local changes (${dest}).\n` +
+            "  Installing would overwrite them. Pass --force to discard them and take upstream's version.",
+        );
+      }
       await rm(dest, { recursive: true, force: true });
       await mkdir(dirname(dest), { recursive: true });
       await cp(path === "." ? checkout : join(checkout, path), dest, {
@@ -471,7 +599,10 @@ export type CheckStatus = "current" | "outdated" | "unreachable";
 export type CheckResult = {
   name: string;
   source: string;
+  /** How the *upstream* skill compares to what was installed. Independent of local drift. */
   status: CheckStatus;
+  /** How the local store directory compares to the hash recorded for it. */
+  drift: SkillDrift;
   /** The source's head at check time (absent when unreachable). */
   head?: string;
   /** Upstream's hash for this skill, when it differs from the installed one. */
@@ -479,7 +610,10 @@ export type CheckResult = {
 };
 
 /** What the last `check` observed, keyed by `<source>/<name>`. Derived, so it lives in the cache. */
-export type CheckCache = Record<string, { ts: number; status: CheckStatus; upstreamHash?: string }>;
+export type CheckCache = Record<
+  string,
+  { ts: number; status: CheckStatus; drift: SkillDrift; upstreamHash?: string }
+>;
 
 export async function readCheckResults(): Promise<CheckCache> {
   const file = Bun.file(skillsCheckCachePath());
@@ -527,13 +661,14 @@ export async function checkForUpdates(opts: { git?: SkillGitOps } = {}): Promise
   const results: CheckResult[] = [];
 
   for (const skill of skills) {
+    const base = { name: skill.name, source: skill.source, drift: skill.drift };
     const head = heads.get(skill.source) ?? null;
     if (head === null) {
-      results.push({ name: skill.name, source: skill.source, status: "unreachable" });
+      results.push({ ...base, status: "unreachable" });
       continue;
     }
     if (head === skill.ref) {
-      results.push({ name: skill.name, source: skill.source, status: "current", head });
+      results.push({ ...base, status: "current", head });
       continue;
     }
 
@@ -545,15 +680,9 @@ export async function checkForUpdates(opts: { git?: SkillGitOps } = {}): Promise
         (e) => e.source === skill.source && skillName(e) === skill.name,
       );
       if (entry) entry.ref = upstream.ref;
-      results.push({ name: skill.name, source: skill.source, status: "current", head });
+      results.push({ ...base, status: "current", head });
     } else {
-      results.push({
-        name: skill.name,
-        source: skill.source,
-        status: "outdated",
-        head,
-        upstreamHash: upstream.hash,
-      });
+      results.push({ ...base, status: "outdated", head, upstreamHash: upstream.hash });
     }
   }
 
@@ -565,6 +694,7 @@ export async function checkForUpdates(opts: { git?: SkillGitOps } = {}): Promise
     cache[`${r.source}/${r.name}`] = {
       ts,
       status: r.status,
+      drift: r.drift,
       ...(r.upstreamHash ? { upstreamHash: r.upstreamHash } : {}),
     };
   }

@@ -13,6 +13,7 @@ import {
   userClaudeSkillsDir,
 } from "../src/core/paths.ts";
 import {
+  catalogSource,
   checkForUpdates,
   disableSkill,
   discoverSkills,
@@ -77,9 +78,11 @@ beforeAll(async () => {
 
   alpha = join(scratch, "alpha-skills");
   await seedRepo(alpha, {
-    "skills/tdd/SKILL.md": "---\nname: tdd\n---\nred, green, refactor\n",
+    "skills/tdd/SKILL.md":
+      "---\nname: tdd\ndescription: >-\n  Test-driven development. Use when\n  building test-first.\n---\nred, green, refactor\n",
     "skills/tdd/reference.md": "notes\n",
-    "skills/teach/SKILL.md": "---\nname: teach\n---\nexplain a slice\n",
+    "skills/teach/SKILL.md":
+      "---\nname: teach\ndescription: Explain a slice of the codebase.\n---\nPair with /tdd, unlike /wizard.\n",
     "README.md": "alpha\n",
   });
 
@@ -160,6 +163,34 @@ describe("discoverSkills", () => {
     await mkdir(single, { recursive: true });
     await writeFile(join(single, "SKILL.md"), "---\nname: solo\n---\n");
     expect(await discoverSkills(single)).toEqual(["."]);
+  });
+});
+
+describe("catalog", () => {
+  test("reads a source's skills, their stated purpose and their siblings — installing nothing", async () => {
+    const before = (await listSkills()).length;
+    const catalog = await catalogSource(alpha);
+
+    expect(catalog.source.raw).toBe(alpha);
+    expect(catalog.ref).toBe(await git(alpha, "rev-parse", "HEAD"));
+    expect(catalog.skills.map((s) => s.name)).toEqual(["tdd", "teach"]);
+    expect(catalog.skills.find((s) => s.name === "tdd")?.description).toBe(
+      "Test-driven development. Use when building test-first.",
+    );
+    expect((await listSkills()).length).toBe(before);
+  });
+
+  test("reports a sibling the prose points at, and ignores one it does not have", async () => {
+    const catalog = await catalogSource(alpha);
+    // teach's body says "pair with /tdd" and "unlike /wizard" — only the former is a sibling here.
+    expect(catalog.skills.find((s) => s.name === "teach")?.mentions).toEqual(["tdd"]);
+    expect(catalog.skills.find((s) => s.name === "tdd")?.mentions).toEqual([]);
+  });
+
+  test("a source with no SKILL.md is refused, not reported as empty", async () => {
+    const bare = join(scratch, "not-skills");
+    await seedRepo(bare, { "README.md": "nothing here\n" });
+    await expect(catalogSource(bare)).rejects.toThrow(/does not look like a skills source/);
   });
 });
 
@@ -300,7 +331,7 @@ describe("check", () => {
   test("detects the change without applying it", async () => {
     const store = skillStoreDir(parseSource(alpha).slug, "teach");
     expect(await readFile(join(store, "SKILL.md"), "utf8")).toBe(
-      "---\nname: teach\n---\nexplain a slice\n",
+      "---\nname: teach\ndescription: Explain a slice of the codebase.\n---\nPair with /tdd, unlike /wizard.\n",
     );
   });
 
@@ -333,5 +364,56 @@ describe("check", () => {
 
     const results = await checkForUpdates();
     expect(results.find((r) => r.source === orphan)?.status).toBe("unreachable");
+  });
+});
+
+describe("local adaptation", () => {
+  const localEdit = "---\nname: teach\n---\nexplain a slice, our way\n";
+
+  test("an edited store directory reads as modified, with the recorded hash untouched", async () => {
+    const store = skillStoreDir(parseSource(alpha).slug, "teach");
+    const recorded = (await listSkills()).find((s) => s.name === "teach")?.hash;
+    await writeFile(join(store, "SKILL.md"), localEdit);
+
+    const after = (await listSkills()).find((s) => s.name === "teach");
+    expect(after?.drift).toBe("modified");
+    expect(after?.hash).toBe(recorded);
+    expect(after?.localHash).toBe(await hashSkillDir(store));
+    expect(after?.localHash).not.toBe(recorded);
+  });
+
+  test("check answers both questions separately", async () => {
+    const teach = (await checkForUpdates()).find((r) => r.name === "teach");
+    expect(teach?.drift).toBe("modified");
+    expect(teach?.status).toBe("current");
+  });
+
+  test("installing over local changes is refused until forced", async () => {
+    await expect(
+      installFromSource(alpha, async (c) => c.filter((p) => p.endsWith("teach"))),
+    ).rejects.toThrow(/has local changes[\s\S]*--force/);
+    expect((await listSkills()).find((s) => s.name === "teach")?.drift).toBe("modified");
+  });
+
+  test("enabling a modified skill loads the adapted bytes, not upstream's", async () => {
+    await enableSkill(`${alpha}/teach`);
+    expect(await readFile(join(enabledSkillDir("teach"), "SKILL.md"), "utf8")).toBe(localEdit);
+    await disableSkill(`${alpha}/teach`);
+  });
+
+  test("--force takes upstream's version and clears the drift", async () => {
+    await installFromSource(alpha, async (c) => c.filter((p) => p.endsWith("teach")), {
+      force: true,
+    });
+    const after = (await listSkills()).find((s) => s.name === "teach");
+    expect(after?.drift).toBe("clean");
+    expect(await readFile(join(after?.storeDir ?? "", "SKILL.md"), "utf8")).not.toBe(localEdit);
+  });
+
+  test("a store directory deleted out from under the record reads as missing", async () => {
+    const store = skillStoreDir(parseSource(alpha).slug, "teach");
+    await rm(store, { recursive: true, force: true });
+    expect((await listSkills()).find((s) => s.name === "teach")?.drift).toBe("missing");
+    await expect(enableSkill(`${alpha}/teach`)).rejects.toThrow(/missing from the store/);
   });
 });

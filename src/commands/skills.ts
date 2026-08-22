@@ -1,9 +1,11 @@
 import { defineCommand } from "citty";
 import { applyRootOverride, enabledSkillDir, skillsStoreRoot } from "../core/paths.ts";
 import {
+  type CatalogEntry,
   type CheckCache,
   type CheckResult,
   type InstalledSkill,
+  catalogSource,
   checkForUpdates,
   disableSkill,
   enableSkill,
@@ -68,19 +70,27 @@ function buildRows(
   return { rows, header };
 }
 
-/** Read the last `check` observation — never the network, so listing stays instant and offline. */
+/**
+ * Read the last `check` observation — never the network, so listing stays instant and offline. Local
+ * drift is read from disk though, because "we changed this" must never need a network call to see.
+ */
 function updateCell(skill: InstalledSkill, checks: CheckCache): string {
   const seen = checks[`${skill.source}/${skill.name}`];
-  if (!seen) return "unchecked";
-  if (seen.status === "unreachable") return "unreachable";
-  return seen.status === "outdated" ? `moved → ${seen.upstreamHash ?? "?"}` : "current";
+  const upstream = !seen
+    ? "unchecked"
+    : seen.status === "unreachable"
+      ? "unreachable"
+      : seen.status === "outdated"
+        ? `moved → ${seen.upstreamHash ?? "?"}`
+        : "current";
+  return skill.drift === "clean" ? upstream : `${skill.drift} · ${upstream}`;
 }
 
 function preview(skill: InstalledSkill, checks: CheckCache, doc: string): string {
   return [
     `${skill.name}  (${skill.enabled ? "enabled" : "disabled"})`,
     `source:  ${skill.source}`,
-    `hash:    ${skill.hash}`,
+    `hash:    ${skill.hash}${skill.drift === "clean" ? "" : `  (as installed; local ${skill.localHash ?? "gone"})`}`,
     `ref:     ${skill.ref || "(unknown)"}`,
     `score:   ${SCORE_UNSCORED}`,
     `update:  ${updateCell(skill, checks)}`,
@@ -129,6 +139,8 @@ const listCommand = defineCommand({
             hash: s.hash,
             enabled: s.enabled,
             contested: s.contested,
+            drift: s.drift,
+            localHash: s.localHash,
             storeDir: s.storeDir,
             lastCheck: checks[`${s.source}/${s.name}`] ?? null,
           })),
@@ -166,6 +178,11 @@ const installCommand = defineCommand({
     },
     all: { type: "boolean", default: false, description: "Install every skill the source has." },
     enable: { type: "boolean", default: false, description: "Enable each installed skill." },
+    force: {
+      type: "boolean",
+      default: false,
+      description: "Overwrite a store copy that has local changes, discarding them.",
+    },
     root: rootArg,
   },
   async run({ args }) {
@@ -178,7 +195,7 @@ const installCommand = defineCommand({
       .filter(Boolean);
 
     const source = String(args.source);
-    const result = await installFromSource(source, async (candidates) => {
+    const select = async (candidates: string[]): Promise<string[] | null> => {
       if (args.all) return candidates;
       if (wanted.length > 0) {
         const byName = new Map(candidates.map((p) => [skillName({ source, path: p }), p]));
@@ -186,13 +203,13 @@ const installCommand = defineCommand({
         // list, rather than this layer inventing a second "not found" message.
         return wanted.map((n) => byName.get(n) ?? n);
       }
-      const picked = await pickMultipleFromList(candidates, {
+      return pickMultipleFromList(candidates, {
         format: (p) => `${skillName({ source, path: p })}${p === "." ? "" : `  (${p})`}`,
         prompt: "install",
         header: `skills in ${source} — tab to toggle, enter to install`,
       });
-      return picked;
-    });
+    };
+    const result = await installFromSource(source, select, { force: args.force });
 
     if (!result) {
       console.log("servant: nothing selected — no skills installed.");
@@ -210,6 +227,47 @@ const installCommand = defineCommand({
       const swap = swappedOut ? ` (replacing ${swappedOut.source}'s)` : "";
       console.log(`  enabled   ${s.name}${swap}`);
     }
+  },
+});
+
+function catalogTable(skills: CatalogEntry[]): string[] {
+  const wName = Math.max(4, ...skills.map((s) => s.name.length));
+  return skills.map((s) => {
+    const needs = s.mentions.length > 0 ? `  [mentions: ${s.mentions.join(", ")}]` : "";
+    return `${pad(s.name, wName)}  ${truncate(s.description, 96)}${needs}`;
+  });
+}
+
+const truncate = (s: string, max: number): string =>
+  s.length > max ? `${s.slice(0, max - 1)}…` : s;
+
+const catalogCommand = defineCommand({
+  meta: {
+    name: "catalog",
+    description:
+      "Read what a source offers — name, stated purpose, and which sibling skills each one mentions — without installing anything.",
+  },
+  args: {
+    source: {
+      type: "positional",
+      required: true,
+      description: "Git source holding skills: owner/repo, a URL, or a local path.",
+    },
+    json: { type: "boolean", default: false, description: "Machine-readable output." },
+    root: rootArg,
+  },
+  async run({ args }) {
+    applyRootOverride(args.root);
+    const catalog = await catalogSource(String(args.source));
+    if (args.json) {
+      console.log(JSON.stringify(catalog.skills, null, 2));
+      return;
+    }
+    console.log(
+      `${catalog.source.raw} @ ${catalog.ref.slice(0, 12)} — ${catalog.skills.length} skill(s)`,
+    );
+    for (const line of catalogTable(catalog.skills)) console.log(`  ${line}`);
+    console.log(`\nInstall with: servant skills install ${catalog.source.raw} --skill <name>`);
   },
 });
 
@@ -263,17 +321,27 @@ const disableCommand = defineCommand({
 function printCheck(results: CheckResult[]): void {
   const outdated = results.filter((r) => r.status === "outdated");
   const unreachable = results.filter((r) => r.status === "unreachable");
+  const drifted = results.filter((r) => r.drift !== "clean");
   console.log(
-    `servant: checked ${results.length} skill(s) — ${outdated.length} outdated, ${unreachable.length} unreachable`,
+    `servant: checked ${results.length} skill(s) — ${outdated.length} outdated, ${drifted.length} locally changed, ${unreachable.length} unreachable`,
   );
   for (const r of results) {
-    if (r.status === "current") continue;
-    const detail = r.status === "outdated" ? `upstream ${r.upstreamHash}` : "source unreachable";
-    console.log(`  ${r.name}  (${r.source})  ${detail}`);
+    if (r.status === "current" && r.drift === "clean") continue;
+    const upstream =
+      r.status === "outdated"
+        ? `upstream ${r.upstreamHash}`
+        : r.status === "unreachable"
+          ? "source unreachable"
+          : "upstream unchanged";
+    const local = r.drift === "clean" ? "" : `${r.drift} locally · `;
+    console.log(`  ${r.name}  (${r.source})  ${local}${upstream}`);
   }
   if (outdated.length > 0) {
     console.log("\nReaching a new version is an explicit reinstall (ADR-0001):");
-    for (const r of outdated) console.log(`  servant skills install ${r.source} --skill ${r.name}`);
+    for (const r of outdated) {
+      const force = r.drift === "modified" ? " --force  # discards the local changes" : "";
+      console.log(`  servant skills install ${r.source} --skill ${r.name}${force}`);
+    }
   }
 }
 
@@ -301,6 +369,7 @@ const checkCommand = defineCommand({
 
 const SUBCOMMANDS = {
   list: listCommand,
+  catalog: catalogCommand,
   install: installCommand,
   enable: enableCommand,
   disable: disableCommand,

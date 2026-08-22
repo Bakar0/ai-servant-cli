@@ -49,6 +49,8 @@ type ListedSkill = {
   hash: string;
   enabled: boolean;
   contested: boolean;
+  drift: string;
+  storeDir: string;
   lastCheck: { status: string } | null;
 };
 
@@ -71,8 +73,14 @@ beforeAll(async () => {
   await git(source, "config", "user.name", "Test");
   await mkdir(join(source, "tdd"), { recursive: true });
   await mkdir(join(source, "teach"), { recursive: true });
-  await writeFile(join(source, "tdd", "SKILL.md"), "---\nname: tdd\n---\nred, green, refactor\n");
-  await writeFile(join(source, "teach", "SKILL.md"), "---\nname: teach\n---\nexplain a slice\n");
+  await writeFile(
+    join(source, "tdd", "SKILL.md"),
+    "---\nname: tdd\ndescription: Test-driven development.\n---\nred, green, refactor\n",
+  );
+  await writeFile(
+    join(source, "teach", "SKILL.md"),
+    "---\nname: teach\ndescription: Explain a slice.\n---\nGoes well with /tdd.\n",
+  );
   await git(source, "add", "-A");
   await git(source, "commit", "-qm", "initial");
 });
@@ -88,6 +96,25 @@ describe("an empty store", () => {
   test("says so, and says how to fill it", async () => {
     expect(await run("list")).toContain("no skills installed");
     expect(await run("check")).toContain("servant skills install");
+  });
+});
+
+describe("servant skills catalog", () => {
+  test("reads the source without installing anything", async () => {
+    const out = await run("catalog", source);
+    expect(out).toContain("2 skill(s)");
+    expect(out).toContain("Test-driven development.");
+    expect(out).toContain("[mentions: tdd]");
+    expect(out).toContain(`servant skills install ${source} --skill <name>`);
+    expect(await listJson()).toEqual([]);
+  });
+
+  test("--json gives the agent name, path, purpose and siblings", async () => {
+    const skills = JSON.parse(await run("catalog", source, "--json"));
+    expect(skills).toEqual([
+      { name: "tdd", path: "tdd", description: "Test-driven development.", mentions: [] },
+      { name: "teach", path: "teach", description: "Explain a slice.", mentions: ["tdd"] },
+    ]);
   });
 });
 
@@ -156,7 +183,7 @@ describe("servant skills enable / disable", () => {
     const out = await run("enable", "teach");
     expect(out).toContain("enabled teach");
     expect(await readFile(join(enabledSkillDir("teach"), "SKILL.md"), "utf8")).toContain(
-      "explain a slice",
+      "Goes well with /tdd.",
     );
   });
 
@@ -267,5 +294,22 @@ describe("servant skills check", () => {
       "red, green, rewrite",
     );
     expect((await listJson()).find((s) => s.name === "tdd")?.lastCheck).toBeNull();
+  });
+});
+
+describe("local changes at the CLI", () => {
+  test("show up in the update column and in check, without a reinstall", async () => {
+    const store = (await listJson()).find((s) => s.name === "teach")?.storeDir ?? "";
+    await writeFile(join(store, "SKILL.md"), "---\nname: teach\n---\nour own wording\n");
+
+    expect((await run("list")).split("\n").find((r) => r.includes("teach"))).toContain("modified");
+    expect(await run("check")).toContain("1 locally changed");
+    expect(await run("check")).toContain("modified locally");
+  });
+
+  test("block a reinstall until --force, which says what it discards", async () => {
+    await expect(run("install", source, "--skill", "teach")).rejects.toThrow(/--force/);
+    await run("install", source, "--skill", "teach", "--force");
+    expect((await listJson()).find((s) => s.name === "teach")?.drift).toBe("clean");
   });
 });
