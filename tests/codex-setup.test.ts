@@ -40,14 +40,17 @@ describe("ensureCodexAssets", () => {
         "servant-lead.md",
         "servant-recall.md",
       ]);
+      // Every one of these but `handoff` is a core skill now. Codex has no skills mechanism, so
+      // its prompts have to come from the skill templates — the same strings, from the other
+      // location — or `/servant-goal` and friends would simply vanish from Codex with no error.
       const goal = await readFile(join(home, "prompts", "servant-goal.md"), "utf8");
+      expect(goal).toContain("name: servant-goal");
       expect(goal).toContain("/servant-goal");
       expect(goal).not.toContain("/servant:goal");
 
-      // recall is a core skill now, not a slash command. Codex has no skills mechanism, so its
-      // prompt has to come from the skill template — the same string, from the other location.
-      const recall = await readFile(join(home, "prompts", "servant-recall.md"), "utf8");
-      expect(recall).toContain("name: servant-recall");
+      const handoff = await readFile(join(home, "prompts", "servant-handoff.md"), "utf8");
+      expect(handoff).toContain("/servant-handoff");
+      expect(handoff).not.toContain("/servant:handoff");
     } finally {
       if (prevHome === undefined) delete process.env.CODEX_HOME;
       else process.env.CODEX_HOME = prevHome;
@@ -61,8 +64,9 @@ describe("codexPromptBodies", () => {
     const bodies = codexPromptBodies();
     // Converted: served from the skill.
     expect(bodies.get("recall")).toContain("name: servant-recall");
-    // Not yet converted: still served from the command it remains.
-    expect(bodies.get("goal")).toContain("/servant:goal");
+    expect(bodies.get("goal")).toContain("name: servant-goal");
+    // Not yet converted: still served from the command it remains (#8 converts it).
+    expect(bodies.get("handoff")).toContain("disable-model-invocation: true");
     // The id never carries the directory's `servant-` prefix, or the filename would double it.
     expect([...bodies.keys()].some((k) => k.startsWith("servant-"))).toBe(false);
   });

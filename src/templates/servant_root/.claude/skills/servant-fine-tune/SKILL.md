@@ -1,15 +1,15 @@
 ---
-description: Insights analyst — read servant's own metrics, investigate them, and tune its instructions through the deterministic overlay path.
-argument-hint: [aspect]
+name: servant-fine-tune
+description: Read servant's own measured insights — context growth, friction, knowledge health — investigate what they say, and tune servant's instructions through the fine-tune overlay path. Use when the user asks how servant itself is doing, why a session cost so much, or wants to change how servant behaves by default.
 ---
 
-# /servant:fine-tune
+# /servant-fine-tune
 
 You are the servant **insights analyst**. You close the loop **observe → understand → act**: pull
 servant's own measured insights, narrate what they say, help the user investigate the surprising
 parts, and — only on explicit approval — tune servant's instructions to act on what the data showed.
 
-Servant ships its instruction assets (the root `CLAUDE.md`, the `/servant:*` slash commands, the
+Servant ships its instruction assets (the root `CLAUDE.md`, the core `servant-*` skills, the
 headless memory extractor) as CLI-owned templates that are overwritten on every update. **Tuning**
 lets the user layer durable customizations on top: each tunable **aspect** has a user-owned overlay
 at `~/.ai_servant/fine-tune/<aspect>.md` that is **appended after** the shipped base, so the base
@@ -29,7 +29,7 @@ Aspects: `general` · `memory-extraction` · `goal` · `recall`.
 ## Core rule: nothing is written without explicit approval
 
 No overlay is written until the user has seen the **exact draft** and approved it. Draft, read back,
-revise, then write — same discipline as `/servant:goal`. This holds in both modes.
+revise, then write — same discipline as `/servant-goal`. This holds in both modes.
 
 ---
 
@@ -118,9 +118,9 @@ Run `servant fine-tune --list` to see the aspects and which are already customiz
 | Aspect | What it tunes | Base asset to read for current behavior |
 |--------|---------------|------------------------------------------|
 | `general` | Workspace conventions every agent loads | `CLAUDE.md` |
-| `memory-extraction` | How sessions distill into the knowledge base | `.claude/commands/servant/extract-memories.md` (also the headless extractor) |
-| `goal` | How a workspace's GOAL.md is defined | `.claude/commands/servant/goal.md` |
-| `recall` | How prior knowledge is searched/surfaced | `.claude/commands/servant/recall.md` |
+| `memory-extraction` | How sessions distill into the knowledge base | `.claude/skills/servant-extract-memories/SKILL.md` (also the headless extractor) |
+| `goal` | How a workspace's GOAL.md is defined | `.claude/skills/servant-goal/SKILL.md` |
+| `recall` | How prior knowledge is searched/surfaced | `.claude/skills/servant-recall/SKILL.md` |
 
 If `$ARGUMENTS` named an aspect (fast path), or the analysis pointed at one, use it. Otherwise
 present the list and let the user choose.
@@ -165,14 +165,14 @@ OVERLAY
 ### 6. Report
 
 Tell the user the overlay is saved, which assets it now feeds (the command prints this), and that it
-is live on the **next `servant spawn`**. Note they can run `/servant:fine-tune` again to refine, or
+is live on the **next `servant spawn`**. Note they can run `/servant-fine-tune` again to refine, or
 `servant fine-tune <aspect> --reset` to revert to defaults.
 
 ## Notes
 
-- **`memory-extraction` feeds two surfaces** — the in-session `/servant:extract-memories` command
+- **`memory-extraction` feeds two surfaces** — the in-session `/servant-extract-memories` skill
   *and* the headless extractor. One overlay tunes both; no need to do anything special.
-- **Never hand-edit** `~/.ai_servant/.claude/commands/...`, the root `CLAUDE.md`, or any file under
+- **Never hand-edit** `~/.ai_servant/.claude/skills/...`, the root `CLAUDE.md`, or any file under
   `insights/` — the assets are regenerated from base + overlay on every sync, and insights data is
   servant-owned. All customization goes through the overlay write path above.
 - **Read insights data; never recompute it.** `servant insights` owns measurement and rendering; the

@@ -32,6 +32,7 @@ import {
   skillName,
   reconcileEnabledCopies,
 } from "../src/core/skills.ts";
+import { getAspect, resetOverlay, writeOverlay } from "../src/core/fine-tune.ts";
 
 let scratch: string;
 let servantRoot: string;
@@ -489,6 +490,25 @@ describe("core skills — the ones that ship inside the binary", () => {
     expect((await coreSkills()).find((s) => s.name === "servant-recall")?.drift).toBe("missing");
     await ensureCoreSkills();
     expect((await coreSkills()).find((s) => s.name === "servant-recall")?.drift).toBe("clean");
+  });
+
+  // A core skill is a delivered instruction asset like the root CLAUDE.md, so the fine-tune overlay
+  // has to reach it — and the listing has to hash what was actually written, or an overlaid core
+  // skill would read as hand-edited forever.
+  test("a fine-tune overlay is composed in, and the copy still reads clean", async () => {
+    const recall = getAspect("recall");
+    if (!recall) throw new Error("missing aspect recall");
+    try {
+      await writeOverlay(recall, "always search by tag first");
+      await ensureCoreSkills();
+      const doc = await readFile(join(enabledSkillDir("servant-recall"), "SKILL.md"), "utf8");
+      expect(doc).toContain("servant recall"); // base
+      expect(doc).toContain("always search by tag first"); // overlay
+      expect((await coreSkills()).find((s) => s.name === "servant-recall")?.drift).toBe("clean");
+    } finally {
+      await resetOverlay("recall");
+      await ensureCoreSkills();
+    }
   });
 
   test("reconcile leaves them alone — its restore path is for installed copies", async () => {

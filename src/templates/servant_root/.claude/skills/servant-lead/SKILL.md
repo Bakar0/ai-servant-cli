@@ -1,9 +1,9 @@
 ---
-description: Report where the whole initiative stands — in flight, ready, blocked, stale — and redirect a running session from there.
-argument-hint: "[optional: a question about the initiative, or an instruction to pass on]"
+name: servant-lead
+description: Report where the whole initiative stands — what is in flight, ready, blocked, or claimed by a session that is gone — and redirect a running session from there. Use when the user asks how the work is going, who is on what, what to pick up next, or wants an instruction passed to another session.
 ---
 
-# /servant:lead
+# /servant-lead
 
 Answer "where is this whole thing up to?" in one view, and act on the answer without changing tools.
 

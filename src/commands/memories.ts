@@ -148,7 +148,7 @@ export const memoriesCommand = defineCommand({
       console.log(
         "\nNo notes captured yet — they're written when a servant session ends (auto), or via",
       );
-      console.log("/servant:extract-memories in-session. Then browse them here.");
+      console.log("/servant-extract-memories in-session. Then browse them here.");
       return;
     }
 

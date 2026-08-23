@@ -13,9 +13,9 @@ import {
 
 // First message for an agent launched into a workspace whose goal isn't defined yet
 // (and no task was given): have it define GOAL.md before anything else. Phrased as
-// natural language (not a bare `/servant:goal`) so it reliably triggers the command.
+// natural language (not a bare `/servant-goal`) so it reliably triggers the skill.
 const GOAL_BOOTSTRAP_PROMPT =
-  "This servant workspace has no goal defined yet. Run the /servant:goal command to interview me and define the workspace's GOAL.md before doing anything else.";
+  "This servant workspace has no goal defined yet. Run the /servant-goal skill to interview me and define the workspace's GOAL.md before doing anything else.";
 
 export interface LaunchWorkspaceSessionOptions {
   workspace?: string | undefined;

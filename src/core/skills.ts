@@ -10,12 +10,14 @@
 import { existsSync } from "node:fs";
 import { cp, mkdir, mkdtemp, readdir, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { basename, dirname, join, resolve } from "node:path";
+import { basename, dirname, join, relative, resolve } from "node:path";
 import { $ } from "bun";
 import { TEMPLATES } from "../templates/index.generated.ts";
 import { contentStamp } from "./content-stamp.ts";
+import { composeAssetForRel } from "./fine-tune.ts";
 import {
   LEGACY_ENABLED_SKILL_PREFIX,
+  aiServantRoot,
   enabledSkillDir,
   servantSkillsDir,
   skillStoreDir,
@@ -288,6 +290,34 @@ export function isCoreSkillName(name: string): boolean {
 }
 
 /**
+ * Where a core skill's file lands, relative to the servant root — the key a fine-tune aspect names.
+ */
+function coreSkillAssetRel(name: string, rel: string): string {
+  return relative(aiServantRoot(), join(enabledSkillDir(name), rel));
+}
+
+/**
+ * A core skill's shipped files with the user's fine-tune overlay composed in — the bytes that are
+ * actually written, and therefore the bytes to hash.
+ *
+ * A core skill is a delivered instruction asset like the root `CLAUDE.md`, so the same overlay path
+ * applies (`fine-tune.ts`): the base keeps updating from the binary while the user's customization
+ * survives appended after it. Hashing the *composed* form is what keeps `drift` honest — hashing the
+ * raw template would report every overlaid core skill as hand-edited, forever.
+ */
+async function composedCoreSkillFiles(
+  name: string,
+  files: readonly SkillFile[],
+): Promise<SkillFile[]> {
+  return Promise.all(
+    files.map(async (f) => ({
+      rel: f.rel,
+      content: await composeAssetForRel(coreSkillAssetRel(name, f.rel), f.content),
+    })),
+  );
+}
+
+/**
  * Write every core skill into the servant skills directory, and the only writer that does.
  *
  * Called from `ensureServantAssets` (so a spawn refreshes them) and from the `servant skills`
@@ -302,7 +332,7 @@ export async function ensureCoreSkills(): Promise<string[]> {
   for (const [name, files] of coreSkillFiles()) {
     const dir = enabledSkillDir(name);
     let touched = false;
-    for (const f of files) {
+    for (const f of await composedCoreSkillFiles(name, files)) {
       const dest = join(dir, f.rel);
       const existing = await readTextOr(dest, null);
       if (existing === f.content) continue;
@@ -334,7 +364,7 @@ export async function coreSkills(): Promise<InstalledSkill[]> {
   const rows = await Promise.all(
     [...coreSkillFiles()].map(async ([name, files]) => {
       const dir = enabledSkillDir(name);
-      const hash = hashFiles(files);
+      const hash = hashFiles(await composedCoreSkillFiles(name, files));
       const localHash = existsSync(dir) ? await hashSkillDir(dir) : null;
       return {
         source: CORE_SOURCE,

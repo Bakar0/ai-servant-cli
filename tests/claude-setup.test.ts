@@ -27,12 +27,13 @@ const { aiServantRoot, claudeDir, claudeCommandsDir, servantSkillsDir } = await 
 );
 
 describe("ensureServantAssets", () => {
-  test("creates .claude/commands/servant/goal.md under the servant root", async () => {
+  test("ships goal as a core skill under the servant root", async () => {
     await ensureServantAssets();
-    const target = join(claudeCommandsDir(), "servant", "goal.md");
+    const target = join(servantSkillsDir(), "servant-goal", "SKILL.md");
     const s = await stat(target);
     expect(s.isFile()).toBe(true);
     const body = await readFile(target, "utf8");
+    expect(body).toContain("name: servant-goal");
     expect(body).toContain("GOAL.md");
     expect(body).toContain("servant:goal:unfilled");
   });
@@ -50,7 +51,7 @@ describe("ensureServantAssets", () => {
 
   test("is idempotent and resyncs when content drifts", async () => {
     await ensureServantAssets();
-    const target = join(claudeCommandsDir(), "servant", "goal.md");
+    const target = join(aiServantRoot(), "CLAUDE.md");
     const original = await readFile(target, "utf8");
 
     // user / drift modifies the file
@@ -77,14 +78,38 @@ describe("ensureServantAssets", () => {
 
     expect(await Bun.file(legacyGoal).exists()).toBe(false);
     expect(await Bun.file(legacyDelegate).exists()).toBe(false);
-    expect(await Bun.file(join(commands, "servant", "goal.md")).exists()).toBe(true);
     // delegate is retired — its namespaced command must be removed, not resynced.
     expect(await Bun.file(retiredDelegate).exists()).toBe(false);
+    // handoff is the last command standing, so the namespaced sync itself is still alive.
+    expect(await Bun.file(join(commands, "servant", "handoff.md")).exists()).toBe(true);
   });
 
-  test("ships the extract-memories slash command", async () => {
+  // A command that became a skill would otherwise linger from an older install and shadow it with
+  // a stale body — the sync never deletes on its own, so each conversion is swept by name.
+  test("sweeps every command that became a core skill", async () => {
+    const commands = claudeCommandsDir();
+    await mkdir(join(commands, "servant"), { recursive: true });
+    const converted = ["goal", "lead", "extract-memories", "fine-tune", "recall"];
+    for (const name of converted) {
+      await writeFile(
+        join(commands, "servant", `${name}.md`),
+        "stale copy from an older servant\n",
+      );
+    }
+
     await ensureServantAssets();
-    const extract = join(claudeCommandsDir(), "servant", "extract-memories.md");
+
+    for (const name of converted) {
+      expect(await Bun.file(join(commands, "servant", `${name}.md`)).exists()).toBe(false);
+      expect(await Bun.file(join(servantSkillsDir(), `servant-${name}`, "SKILL.md")).exists()).toBe(
+        true,
+      );
+    }
+  });
+
+  test("ships extract-memories as a core skill", async () => {
+    await ensureServantAssets();
+    const extract = join(servantSkillsDir(), "servant-extract-memories", "SKILL.md");
     expect(await readFile(extract, "utf8")).toContain("--reconcile");
   });
 
@@ -104,10 +129,10 @@ describe("ensureServantAssets", () => {
 
   // A skill nobody can invoke has not shipped, so the asset-sync path is asserted per command
   // rather than trusted — template changes are also inert until the binary is rebuilt.
-  test("ships the /servant:lead initiative report", async () => {
+  test("ships the /servant-lead initiative report", async () => {
     await ensureServantAssets();
-    const lead = await readFile(join(claudeCommandsDir(), "servant", "lead.md"), "utf8");
-    expect(lead).toContain("/servant:lead");
+    const lead = await readFile(join(servantSkillsDir(), "servant-lead", "SKILL.md"), "utf8");
+    expect(lead).toContain("/servant-lead");
     // The join it reports from, and the rule that keeps redirecting safe.
     expect(lead).toContain("servant tasks --frontier");
     expect(lead).toContain("safe point");

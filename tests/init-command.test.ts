@@ -48,7 +48,7 @@ describe("runInit", () => {
     expect(cfg.repoSearchRoots).toEqual(["~"]);
     expect(await Bun.file(join(scratch, "CLAUDE.md")).exists()).toBe(true);
     expect(
-      await Bun.file(join(scratch, ".claude", "commands", "servant", "goal.md")).exists(),
+      await Bun.file(join(scratch, ".claude", "skills", "servant-goal", "SKILL.md")).exists(),
     ).toBe(true);
   });
 

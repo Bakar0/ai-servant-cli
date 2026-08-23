@@ -17,9 +17,16 @@ const SERVANT_ROOT_PREFIX = "servant_root/";
 // we know we retired: the pre-namespace flat copies, plus `servant/delegate.md` — delegation is
 // now the mattpocock `/handoff` → `servant spawn` flow, so the bespoke command is gone.
 const LEGACY_FLAT_COMMANDS = ["goal.md", "delegate.md"];
-// `recall` is now a core *skill* (`servant-recall`), so the command it used to be must go — two
-// copies of the same instructions, one of them stale, is worse than either alone.
-const RETIRED_NAMESPACED_COMMANDS = ["servant/delegate.md", "servant/recall.md"];
+// Every core unit except `handoff` is now a core *skill* (`servant-<name>`), so the command it used
+// to be must go — two copies of the same instructions, one of them stale, is worse than either alone.
+const RETIRED_NAMESPACED_COMMANDS = [
+  "servant/delegate.md",
+  "servant/recall.md",
+  "servant/goal.md",
+  "servant/lead.md",
+  "servant/extract-memories.md",
+  "servant/fine-tune.md",
+];
 
 // Core skills also live under `servant_root/`, but the generic sync below is not their writer:
 // `ensureCoreSkills` is, so that the `servant skills` commands can refresh them without dragging

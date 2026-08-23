@@ -54,7 +54,7 @@ servant ticket show <n>      # read one, with its blockers and comments
 
 Every operation — labels, comments, closing, blocking, claiming — is in `docs/agents/issue-tracker.md`, including all of the `/wayfinder` ones. **Do not** create per-workspace `briefs/` or `plans/` files, and **do not** write blocking into a ticket body as prose: `servant ticket block <n> --on <m>` is the only representation, and a cycle is rejected as you add it.
 
-To see where the whole initiative stands rather than one ticket — what is in flight and under which session, what is ready, what is blocked, and which Claims have gone stale — run **`/servant:lead`**. It joins the board, the Claims, the session registry and the transcripts into one report, and can redirect a running session from there. It is a skill, not a session type: any session runs it and leads for that turn.
+To see where the whole initiative stands rather than one ticket — what is in flight and under which session, what is ready, what is blocked, and which Claims have gone stale — run **`/servant-lead`**. It joins the board, the Claims, the session registry and the transcripts into one report, and can redirect a running session from there. It is a skill, not a session type: any session runs it and leads for that turn.
 
 ## The workspace goal
 
@@ -64,10 +64,10 @@ workspace `CLAUDE.md` imports it, so it is **already in your context every sessi
 guide scope and priority decisions; if a request conflicts with it, surface that.
 
 - **Offer, don't block.** If the loaded `GOAL.md` still carries the `servant:goal:unfilled`
-  marker, the goal hasn't been defined yet. Briefly offer to run `/servant:goal` to define it — but if
+  marker, the goal hasn't been defined yet. Briefly offer to run `/servant-goal` to define it — but if
   the user gives you a task, just do the task. Never gate work on defining the goal.
 - **Changes need approval.** `GOAL.md` only changes by direct user approval. Never edit it
-  silently — propose the change and let the user confirm. The `/servant:goal` command handles the
+  silently — propose the change and let the user confirm. The `/servant-goal` skill handles the
   interview and writes only after sign-off.
 - Keep it intent-only: design decisions belong in `docs/adr/`, operating instructions here
   in `CLAUDE.md` — `GOAL.md` should not duplicate either.
@@ -103,4 +103,4 @@ servant spawn -w <name> [-r]    # new workspace / tab; -r mounts repo worktrees
 servant resume                  # re-attach to an earlier session
 ```
 
-To define or amend the workspace's intent, use the `/servant:goal` slash command — it interviews the user and writes `GOAL.md` only after approval.
+To define or amend the workspace's intent, use the `/servant-goal` skill — it interviews the user and writes `GOAL.md` only after approval.

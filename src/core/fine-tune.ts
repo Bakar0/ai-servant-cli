@@ -9,7 +9,8 @@ import { fineTuneAspectPath } from "./paths.ts";
 // (additively) after the CLI-shipped base of every asset the aspect feeds, so:
 //   - CLI updates to the base always flow through (the base is never forked), and
 //   - the overlay survives untouched and takes precedence by natural language.
-// Composition happens in `ensureServantAssets()` for markdown assets and at runtime in
+// Composition happens in `ensureServantAssets()` for plain markdown assets, in
+// `ensureCoreSkills()` for the core skills (their own writer), and at runtime in
 // `buildExtractionPrompt()` for the headless extraction prompt.
 
 export interface FineTuneAspect {
@@ -33,20 +34,20 @@ export const FINE_TUNE_ASPECTS: readonly FineTuneAspect[] = [
     id: "memory-extraction",
     title: "Memory extraction",
     blurb: "How sessions distill durable knowledge into the knowledge base.",
-    assets: [".claude/commands/servant/extract-memories.md"],
+    assets: [".claude/skills/servant-extract-memories/SKILL.md"],
     feedsExtractionPrompt: true,
   },
   {
     id: "goal",
     title: "Goal interview",
     blurb: "How a workspace's GOAL.md is defined and amended.",
-    assets: [".claude/commands/servant/goal.md"],
+    assets: [".claude/skills/servant-goal/SKILL.md"],
   },
   {
     id: "recall",
     title: "Recall",
     blurb: "How prior servants' knowledge is searched and surfaced.",
-    assets: [".claude/commands/servant/recall.md"],
+    assets: [".claude/skills/servant-recall/SKILL.md"],
   },
 ];
 
