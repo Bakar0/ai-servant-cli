@@ -284,7 +284,7 @@ describe("ensureWorkspaceDir", () => {
     expect(body).toBe("# Goal\n\n## Mission\nShip the thing.\n");
   });
 
-  test("scaffolds CONTEXT.md, docs/agents/* skills config, and a docs/adr/ dir", async () => {
+  test("scaffolds CONTEXT.md, the docs/agents/* board contract, and a docs/adr/ dir", async () => {
     const name = `scaffold-${process.pid}-${Date.now()}`;
     const dir = await ensureWorkspaceDir(name);
 
@@ -295,7 +295,7 @@ describe("ensureWorkspaceDir", () => {
     expect(existsSync(join(dir, "briefs"))).toBe(false);
     expect(existsSync(join(dir, "plans"))).toBe(false);
 
-    // mattpocock skills config, pointed at this workspace's own board rather than at `gh`.
+    // The published board contract, pointed at this workspace's own board rather than at `gh`.
     const tracker = await readFile(join(dir, "docs", "agents", "issue-tracker.md"), "utf8");
     expect(tracker).toContain("servant ticket new");
     expect(tracker).toContain(`--ws ${name}`);
