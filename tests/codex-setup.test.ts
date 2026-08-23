@@ -39,6 +39,7 @@ describe("ensureCodexAssets", () => {
         "servant-handoff.md",
         "servant-lead.md",
         "servant-recall.md",
+        "servant-skills.md",
       ]);
       // Every one of these but `handoff` is a core skill now. Codex has no skills mechanism, so
       // its prompts have to come from the skill templates — the same strings, from the other

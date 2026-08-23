@@ -138,6 +138,35 @@ describe("ensureServantAssets", () => {
     expect(lead).toContain("safe point");
   });
 
+  // The judgment the CLI deliberately does not hold lives in this skill's prose, so the prose is
+  // what has to be asserted: an edit that empties the source list leaves a manager that manages
+  // nothing, and the CLI cannot fail in its place.
+  test("ships the /servant-skills manager, and the judgment it carries", async () => {
+    await ensureServantAssets();
+    const manager = await readFile(join(servantSkillsDir(), "servant-skills", "SKILL.md"), "utf8");
+    expect(manager).toContain("name: servant-skills");
+    // The known-source list — a convenience that lives here and nowhere in `src/`.
+    for (const source of [
+      "anthropics/skills",
+      "mattpocock/skills",
+      "cursor/plugins",
+      "obra/superpowers",
+    ]) {
+      expect(manager).toContain(source);
+    }
+    // The whole contract with the CLI, and no verb beyond it.
+    for (const verb of ["catalog", "install", "enable", "disable", "check"]) {
+      expect(manager).toContain(`servant skills ${verb}`);
+    }
+    // The four board-coupled skills are entries here, not servant's own.
+    expect(manager).toContain("`to-spec`, `to-tickets`, `implement` and `code-review`");
+    // Each drift state, and that a modified one is protected rather than repaired.
+    for (const state of ["`clean`", "`modified`", "`missing`"]) expect(manager).toContain(state);
+    expect(manager).toContain("--force");
+    // The line the whole initiative rests on.
+    expect(manager).toContain("Never put a skill's name in `src/`");
+  });
+
   test("ships the /servant:handoff continuation skill", async () => {
     await ensureServantAssets();
     const handoff = await readFile(join(claudeCommandsDir(), "servant", "handoff.md"), "utf8");
