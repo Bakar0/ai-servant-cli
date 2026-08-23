@@ -45,8 +45,9 @@ describe("ensureServantAssets", () => {
     expect(s.isFile()).toBe(true);
     const body = await readFile(target, "utf8");
     expect(body).toContain("Servant Workspace");
-    expect(body).toContain("mattpocock");
     expect(body).toContain("servant tasks");
+    // servant depends on no skill plugin and installs none — see tests/conventions-doc.test.ts.
+    expect(body).not.toContain("mattpocock");
   });
 
   test("is idempotent and resyncs when content drifts", async () => {

@@ -8,7 +8,7 @@ import {
   loadConfig,
   saveConfig,
 } from "../core/config.ts";
-import { ensureHubClone, ensurePluginInstalled } from "../core/hub-setup.ts";
+import { ensureHubClone } from "../core/hub-setup.ts";
 import { aiServantRoot, applyRootOverride, configPath, isDefaultRoot } from "../core/paths.ts";
 import { confirm } from "../ui/prompts.ts";
 import { STATUSLINE_EXAMPLE, installStatusline } from "./statusline.ts";
@@ -70,10 +70,10 @@ export async function runInit(opts: InitOpts = {}): Promise<void> {
     "servant: synced workspace assets (CLAUDE.md, core servant-* skills, knowledge SessionEnd hook)\n",
   );
 
-  // --- Hub + skills (network; only against the real root, best-effort). ---
+  // --- Hub (network; only against the real root, best-effort). No skill is installed here:
+  // the seven core skills ship in the binary, and everything else is `servant skills install`. ---
   if (isDefaultRoot()) {
     await ensureHubClone(cfg.hubRepo, (s) => out.write(`${s}\n`));
-    await ensurePluginInstalled((s) => out.write(`${s}\n`));
   }
 
   // --- Status line (offered, with a preview). ---

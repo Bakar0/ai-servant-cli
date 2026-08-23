@@ -3,13 +3,14 @@ import { readdir } from "node:fs/promises";
 import { $ } from "bun";
 import { hubRemoteUrl, hubRoot } from "./paths.ts";
 
-// One-time, network-touching setup for the servant hub + skills. Both functions are best-effort:
-// they never throw, so `servant init` completes offline / unauthenticated and just reports what it
-// couldn't do. Callers gate these on paths.isDefaultRoot() so throwaway `--root`/test setups never
-// reach the network.
-
-const MARKETPLACE = "mattpocock/skills";
-const PLUGIN = "mattpocock-skills@mattpocock";
+// One-time, network-touching setup for the servant hub. Best-effort: it never throws, so
+// `servant init` completes offline / unauthenticated and just reports what it couldn't do. Callers
+// gate it on paths.isDefaultRoot() so throwaway `--root`/test setups never reach the network.
+//
+// `servant init` used to also `claude plugin install` a specific third-party skill plugin from here.
+// It no longer installs any skill: a skill is data servant manages, not behavior it knows, so the
+// CLI names no skill and no source. Installing one is `servant skills install <source>`, and which
+// sources are worth trying is prose in the `servant-skills` skill.
 
 type Log = (line: string) => void;
 
@@ -42,30 +43,5 @@ export async function ensureHubClone(hubRepo: string, log: Log = () => {}): Prom
   else
     log(
       `servant: could not clone hub ${hubRepo} (offline or no access) — \`servant tasks\` will have no hub to read`,
-    );
-}
-
-/**
- * Install the mattpocock-skills plugin (user-global, idempotent). Adds the marketplace then
- * installs the plugin; both are safe to re-run. Best-effort — a missing `claude` CLI or offline
- * run just logs and moves on.
- */
-export async function ensurePluginInstalled(log: Log = () => {}): Promise<void> {
-  const list = await $`claude plugin list`.nothrow().quiet();
-  if (list.exitCode === 0 && list.stdout.toString().includes("mattpocock-skills")) {
-    return; // already installed
-  }
-  if (list.exitCode !== 0) {
-    log("servant: `claude` CLI not available — skipped installing mattpocock-skills");
-    return;
-  }
-  await $`claude plugin marketplace add ${MARKETPLACE}`.nothrow().quiet();
-  const inst = await $`claude plugin install ${PLUGIN}`.nothrow().quiet();
-  if (inst.exitCode === 0) log(`servant: installed mattpocock-skills plugin (${PLUGIN})`);
-  else
-    log(
-      "servant: could not install mattpocock-skills plugin — run `claude plugin install " +
-        PLUGIN +
-        "` manually",
     );
 }

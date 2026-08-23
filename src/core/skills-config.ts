@@ -231,8 +231,9 @@ export function renderAgentSkillsBlock(workspace: string): string {
   return `${AGENT_SKILLS_MARKER}
 ## Agent skills
 
-The mattpocock engineering skills are installed (plugin \`mattpocock-skills\`). Their per-workspace
-config lives under \`docs/agents/\` — read the relevant file when a skill needs it.
+\`docs/agents/\` is the board's **public contract**: what servant publishes to whatever instruction
+set is installed here, written so a skill that has never seen this CLI can still operate the board.
+Read the relevant file when you need it; it is generated, so edits there are overwritten.
 
 ### Issue tracker
 
