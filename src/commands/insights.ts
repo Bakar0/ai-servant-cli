@@ -16,11 +16,13 @@ import {
   commitInsights,
   ensureInsightsStore,
   getOrComputeMetrics,
+  readAllJudgments,
   readChanges,
   readJudgment,
   rebuildInsightsIndex,
   writeDashboard,
 } from "../core/insights/store.ts";
+import { describeUnitScore, rankUnits, summarizeUnits } from "../core/insights/unit-scores.ts";
 import { openInDefaultApp } from "../core/open.ts";
 import { applyRootOverride } from "../core/paths.ts";
 import { readWorkspaceAgent, resolveWorkspaceName } from "../core/workspace.ts";
@@ -132,6 +134,13 @@ export const insightsCommand = defineCommand({
       required: false,
       description: "Focus one area: tokens | instructions | knowledge.",
     },
+    units: {
+      type: "boolean",
+      required: false,
+      default: false,
+      description:
+        "Score the instruction units — skills and instruction docs — by whether loading them earned their cost. Worst first. Aggregated on read from the per-session judgments.",
+    },
     json: {
       type: "boolean",
       required: false,
@@ -202,6 +211,29 @@ export const insightsCommand = defineCommand({
         sessionId,
       });
       console.log(args.json ? JSON.stringify(record, null, 2) : renderSessionTimeline(record));
+      return;
+    }
+
+    // The units axis: one line per instruction unit, aggregated across every session that judged it.
+    // Ranked worst-first, because the question it answers is which units to stop loading.
+    if (args.units) {
+      const scores = summarizeUnits(await readAllJudgments());
+      if (args.json) {
+        console.log(JSON.stringify(rankUnits(scores), null, 2));
+        return;
+      }
+      const ranked = rankUnits(scores);
+      if (ranked.length === 0) {
+        console.log(
+          "servant: no instruction unit has been judged yet — the units axis fills in as sessions end.",
+        );
+        return;
+      }
+      const wId = Math.max(4, ...ranked.map((u) => u.id.length));
+      const wKind = Math.max(4, ...ranked.map((u) => u.kind.length));
+      for (const u of ranked) {
+        console.log(`${u.id.padEnd(wId)}  ${u.kind.padEnd(wKind)}  ${describeUnitScore(u)}`);
+      }
       return;
     }
 

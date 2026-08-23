@@ -14,7 +14,7 @@ import {
   browseSkills,
   skillsCommand,
 } from "../src/commands/skills.ts";
-import { enabledSkillDir, setRootOverride } from "../src/core/paths.ts";
+import { enabledSkillDir, insightsJudgmentsDir, setRootOverride } from "../src/core/paths.ts";
 
 let scratch: string;
 let servantRoot: string;
@@ -246,6 +246,41 @@ describe("servant skills list", () => {
     expect(rows.find((r) => r.includes("teach"))).toMatch(/^off\s/);
     // Listing never touches the network, so update state reads as unchecked until `check` runs.
     expect(rows.every((r) => r.includes("unchecked"))).toBe(true);
+  });
+});
+
+describe("the score column", () => {
+  /** Write a per-session judgment record carrying unit verdicts, the way the drainer would. */
+  async function judgeSession(sessionId: string, verdict: string): Promise<void> {
+    await mkdir(insightsJudgmentsDir(), { recursive: true });
+    await writeFile(
+      join(insightsJudgmentsDir(), `${sessionId}.json`),
+      JSON.stringify({
+        schema: 2,
+        sessionId,
+        judgments: [],
+        units: [{ id: "tdd", kind: "skill", invoked: true, verdict, why: "drove the work" }],
+      }),
+    );
+  }
+
+  test("reads the session evaluator's unit verdicts, netted over the sessions that judged them", async () => {
+    await judgeSession("aaaaaaaa-0000-0000-0000-000000000001", "justified");
+    await judgeSession("aaaaaaaa-0000-0000-0000-000000000002", "wasteful");
+    await judgeSession("aaaaaaaa-0000-0000-0000-000000000003", "justified");
+    try {
+      const rows = (await run("list")).split("\n");
+      // two justified against one wasteful, over three judged sessions.
+      expect(rows.find((r) => r.includes("tdd"))).toMatch(/\s\+1\/3\s/);
+      // a skill no session has judged still reads as unscored, not as neutral.
+      expect(rows.find((r) => r.includes("teach"))).toMatch(/\s—\s/);
+      const scored = JSON.parse(await run("list", "--json")).find(
+        (s: { name: string }) => s.name === "tdd",
+      );
+      expect(scored.score).toMatchObject({ sessions: 3, justified: 2, wasteful: 1, net: 1 });
+    } finally {
+      await rm(insightsJudgmentsDir(), { recursive: true, force: true });
+    }
   });
 });
 
