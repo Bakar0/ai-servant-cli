@@ -11,35 +11,35 @@ You are running inside a **servant workspace** at `~/.ai_servant/workspaces/<nam
   docs/
     adr/
       NNNN-<slug>.md      # architecture decision records
-    agents/               # per-workspace config the engineering skills read (auto-generated)
-      issue-tracker.md    # how/where tickets are filed — this workspace's board
-      domain.md           # domain-doc consumer rules (CONTEXT.md + docs/adr/)
-      triage-labels.md    # triage label vocabulary
+    agents/               # the board's public contract, for any instruction set (auto-generated)
+      issue-tracker.md    # every board operation, written for a reader new to servant
+      domain.md           # where the domain docs are (CONTEXT.md + docs/adr/) and when to read them
+      triage-labels.md    # the triage label vocabulary
   repos/                  # mounted repo worktrees (one per `servant repo add` / `spawn -r`)
 ```
 
 - **Tasks and plans are tickets on the workspace's board** — not files in the workspace. See "The task tracker" below.
 - **`GOAL.md`** holds the workspace's intent — what it's ultimately for. See "The workspace goal" below.
 - **`CONTEXT.md`** holds the workspace's shared language: domain terms the ADRs, specs, and tickets reference.
-- **`docs/adr/`** holds architecture decision records. **`docs/agents/`** holds the engineering-skills config (auto-generated; you rarely edit it by hand).
+- **`docs/adr/`** holds architecture decision records. **`docs/agents/`** is the board's **public contract** — auto-generated prose that tells any instruction set, including one that has never seen servant, how to operate this board. Read it; don't edit it (it is rewritten when servant's copy moves).
 
-## The engineering workflow (mattpocock skills)
+## Skills
 
-This workspace uses the **mattpocock engineering skills** (installed as the `mattpocock-skills` plugin). Reach for them by name; they read their per-workspace config from `docs/agents/` (see the `## Agent skills` block below, injected per workspace):
+Seven **core skills** ship inside the servant binary. They are the only ones guaranteed to be here, and they are always on:
 
 ```
-/grill-me       align on the task before building — resolve ambiguity first
-/to-spec        turn the conversation into a spec ticket on the board
-/to-tickets     break a spec/plan into tracer-bullet tickets (with blocking edges)
-/implement      build a ticket end-to-end
-/tdd            tight red-green loop while implementing
-/code-review    two-axis review (standards + spec) of the diff
-/handoff        write a handoff doc so a fresh session can continue  (see "Spawning & handoff")
-/teach          explain a concept or a slice of the codebase
-/wait-what      stop and get unstuck when something doesn't add up
+/servant-goal              define or amend this workspace's GOAL.md
+/servant-lead              where the whole initiative stands; redirect a running session
+/servant-delegate          hand a chunk of work to a fresh session (see "Spawning & delegation")
+/servant-recall            what prior servants learned about this repo or topic
+/servant-extract-memories  distill this session's durable knowledge into the knowledge base
+/servant-fine-tune         read servant's own measured insights; tune its instructions
+/servant-skills            manage which skills are installed and enabled
 ```
 
-Specs and tickets are **published to the board**, not written as files here. Domain terms and decisions live in `CONTEXT.md` + `docs/adr/` (created lazily by `/domain-modeling`).
+**Everything else is installed, not bundled.** servant does not own the engineering flow — shaping specs, breaking work down, implementing, reviewing, TDD are all skills installed from a source, and which ones is the user's choice. `servant skills list` says what is installed and enabled right now; `/servant-skills` is where the judgment about sources, additions and removals lives. Do not assume a skill is available because it is conventional — check, or ask.
+
+Specs and tickets are **published to the board**, not written as files here. Domain terms and decisions live in `CONTEXT.md` + `docs/adr/`, created lazily when there is something to record.
 
 ## The task tracker (the board)
 
@@ -52,7 +52,7 @@ servant ticket new --title …  # file one
 servant ticket show <n>      # read one, with its blockers and comments
 ```
 
-Every operation — labels, comments, closing, blocking, claiming — is in `docs/agents/issue-tracker.md`, including all of the `/wayfinder` ones. **Do not** create per-workspace `briefs/` or `plans/` files, and **do not** write blocking into a ticket body as prose: `servant ticket block <n> --on <m>` is the only representation, and a cycle is rejected as you add it.
+Every operation — labels, comments, closing, blocking, claiming, maps and child tickets — is in `docs/agents/issue-tracker.md`. **Do not** create per-workspace `briefs/` or `plans/` files, and **do not** write blocking into a ticket body as prose: `servant ticket block <n> --on <m>` is the only representation, and a cycle is rejected as you add it.
 
 To see where the whole initiative stands rather than one ticket — what is in flight and under which session, what is ready, what is blocked, and which Claims have gone stale — run **`/servant-lead`**. It joins the board, the Claims, the session registry and the transcripts into one report, and can redirect a running session from there. It is a skill, not a session type: any session runs it and leads for that turn.
 
@@ -76,29 +76,30 @@ guide scope and priority decisions; if a request conflicts with it, surface that
 
 Cross-session reasoning lives with the workspace or on the board — never inside the repo you are editing. The repo holds code.
 
-- **Tasks / specs / tickets** → tickets on this workspace's board (`/to-spec`, `/to-tickets`, or `servant ticket new`).
+- **Tasks / specs / tickets** → tickets on this workspace's board (`servant ticket new`, or whatever installed skill shapes them).
 - **Architecture decisions** → `<workspace>/docs/adr/NNNN-<slug>.md`.
-- **DO NOT** write plans/specs/tickets to `<repo>/docs/`, `<repo>/.scratch/`, `<repo>/PLAN.md`, or any path inside the repo. If a planning skill defaults to writing inside the repo, override it — file a ticket instead.
+- **DO NOT** write plans/specs/tickets to `<repo>/docs/`, `<repo>/.scratch/`, `<repo>/PLAN.md`, or any path inside the repo. Most skills in the wild were written for a repo with no board behind it and will default to a file there — override that and file a ticket instead.
 
-## Spawning & handoff
+## Spawning & delegation
 
 There are two ways to move work to another agent — pick by layer:
 
-- **In-session subagent (the `Agent` tool)** — ephemeral, runs inside *your* session and returns a report to your context. This is what `/code-review`, `/research`, `/wayfinder`, and the design skills use to fan out. Reach for it for tightly-scoped, AFK work you want back in this thread.
-- **`servant spawn` (a new tab / fresh top-level agent)** — persistent, its own context, human-visible. Reach for it when a chunk of work deserves its own session: continuing after a `/handoff`, an independent subtask you want running in parallel, or a sibling agent. **Proactively suggest `servant spawn`** when you notice work that should live in its own session rather than crowding this one.
+- **In-session subagent (the `Agent` tool)** — ephemeral, runs inside *your* session and returns a report to your context. It is how review, research and design skills fan out. Reach for it for tightly-scoped, AFK work you want back in this thread.
+- **`servant spawn` (a new tab / fresh top-level agent)** — persistent, its own context, human-visible. Reach for it when a chunk of work deserves its own session: an independent subtask you want running in parallel, a sibling agent, or the continuation of work you are handing on. **Proactively suggest `servant spawn`** when you notice work that should live in its own session rather than crowding this one.
 
-**Handing work forward — `/servant:handoff`.** This is the one "take it forward" gesture at any seam in the flow. It writes the handoff doc, decides the next step (route: `/to-spec` → `/to-tickets` → `/implement`), and **spawns the continuation session(s) itself** — one per ready ticket — so the user never hand-types a `servant spawn`. It reads the dispatchable set from `servant tasks --frontier --ws <name> --json`, which sorts open tickets into `ready` (unblocked, unclaimed), `stale` (claimed by a session that is gone — reclaimed silently), `inFlight` (someone is on it — **refused** without an explicit override) and `blocked`. It fans out over `ready` + `stale`: tickets on different repos run in parallel; two on the same repo run first-then-rest. Plain mattpocock `/handoff` still exists for the rare "just write a doc, I'll continue myself" case; `servant spawn --prompt "…"` remains the one-session primitive underneath.
+**Handing work forward — `/servant-delegate`.** The one "take it forward" gesture at any seam in the flow, and there is **no handoff document**: the context goes into a comment on the ticket (`servant ticket comment <n>`), and the spawn prompt collapses to one line pointing the new session at that ticket. Nothing on disk, no path to pass. It **spawns the continuation session(s) itself** — one per dispatchable ticket — so the user never hand-types a `servant spawn`. It reads the dispatchable set from `servant tasks --frontier --ws <name> --json`, which sorts open tickets into `ready` (unblocked, unclaimed), `stale` (claimed by a session that is gone — reclaimed silently, and said so in the report), `inFlight` (someone is on it — **refused** without an explicit override) and `blocked`. It fans out over `ready` + `stale`: tickets on different repos run in parallel; two on the same repo run first-then-rest. Claiming and spawning are one indivisible step — `servant spawn` writes no Claim of its own, and without `--name` the session picks its own name, so a Claim written around it points at an address nothing answers to. `servant spawn --prompt "…"` remains the one-session primitive underneath.
 
-**Worktree safety for research/wayfinder.** A mounted repo under `repos/` is a live git **worktree**. A subagent that does `git checkout -b research/<name>` there would switch the shared checkout's branch out from under the main agent. Research/wayfinder subagents must stay **read-only** or use their own worktree, and write `/research` findings into `docs/` — never switch the shared checkout.
+**Worktree safety for subagents.** A mounted repo under `repos/` is a live git **worktree**. A subagent that does `git checkout -b research/<name>` there would switch the shared checkout's branch out from under the main agent. Read-only subagents — research, review, exploration — must stay read-only or take a worktree of their own; never switch the shared checkout.
 
 ## servant commands you'll reach for
 
 ```
 servant tasks [--ws <name>]     # cross-workspace ticket view (grouped, deep-linked)
-servant tasks --frontier --ws … # ready / stale / in-flight / blocked; feeds /servant:handoff
+servant tasks --frontier --ws … # ready / stale / in-flight / blocked; feeds /servant-delegate
 servant ticket <new|show|…>      # file, read and edit tickets on the board
 servant claim <n> --session …    # who is carrying a ticket
 servant recall <query>          # search accumulated knowledge notes
+servant skills [list|…]         # what is installed and enabled; bare form is the picker
 servant spawn -w <name> [-r]    # new workspace / tab; -r mounts repo worktrees
 servant resume                  # re-attach to an earlier session
 ```
