@@ -9,11 +9,13 @@ import {
   commitKnowledge,
   ensureKnowledgeStore,
   ensureProjectIndex,
+  isSupersededNote,
   listAllNotes,
   noteScopeLabel,
   parseNote,
   rebuildMasterIndex,
   renderNote,
+  renderWorkspaceKnowledgeSection,
   searchNotes,
   serializeNote,
   slugify,
@@ -220,5 +222,47 @@ describe("searchNotes", () => {
   test("no match returns empty", async () => {
     await upsertNote(topicNote());
     expect(await searchNotes("nonexistent")).toHaveLength(0);
+  });
+});
+
+describe("inlined workspace knowledge section", () => {
+  test("lists live notes but only counts superseded ones", async () => {
+    await upsertNote(
+      topicNote({
+        name: "live-thing",
+        scope: "project/api-gw",
+        tags: [],
+        description: "how X works",
+      }),
+    );
+    await upsertNote(
+      topicNote({
+        name: "dead-thing",
+        scope: "project/api-gw",
+        tags: [],
+        description: "RETIRED (api-gw#9) — describes the deleted dashboard surface",
+      }),
+    );
+    const section = await renderWorkspaceKnowledgeSection(["api-gw"]);
+    expect(section).toContain("- **live-thing** — how X works");
+    expect(section).not.toContain("dead-thing");
+    expect(section).toContain("1 superseded note(s)");
+  });
+
+  test("a fixed-bug note stays listed — its guidance usually outlives the fix", async () => {
+    await upsertNote(
+      topicNote({
+        name: "spawn-unnamed",
+        scope: "project/api-gw",
+        tags: [],
+        description: "FIXED 2026-08-09 — but the manual path still self-picks a name",
+      }),
+    );
+    expect(await renderWorkspaceKnowledgeSection(["api-gw"])).toContain("- **spawn-unnamed** —");
+  });
+
+  test("isSupersededNote reads the marker, not the whole description", () => {
+    expect(isSupersededNote(topicNote({ description: "HISTORICAL — never shipped" }))).toBe(true);
+    expect(isSupersededNote(topicNote({ description: "the historical reason for X" }))).toBe(false);
   });
 });
