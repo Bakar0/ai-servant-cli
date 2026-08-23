@@ -110,7 +110,7 @@ session, so you can message another one directly — under exactly the rules voi
   session. A plain course correction does not — the transcripts already have it twice.
 
 To reclaim a stale claim rather than redirect, hand the ticket to a new session. Spawning is a side
-effect, so confirm it first, exactly as `/servant:handoff` does:
+effect, so confirm it first, exactly as `/servant-delegate` does:
 
 ```bash
 servant claim <N> --session <workspace>-t<N>
@@ -122,12 +122,12 @@ it — and `--name` is not optional here: without it the session gets a derived 
 with every other session in the workspace, so the Claim you just wrote would point at an address
 nothing answers to, and the ticket would read as stale all over again.
 
-For a full fan-out over everything dispatchable, use `/servant:handoff` instead — that is the skill
-that writes a handoff doc and spawns one session per ready ticket.
+For a full fan-out over everything dispatchable, use `/servant-delegate` instead — that is the skill
+that comments the handoff onto each ticket and spawns one session per dispatchable one.
 
 ## Notes
 
 - Reading is free and silent; **redirecting and reclaiming change things** — the rules above are
   what keeps that safe.
 - If nothing is running and nothing is ready, say so plainly and stop. Don't invent work.
-- This reports and redirects; it does not implement. Ticket-scale work goes to `/servant:handoff`.
+- This reports and redirects; it does not implement. Ticket-scale work goes to `/servant-delegate`.

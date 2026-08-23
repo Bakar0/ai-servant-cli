@@ -12,13 +12,14 @@ import { ensureCoreSkills } from "./skills.ts";
 const SERVANT_ROOT_PREFIX = "servant_root/";
 
 // Slash commands used to live flat at `.claude/commands/<name>.md` (un-prefixed `/goal`,
-// `/delegate`). They are now namespaced under `commands/servant/`. The sync below never deletes,
-// so on upgrade stale copies would linger and shadow current commands. Remove the specific files
-// we know we retired: the pre-namespace flat copies, plus `servant/delegate.md` — delegation is
-// now the mattpocock `/handoff` → `servant spawn` flow, so the bespoke command is gone.
+// `/delegate`), then namespaced under `commands/servant/`. The sync below never deletes, so on
+// upgrade stale copies would linger and shadow the skills that replaced them. Remove the specific
+// files we know we retired: the pre-namespace flat copies, then every namespaced one.
 const LEGACY_FLAT_COMMANDS = ["goal.md", "delegate.md"];
-// Every core unit except `handoff` is now a core *skill* (`servant-<name>`), so the command it used
-// to be must go — two copies of the same instructions, one of them stale, is worse than either alone.
+// Servant ships no slash commands at all any more — every core unit is a core *skill*
+// (`servant-<name>`). Two copies of the same instructions, one of them stale, is worse than either
+// alone, so each conversion's command file is swept by name. `handoff.md` is the last entry this
+// list will ever need: with the directory empty there is nothing left to convert.
 const RETIRED_NAMESPACED_COMMANDS = [
   "servant/delegate.md",
   "servant/recall.md",
@@ -26,6 +27,7 @@ const RETIRED_NAMESPACED_COMMANDS = [
   "servant/lead.md",
   "servant/extract-memories.md",
   "servant/fine-tune.md",
+  "servant/handoff.md",
 ];
 
 // Core skills also live under `servant_root/`, but the generic sync below is not their writer:

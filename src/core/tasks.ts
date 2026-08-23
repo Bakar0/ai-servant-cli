@@ -67,7 +67,7 @@ export interface Frontier {
   ready: Ticket[];
   /**
    * Unblocked, but claimed by a session that is gone. Dispatchable once the Claim is reclaimed,
-   * which `/servant:handoff` does silently — it is cleanup, not a decision.
+   * which `/servant-delegate` does silently — it is cleanup, not a decision.
    */
   stale: ClaimedTicket[];
   /**

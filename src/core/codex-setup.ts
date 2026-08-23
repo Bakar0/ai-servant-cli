@@ -1,6 +1,6 @@
 import type { Dirent } from "node:fs";
 import { mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
-import { basename, dirname, join } from "node:path";
+import { dirname, join } from "node:path";
 import { codexAgent } from "../agents/codex.ts";
 import { TEMPLATES } from "../templates/index.generated.ts";
 import { codexPromptsDir } from "./paths.ts";
@@ -13,11 +13,12 @@ import { CORE_SKILL_PREFIX, SKILL_FILE } from "./skills.ts";
 //   1. `/servant:<cmd>` → `/servant-<cmd>` — Codex prompts are flat and have no `:` namespace.
 //   2. `~/.claude/projects` → `~/.codex/sessions` — Codex writes its session logs elsewhere.
 //
-// Two template locations feed it, because servant's core units are mid-migration from slash
-// commands to skills (servant-skill-rework#4): whichever a unit currently is, Codex keeps its
-// prompt. A skill wins over a command of the same id, so a half-converted set never serves the
-// stale copy — and never leaves a gap where `/servant-<cmd>` simply vanishes.
-const CLAUDE_COMMANDS_PREFIX = "servant_root/.claude/commands/servant/";
+// One template location feeds it: the core skills. The union with `.claude/commands/servant/` that
+// carried the migration (servant-skill-rework#4) is gone with the last command
+// (servant-skill-rework#8) — a loop over a prefix that matches nothing is not a seam, it is a claim
+// that a finished migration is still running. If servant ever ships a slash command again — the one
+// real reason being `disable-model-invocation`, which skills have no equivalent for — reinstating
+// the union is a few lines, and the test pinning "skills only" is what makes that deliberate.
 const CORE_SKILLS_PREFIX = "servant_root/.claude/skills/";
 
 // `~/.codex/prompts/` is the user's directory, flat and shared with their own prompts, so servant
@@ -33,7 +34,9 @@ const OWNERSHIP_MARKER =
 // sweep cannot recognize them — but servant is provably their author: it wrote these exact
 // filenames on every Codex spawn, so a user's file could never have survived at one of them.
 // Closed by construction: a unit retired from here on is swept by its marker, so nothing is ever
-// added to this list.
+// added to this list. `delegate` is inert while servant ships a unit of that name again
+// (servant-skill-rework#8) — it stays because the list records what predates the marker, not what
+// is currently retired.
 const PRE_MARKER_PROMPT_IDS = [
   "delegate",
   "extract-memories",
@@ -44,7 +47,7 @@ const PRE_MARKER_PROMPT_IDS = [
   "recall",
 ];
 
-/** Turn a bundled Claude command body into its Codex-prompt equivalent. */
+/** Turn a bundled core-skill body into its Codex-prompt equivalent. */
 export function toCodexPrompt(body: string): string {
   return body
     .replaceAll("/servant:", "/servant-")
@@ -52,8 +55,8 @@ export function toCodexPrompt(body: string): string {
 }
 
 /**
- * Install servant's slash-command prompts into `~/.codex/prompts/` so a Codex session gets
- * `/servant-goal`, `/servant-handoff`, etc. Derived from the bundled Claude command templates via
+ * Install servant's core instruction units into `~/.codex/prompts/` so a Codex session gets
+ * `/servant-goal`, `/servant-delegate`, etc. Derived from the bundled core-skill templates via
  * {@link toCodexPrompt}. Overwrites only on content change; idempotent and cheap to run per spawn.
  *
  * Retired units are swept afterwards — see {@link sweepRetiredCodexPrompts}.
@@ -121,18 +124,9 @@ export async function sweepRetiredCodexPrompts(
   return removed;
 }
 
-/**
- * The prompt body for each core unit, keyed by the id its Codex filename is built from.
- *
- * Insertion order matters: commands first, then skills, so a converted unit's skill body replaces
- * the command body it grew out of.
- */
+/** The prompt body for each core skill, keyed by the id its Codex filename is built from. */
 export function codexPromptBodies(): Map<string, string> {
   const bodies = new Map<string, string>();
-  for (const t of TEMPLATES) {
-    if (!t.rel.startsWith(CLAUDE_COMMANDS_PREFIX) || !t.rel.endsWith(".md")) continue;
-    bodies.set(basename(t.rel, ".md"), t.content);
-  }
   for (const t of TEMPLATES) {
     if (!t.rel.startsWith(CORE_SKILLS_PREFIX) || !t.rel.endsWith(`/${SKILL_FILE}`)) continue;
     const dirName = t.rel.slice(CORE_SKILLS_PREFIX.length).split("/")[0];

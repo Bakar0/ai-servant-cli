@@ -24,10 +24,10 @@ servant insights --deep                 # render an offline HTML dashboard of ho
 servant fine-tune                       # insights analyst: read your metrics, then tune the instructions
 ```
 
-> **The everyday move - `/servant:handoff`.** From inside a session, take the work forward:
-> write a handoff doc, route to the next step of the flow, and spawn the continuation session(s) -
-> one per ready ticket. Specs and tickets live on the board - not in the repo - so
-> ongoing context is shared across sessions: each new agent picks up exactly where the last one
+> **The everyday move - `/servant-delegate`.** From inside a session, take the work forward:
+> comment the handoff onto the ticket, then spawn the continuation session(s) - one per
+> dispatchable ticket. Specs, tickets and the handoff itself live on the board - not in the repo -
+> so ongoing context is shared across sessions: each new agent picks up exactly where the last one
 > left off, instead of starting cold. This is how you keep command while the work fans out.
 
 ---
@@ -157,8 +157,9 @@ The idea → ship flow (skills you reach for by name in a session):
 /to-spec       publish a spec               →  a board ticket  [spec]
 /to-tickets    break it into tracer-bullet tickets  →  board tickets with blocking edges
 /implement     build a ticket (drives /tdd, closes with /code-review)
-/servant:handoff   take it forward          →  writes a handoff doc, then spawns the next session(s),
-                                               one per ready ticket (see servant tasks --frontier)
+/servant-delegate  take it forward          →  comments the handoff onto the ticket, then spawns
+                                               one session per dispatchable ticket
+                                               (see servant tasks --frontier)
 ```
 
 Skills are opt-in tools, not a mandatory pipeline — a session opens in plain conversation, and you
@@ -198,7 +199,7 @@ Create a workspace under `~/.ai_servant/workspaces/<name>` and open a new termin
 servant spawn -w my-task                      # open an agent tab in the workspace
 servant spawn -w my-task -r                    # also pick repos + add a worktree per pick first
 servant spawn -w my-task -r --branch topic/x   # use a specific branch name for the worktrees
-servant spawn -w my-task -p "Read <handoff-doc> and continue"   # deliver a first prompt to the agent
+servant spawn -w my-task -p "Ticket #7 - read it; the last comment is your handoff"   # first prompt
 ```
 
 | Flag | Description |
@@ -248,7 +249,7 @@ there is nothing to be offline from and no cache tier.
 servant tasks                        # every workspace's open tickets
 servant tasks --ws add-rate-limiter  # just one workspace
 servant tasks --state all            # include closed
-servant tasks --frontier --ws foo    # ready / in-flight / stale / blocked — what /servant:handoff dispatches
+servant tasks --frontier --ws foo    # ready / in-flight / stale / blocked — what /servant-delegate dispatches
 ```
 
 ### `servant board`
@@ -330,19 +331,21 @@ servant fine-tune <aspect> --reset    # revert an aspect to the shipped default
 
 ---
 
-## In-session slash commands
+## In-session core skills
 
-Every workspace ships with a set of `/servant:*` slash commands for Claude Code (synced into the workspace's `.claude/commands/`). Use them from inside the agent session:
+Servant's own instruction units ship **inside the binary** as core skills, written to `~/.ai_servant/.claude/skills/servant-<name>/`. They are listed and scored like any installed skill, and never disableable. Use them from inside the agent session:
 
-| Command | What it does |
-|---------|--------------|
-| `/servant:goal` | Interview you to define (or amend) `GOAL.md` — a short statement of what the workspace is for. |
-| `/servant:handoff` | Take the work forward: write a handoff doc, route to the next flow step, and spawn the continuation session(s) — one per ready ticket. |
-| `/servant:recall` | Search the durable knowledge base for what prior servants learned about a project or topic. |
-| `/servant:extract-memories` | Distill durable knowledge from the current session into the knowledge base (projects + topics). |
-| `/servant:fine-tune` | Insights analyst: read servant's own metrics, investigate them, then tune an instruction aspect via the overlay path. |
+| Skill | What it does |
+|-------|--------------|
+| `/servant-goal` | Interview you to define (or amend) `GOAL.md` — a short statement of what the workspace is for. |
+| `/servant-delegate` | Take the work forward: comment the handoff onto the ticket, then spawn one session per dispatchable ticket. |
+| `/servant-lead` | Report where the whole initiative stands — in flight, ready, blocked, stale — and redirect a running session. |
+| `/servant-skills` | Manage installed skills: read a source's catalog, install, enable/disable, and check whether upstream moved. |
+| `/servant-recall` | Search the durable knowledge base for what prior servants learned about a project or topic. |
+| `/servant-extract-memories` | Distill durable knowledge from the current session into the knowledge base (projects + topics). |
+| `/servant-fine-tune` | Insights analyst: read servant's own metrics, investigate them, then tune an instruction aspect via the overlay path. |
 
-These stay in sync automatically - they're re-synced on every `spawn`/`resume`, so updating servant updates the commands in every workspace.
+These stay in sync automatically - they're rewritten from the binary on every `spawn`/`resume`, so updating servant updates them everywhere. Codex has no skills mechanism, so the same bodies are installed as `~/.codex/prompts/servant-<name>.md`.
 
 Alongside these, every workspace has the **[mattpocock/skills](https://github.com/mattpocock/skills)** engineering skills installed (the `mattpocock-skills` plugin) — `/grill-me`, `/to-spec`, `/to-tickets`, `/implement`, `/tdd`, `/code-review`, and more. servant pre-configures them (via `docs/agents/`) to file tickets onto the board. See [The workflow & the board](#the-workflow--the-board).
 
