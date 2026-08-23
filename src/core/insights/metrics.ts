@@ -4,6 +4,7 @@ import { readJsonlLinesWithLineNumbers } from "../claude-session.ts";
 import { renderWorkspaceKnowledgeSection } from "../knowledge.ts";
 import { workspacesRoot } from "../paths.ts";
 import { composeSetupParts, extractEmbeddedClaudeMd, fingerprintFromParts } from "./fingerprint.ts";
+import { type InstructionUnit, collectInstructionUnits } from "./instruction-units.ts";
 import { type RuleViolation, type ToolCall, checkRules } from "./rules.ts";
 
 // A per-session metrics record: deterministic, cheap, derived purely from one transcript. Every
@@ -18,7 +19,10 @@ import { type RuleViolation, type ToolCall, checkRules } from "./rules.ts";
 // v6 splits Bash tool buckets by command head (`Bash: git`, `Bash: npm`, …) so one catch-all "Bash"
 // bucket no longer swamps the spend chart, and captures friction samples (error/correction snippets)
 // so the dashboard can show *what* went wrong, not just how many.
-export const METRICS_SCHEMA_VERSION = 6;
+// v7 adds `instructionUnits` — the session's loaded skills and instruction docs, each with what it
+// cost and how often it was used. It is the deterministic half of "did this unit earn its place?";
+// the Tier-2 units axis judges the other half.
+export const METRICS_SCHEMA_VERSION = 7;
 
 /**
  * A stable pointer back into a transcript so a later (qualitative) pass can re-locate the exact
@@ -190,6 +194,13 @@ export interface SessionMetrics {
    * (largest first) and capped per session (see `maxCandidates`).
    */
   candidates: Candidate[];
+
+  /**
+   * Every instruction unit this session ran with — skills and instruction docs alike — with its
+   * resident cost and its mechanical use count. Largest-cost first. The Tier-2 units axis reads
+   * this list; nothing here is a judgment.
+   */
+  instructionUnits: InstructionUnit[];
 }
 
 const TOP_TOOL_RESULTS = 5;
@@ -238,6 +249,7 @@ function repoFromCwd(workspace: string | null, cwd: string): string | null {
 
 interface AnyRecord {
   type?: string;
+  attachment?: unknown;
   uuid?: string;
   cwd?: string | null;
   version?: string;
@@ -719,6 +731,13 @@ export async function extractSessionMetrics(
   }
   const footprintChars = claudeMd.length + composed.commands.length + knowledgeSectionChars;
 
+  const instructionUnits = await collectInstructionUnits({
+    records: allRecords,
+    invocations: commandUses.map((c) => c.name),
+    readCounts,
+    workspace,
+  });
+
   const cacheDenom = cacheReadTokens + cacheCreationTokens + inputTokens;
   const s = await stat(jsonlPath);
 
@@ -765,6 +784,7 @@ export async function extractSessionMetrics(
       recallsConsumed,
     },
     candidates,
+    instructionUnits,
   };
 }
 

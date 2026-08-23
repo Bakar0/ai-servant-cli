@@ -134,9 +134,12 @@ therefore temporary. The supported way to change one is the fine-tune overlay
 
 ## Not this skill's job
 
-- **Scoring.** The `SCORE` column reads `—` for everything because the verdict comes from the
-  session evaluator, not from here. Do not guess a score, and do not describe a skill as earning or
-  wasting its place on your own read of it.
+- **Scoring.** The `SCORE` column is *reported* here, never decided here. It nets the session
+  evaluator's per-session verdicts on this skill as an instruction unit (`+1/3` = one more
+  `justified` than `wasteful`, over three sessions that judged it) and reads `—` until some session
+  has judged it. Do not guess a score, do not compute one, and do not describe a skill as earning or
+  wasting its place on your own read of it. `servant insights --units` is the full picture,
+  instruction docs included; `/servant-fine-tune` is where a score turns into a decision.
 - **Claude Code's own `/skills` toggle** (`skillOverrides` in settings). Servant's enablement is the
   one mechanism; writing both is how two records of one state come to disagree.
 - **`~/.claude/skills/`.** The user's hand-installed skills are theirs. Servant enables into

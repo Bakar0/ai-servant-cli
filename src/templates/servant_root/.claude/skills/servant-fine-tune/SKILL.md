@@ -1,6 +1,6 @@
 ---
 name: servant-fine-tune
-description: Read servant's own measured insights — context growth, friction, knowledge health — investigate what they say, and tune servant's instructions through the fine-tune overlay path. Use when the user asks how servant itself is doing, why a session cost so much, or wants to change how servant behaves by default.
+description: Read servant's own measured insights — context growth, friction, knowledge health, and whether each loaded skill or instruction doc earned its place — investigate what they say, and tune servant's instructions through the fine-tune overlay path. Use when the user asks how servant itself is doing, why a session cost so much, which skills are worth loading, or wants to change how servant behaves by default.
 ---
 
 # /servant-fine-tune
@@ -57,20 +57,29 @@ The dashboard has **four story sections** drawn from the same data:
 | 3 | **Friction** | rule violations, tool errors, permission denials, user corrections, repeated reads |
 | 4 | **Knowledge health** | note counts, stale/rotted/orphan/dead notes, recall usage |
 
-Also read, as needed, the raw records the dashboard summarizes:
+A fifth story does not live on the dashboard, because its unit of analysis is not the session:
+
+```bash
+servant insights --units          # every instruction unit, worst first
+servant insights --units --json   # the same, as data
+```
+
+Also read, as needed, the raw records these surfaces summarize:
 
 - **Change ledger** — `insights/changes.jsonl` (append-only `overlay` / `asset` before/after entries).
 - **Per-session Tier-2 judgments** — `insights/judgments/<sessionId>.json`
-  (`{ schema, sessionId, judgments: [{ anchor, kind, verdict, reasoning, tokens }] }`).
+  (`{ schema, sessionId, judgments: [{ anchor, kind, verdict, reasoning, tokens }],
+  units: [{ id, kind, invoked, verdict, why }] }`).
 - **Per-session metrics** — `insights/metrics/<sessionId>.json`, or `servant insights --session <id>
-  --json` for the context-growth curve, biggest jumps, per-tool spend, and the **candidates with
-  their anchors**.
+  --json` for the context-growth curve, biggest jumps, per-tool spend, the **candidates with their
+  anchors**, and `instructionUnits` — what this session loaded, what each unit cost, and how often
+  it fired.
 
 ### 2. Narrate
 
-Summarize the **four stories** back to the user in the terminal — **short**: a few lines, the
-standout numbers, and which way each trend is moving. Point at the open dashboard for the visuals;
-don't re-describe every chart. Lead with anything that changed after a ledger entry (did a past
+Summarize the **four stories plus the units axis** back to the user in the terminal — **short**: a
+few lines, the standout numbers, and which way each trend is moving. Point at the open dashboard
+for the visuals; don't re-describe every chart. Lead with anything that changed after a ledger entry (did a past
 overlay help?) and anything leaking or dead. End by offering the next step — **investigate** a
 specific number, or **tune** an aspect.
 
@@ -89,12 +98,47 @@ violation real?", **follow the anchor into the transcript — do not re-read who
 
 Answer concisely from what you found, then tie it back to a possible tuning action if there is one.
 
+### 3b. The units axis — did each instruction unit earn its place?
+
+The other axis, and the one the whole instruction layer hangs on. An **instruction unit** is
+anything loaded to shape a session: a **skill**, or an **agent instruction document**. Both are
+judged by the same question — *was loading this worth what it cost?* — which is what makes a 10 KB
+`CLAUDE.md` answerable with data instead of taste.
+
+Read it with `servant insights --units`. Each line nets one unit's per-session verdicts:
+`+3/5` is three more `justified` than `wasteful` over five sessions that judged it.
+
+Three things to hold onto when you narrate it:
+
+- **A unit that never fired is not thereby waste.** A skill loaded and not needed was a bet, and
+  often a reasonable one. An instruction document is never "invoked" at all.
+- **A resident unit is paid for every turn** — a loaded skill's description costs its tokens whether
+  or not it is called, and disabling one mid-session never retracts the description it already put
+  in context. Size × irrelevance is what makes a verdict `wasteful`, not silence.
+- **Sample size is the whole story early on.** A unit judged once says nothing. Say so rather than
+  reporting a net of `-1` as a finding.
+
+Each kind has its own lever, and they are not interchangeable:
+
+| Unit | Verdict says | Lever |
+|---|---|---|
+| skill | earning its resident cost | `/servant-skills` — disable it, or remove it from the store |
+| doc | carrying guidance the work actually needs | **§ Tuning an aspect** — the `general` overlay for servant's own conventions |
+
+A `wasteful` verdict on a document is rarely "delete it": it usually means the guidance is too long,
+too general, or sitting in the wrong place. A resident doc that sessions keep **re-reading** is the
+sharpest signal of all — its guidance is not sticking where it is.
+
 ### 4. Act — tune an aspect
 
 When the user wants to act on a finding, propose a **concrete** overlay edit tied to what the data
 showed (e.g. "recall keeps surfacing notes that are never used → tighten the recall instruction" or
 "big speculative file reads dominate context → add a read-narrowly rule"). On agreement, follow
 **§ Tuning an aspect** below to draft and write it.
+
+When the finding is a **skill** scoring badly, the overlay is the wrong tool — hand it to
+`/servant-skills`, which owns enablement and the store. Say which skill and what the score was, and
+let that skill do the flipping.
 
 ### 5. Confirm
 

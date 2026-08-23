@@ -28,7 +28,7 @@ function rec(
   over: Partial<SessionMetrics> & { sessionId: string; mtimeMs: number },
 ): SessionMetrics {
   return {
-    schema: 6,
+    schema: 7,
     sessionId: over.sessionId,
     workspace: over.workspace ?? "ws",
     repos: [],
@@ -73,6 +73,7 @@ function rec(
       ...over.knowledge,
     },
     candidates: over.candidates ?? [],
+    instructionUnits: over.instructionUnits ?? [],
   };
 }
 
@@ -187,8 +188,9 @@ describe("buildDashboardData", () => {
     const digest = digestOf(records, changes);
     const judgments: JudgmentRecord[] = [
       {
-        schema: 1,
+        schema: 2,
         sessionId: "sess-one",
+        units: [],
         judgments: [
           {
             anchor: { turnUuid: "u1", toolUseId: null, line: 2 },
@@ -334,8 +336,9 @@ describe("renderDashboard", () => {
     const { records, digest, changes } = base();
     const judgments: JudgmentRecord[] = [
       {
-        schema: 1,
+        schema: 2,
         sessionId: "abcdef12-3456",
+        units: [],
         judgments: [
           {
             anchor: { turnUuid: "u", toolUseId: null, line: 1 },

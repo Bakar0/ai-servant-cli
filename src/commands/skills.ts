@@ -24,6 +24,13 @@ import {
   skillName,
   reconcileEnabledCopies,
 } from "../core/skills.ts";
+import {
+  type UnitScore,
+  describeUnitScore,
+  formatUnitScore,
+  summarizeUnits,
+} from "../core/insights/unit-scores.ts";
+import { readAllJudgments } from "../core/insights/store.ts";
 import { type PickerOpts, pickMultipleFromList } from "../ui/picker.ts";
 
 const rootArg = {
@@ -33,11 +40,19 @@ const rootArg = {
 } as const;
 
 /**
- * The verdict the session evaluator assigns each instruction unit is not written yet
- * (servant-skill-rework#3). The column exists now so the picker's shape does not change when it
- * arrives; until then every skill reads as unscored rather than as neutral.
+ * A skill's score is its instruction-unit track record: what the session evaluator made of loading
+ * it, aggregated over every session that judged it. Computed on read from the per-session judgment
+ * records — never stored — and `—` until some session has judged it.
  */
-const SCORE_UNSCORED = "—";
+type UnitScores = Map<string, UnitScore>;
+
+async function readSkillScores(): Promise<UnitScores> {
+  try {
+    return summarizeUnits(await readAllJudgments());
+  } catch {
+    return new Map(); // no insights store yet — every skill reads as unscored
+  }
+}
 
 const pad = (s: string, w: number) => s.padEnd(w);
 
@@ -56,6 +71,7 @@ export type SkillPicker = (
 function buildRows(
   skills: InstalledSkill[],
   checks: CheckCache,
+  scores: UnitScores,
 ): { rows: SkillRow[]; header: string } {
   const cells = skills.map((s) => ({
     skill: s,
@@ -64,7 +80,7 @@ function buildRows(
     state: s.source === CORE_SOURCE ? "core" : s.enabled ? "on" : "off",
     source: s.source,
     name: s.contested ? `${s.name} (contested)` : s.name,
-    score: SCORE_UNSCORED,
+    score: formatUnitScore(scores.get(s.name)),
     update: updateCell(s, checks),
   }));
   const width = (key: "state" | "source" | "name" | "score", min: number) =>
@@ -97,13 +113,18 @@ function updateCell(skill: InstalledSkill, checks: CheckCache): string {
   return skill.drift === "clean" ? upstream : `${skill.drift} · ${upstream}`;
 }
 
-function preview(skill: InstalledSkill, checks: CheckCache, doc: string): string {
+function preview(
+  skill: InstalledSkill,
+  checks: CheckCache,
+  doc: string,
+  scores: UnitScores,
+): string {
   return [
     `${skill.name}  (${skill.enabled ? "enabled" : "disabled"})`,
     `source:  ${skill.source}`,
     `hash:    ${skill.hash}${skill.drift === "clean" ? "" : `  (as installed; local ${skill.localHash ?? "gone"})`}`,
     skill.source === CORE_SOURCE ? "" : `ref:     ${skill.ref || "(unknown)"}`,
-    `score:   ${SCORE_UNSCORED}`,
+    `score:   ${describeUnitScore(scores.get(skill.name))}`,
     `update:  ${updateCell(skill, checks)}`,
     skill.source === CORE_SOURCE
       ? "store:   ships inside the servant binary — always on, never removable"
@@ -119,12 +140,14 @@ function preview(skill: InstalledSkill, checks: CheckCache, doc: string): string
 async function loadRows(): Promise<{
   skills: InstalledSkill[];
   checks: CheckCache;
+  scores: UnitScores;
   rows: SkillRow[];
   header: string;
 }> {
   const skills = await listSkills();
   const checks = await readCheckResults();
-  return { skills, checks, ...buildRows(skills, checks) };
+  const scores = await readSkillScores();
+  return { skills, checks, scores, ...buildRows(skills, checks, scores) };
 }
 
 /**
@@ -159,7 +182,7 @@ const listCommand = defineCommand({
   async run({ args }) {
     applyRootOverride(args.root);
     await reconcile();
-    const { skills, checks, rows, header } = await loadRows();
+    const { skills, checks, scores, rows, header } = await loadRows();
     if (args.json) {
       console.log(
         JSON.stringify(
@@ -175,6 +198,7 @@ const listCommand = defineCommand({
             localHash: s.localHash,
             storeDir: s.storeDir,
             lastCheck: checks[`${s.source}/${s.name}`] ?? null,
+            score: scores.get(s.name) ?? null,
           })),
           null,
           2,
@@ -424,7 +448,7 @@ export async function browseSkills(pick: SkillPicker = pickMultipleFromList): Pr
   await reconcile();
   const trail: string[] = [];
   for (;;) {
-    const { skills, checks, rows, header } = await loadRows();
+    const { skills, checks, scores, rows, header } = await loadRows();
     const docs = new Map<string, string>();
     await Promise.all(
       skills.map(async (s) => docs.set(s.storeDir, await readSkillDoc(s.storeDir))),
@@ -432,7 +456,7 @@ export async function browseSkills(pick: SkillPicker = pickMultipleFromList): Pr
 
     const picked = await pick(rows, {
       format: (r) => r.label,
-      preview: (r) => preview(r.skill, checks, docs.get(r.skill.storeDir) ?? ""),
+      preview: (r) => preview(r.skill, checks, docs.get(r.skill.storeDir) ?? "", scores),
       prompt: "skill",
       header: `${BROWSE_HINT}\n${header}`,
     });
