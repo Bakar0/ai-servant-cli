@@ -103,9 +103,9 @@ const SCAFFOLD_FILES: ReadonlyArray<readonly [string, string]> = [
   ["CONTEXT.md", "# Context\n\nShared language / domain glossary for this workspace.\n"],
 ];
 
-// Per-workspace mattpocock-skills config (docs/agents/*). Parameterized by workspace name, so
-// generated in ensureWorkspaceDir rather than listed statically. Rewritten when their content
-// stamp moves — see writeStamped.
+// The contract servant publishes to whatever instruction set is installed (docs/agents/*).
+// Parameterized by workspace name, so generated in ensureWorkspaceDir rather than listed
+// statically. Rewritten when their content stamp moves — see writeStamped.
 function skillsConfigFiles(workspace: string): ReadonlyArray<readonly [string, string]> {
   return [
     ["docs/agents/issue-tracker.md", renderIssueTrackerDoc(workspace)],
