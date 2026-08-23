@@ -9,7 +9,8 @@ import t3 from "./servant_root/.claude/skills/servant-fine-tune/SKILL.md" with {
 import t4 from "./servant_root/.claude/skills/servant-goal/SKILL.md" with { type: "text" };
 import t5 from "./servant_root/.claude/skills/servant-lead/SKILL.md" with { type: "text" };
 import t6 from "./servant_root/.claude/skills/servant-recall/SKILL.md" with { type: "text" };
-import t7 from "./servant_root/CLAUDE.md" with { type: "text" };
+import t7 from "./servant_root/.claude/skills/servant-skills/SKILL.md" with { type: "text" };
+import t8 from "./servant_root/CLAUDE.md" with { type: "text" };
 
 export interface ServantTemplate {
   /** Path relative to `src/templates/` (POSIX separators). */
@@ -27,5 +28,6 @@ export const TEMPLATES: ServantTemplate[] = [
   { rel: "servant_root/.claude/skills/servant-goal/SKILL.md", content: t4 },
   { rel: "servant_root/.claude/skills/servant-lead/SKILL.md", content: t5 },
   { rel: "servant_root/.claude/skills/servant-recall/SKILL.md", content: t6 },
-  { rel: "servant_root/CLAUDE.md", content: t7 },
+  { rel: "servant_root/.claude/skills/servant-skills/SKILL.md", content: t7 },
+  { rel: "servant_root/CLAUDE.md", content: t8 },
 ];
