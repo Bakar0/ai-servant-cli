@@ -7,7 +7,7 @@ export const claimCommand = defineCommand({
   meta: {
     name: "claim",
     description:
-      "Record which session is carrying a board ticket, or release it when the work is done. The voice delegation path writes a Claim as it spawns; everywhere else — /servant:handoff reclaiming a stale one, a session releasing its own — goes through this command.",
+      "Record which session is carrying a board ticket, or release it when the work is done. The voice delegation path writes a Claim as it spawns; everywhere else — /servant-delegate claiming before it spawns or reclaiming a stale one, a session releasing its own — goes through this command.",
   },
   args: {
     ticket: {

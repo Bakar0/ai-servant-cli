@@ -54,25 +54,24 @@ describe("ensureCodexAssets", () => {
       await ensureCodexAssets();
       const files = (await readdir(prompts)).toSorted();
       expect(files).toEqual([
+        "servant-delegate.md",
         "servant-extract-memories.md",
         "servant-fine-tune.md",
         "servant-goal.md",
-        "servant-handoff.md",
         "servant-lead.md",
         "servant-recall.md",
         "servant-skills.md",
       ]);
-      // Every one of these but `handoff` is a core skill now. Codex has no skills mechanism, so
-      // its prompts have to come from the skill templates — the same strings, from the other
-      // location — or `/servant-goal` and friends would simply vanish from Codex with no error.
+      // Every one of these is a core skill. Codex has no skills mechanism, so its prompts have to
+      // come from the skill templates — the same strings, from the other location — or
+      // `/servant-goal` and friends would simply vanish from Codex with no error.
       const goal = await readFile(join(prompts, "servant-goal.md"), "utf8");
       expect(goal).toContain("name: servant-goal");
       expect(goal).toContain("/servant-goal");
       expect(goal).not.toContain("/servant:goal");
 
-      const handoff = await readFile(join(prompts, "servant-handoff.md"), "utf8");
-      expect(handoff).toContain("/servant-handoff");
-      expect(handoff).not.toContain("/servant:handoff");
+      const delegate = await readFile(join(prompts, "servant-delegate.md"), "utf8");
+      expect(delegate).toContain("/servant-delegate");
     });
   });
 
@@ -91,12 +90,12 @@ describe("ensureCodexAssets", () => {
   test("sweeps the prompt of a unit servant no longer ships, on the next sync", async () => {
     await withCodexHome(async (prompts) => {
       const { ensureCodexAssets } = await import("../src/core/codex-setup.ts");
-      // `servant-delegate.md` has sat on real installs since the command was retired in 8c30180 —
-      // written by a servant that predates the ownership marker, so it carries none.
-      const retiredPreMarker = join(prompts, "servant-delegate.md");
-      await writeFile(retiredPreMarker, "---\ndescription: the old delegate command\n---\n");
+      // `servant-handoff.md` sits on every install that predates servant-skill-rework#8, written
+      // by a servant that predates the ownership marker, so it carries none. Renaming the unit to
+      // `delegate` is what orphans it, and this list entry is what lets the sweep reach it.
+      const retiredPreMarker = join(prompts, "servant-handoff.md");
+      await writeFile(retiredPreMarker, "---\ndescription: the old handoff command\n---\n");
       // A unit retired *after* markers exist is recognized by its marker alone — no list involved.
-      // This is what #8 leaves behind when it renames `handoff`.
       const retiredMarked = join(prompts, "servant-somethingelse.md");
       await writeFile(retiredMarked, withOwnershipMarker("# /servant-somethingelse\n"));
 
@@ -145,13 +144,19 @@ describe("sweepRetiredCodexPrompts", () => {
 });
 
 describe("codexPromptBodies", () => {
-  test("a core skill replaces the command of the same id, so a half-converted set has no gap", () => {
+  test("serves every core skill, and nothing else — servant ships no slash commands", () => {
     const bodies = codexPromptBodies();
-    // Converted: served from the skill.
+    expect([...bodies.keys()].toSorted()).toEqual([
+      "delegate",
+      "extract-memories",
+      "fine-tune",
+      "goal",
+      "lead",
+      "recall",
+      "skills",
+    ]);
     expect(bodies.get("recall")).toContain("name: servant-recall");
-    expect(bodies.get("goal")).toContain("name: servant-goal");
-    // Not yet converted: still served from the command it remains (#8 converts it).
-    expect(bodies.get("handoff")).toContain("disable-model-invocation: true");
+    expect(bodies.get("delegate")).toContain("name: servant-delegate");
     // The id never carries the directory's `servant-` prefix, or the filename would double it.
     expect([...bodies.keys()].some((k) => k.startsWith("servant-"))).toBe(false);
   });

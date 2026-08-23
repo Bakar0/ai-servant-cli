@@ -43,7 +43,7 @@ export const tasksCommand = defineCommand({
       required: false,
       default: false,
       description:
-        "Classify open tickets as ready, in-flight (a live session holds the Claim), stale (the holding session is gone) or blocked. Used by /servant:handoff to pick dispatchable tickets.",
+        "Classify open tickets as ready, in-flight (a live session holds the Claim), stale (the holding session is gone) or blocked. Used by /servant-delegate to pick dispatchable tickets.",
     },
     json: {
       type: "boolean",
@@ -66,7 +66,7 @@ export const tasksCommand = defineCommand({
     // staleness self-heal without a daemon (ADR-0011 decision 3).
     await refreshSessionProjection();
 
-    // --frontier: what is dispatchable — the backstop /servant:handoff reads before it spawns
+    // --frontier: what is dispatchable — the backstop /servant-delegate reads before it spawns
     // anything. Every ticket is read, not just this workspace's: a blocker on another board is
     // still a blocker.
     if (args.frontier) {
@@ -98,7 +98,7 @@ export const tasksCommand = defineCommand({
             livenessKnown: liveness.known,
             ready: ready.map(brief),
             // Dispatchable too, but only after its dead Claim is reclaimed — which is cleanup, not
-            // a decision, so /servant:handoff does it without asking.
+            // a decision, so /servant-delegate does it without asking.
             stale: stale.map((c) => ({
               ...brief(c.ticket),
               claim: { session: c.claim.session, since: c.claim.at },

@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { setRootOverride } from "../src/core/paths.ts";
@@ -80,8 +80,6 @@ describe("ensureServantAssets", () => {
     expect(await Bun.file(legacyDelegate).exists()).toBe(false);
     // delegate is retired — its namespaced command must be removed, not resynced.
     expect(await Bun.file(retiredDelegate).exists()).toBe(false);
-    // handoff is the last command standing, so the namespaced sync itself is still alive.
-    expect(await Bun.file(join(commands, "servant", "handoff.md")).exists()).toBe(true);
   });
 
   // A command that became a skill would otherwise linger from an older install and shadow it with
@@ -90,7 +88,9 @@ describe("ensureServantAssets", () => {
     const commands = claudeCommandsDir();
     await mkdir(join(commands, "servant"), { recursive: true });
     const converted = ["goal", "lead", "extract-memories", "fine-tune", "recall"];
-    for (const name of converted) {
+    // `handoff` converted under a different name (servant-skill-rework#8), so it is swept without a
+    // `servant-handoff` skill ever existing — the command going away is the whole of its retirement.
+    for (const name of [...converted, "handoff"]) {
       await writeFile(
         join(commands, "servant", `${name}.md`),
         "stale copy from an older servant\n",
@@ -99,12 +99,16 @@ describe("ensureServantAssets", () => {
 
     await ensureServantAssets();
 
-    for (const name of converted) {
+    for (const name of [...converted, "handoff"]) {
       expect(await Bun.file(join(commands, "servant", `${name}.md`)).exists()).toBe(false);
+    }
+    for (const name of [...converted, "delegate"]) {
       expect(await Bun.file(join(servantSkillsDir(), `servant-${name}`, "SKILL.md")).exists()).toBe(
         true,
       );
     }
+    // Nothing servant ships is a slash command any more.
+    expect(await readdir(join(commands, "servant"))).toEqual([]);
   });
 
   test("ships extract-memories as a core skill", async () => {
@@ -167,12 +171,17 @@ describe("ensureServantAssets", () => {
     expect(manager).toContain("Never put a skill's name in `src/`");
   });
 
-  test("ships the /servant:handoff continuation skill", async () => {
+  test("ships the /servant-delegate continuation skill", async () => {
     await ensureServantAssets();
-    const handoff = await readFile(join(claudeCommandsDir(), "servant", "handoff.md"), "utf8");
-    expect(handoff).toContain("/servant:handoff");
-    expect(handoff).toContain("servant tasks --frontier");
-    expect(handoff).toContain("disable-model-invocation: true");
+    const delegate = await readFile(
+      join(servantSkillsDir(), "servant-delegate", "SKILL.md"),
+      "utf8",
+    );
+    expect(delegate).toContain("name: servant-delegate");
+    // The board facts the rewrite had to keep while cutting the route table.
+    expect(delegate).toContain("servant tasks --frontier");
+    expect(delegate).toContain("servant ticket comment");
+    expect(delegate).toContain("servant claim <N> --session <ws>-t<N>");
   });
 
   test("places .claude/ as a sibling of workspaces/ under the servant root", async () => {
