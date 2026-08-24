@@ -16,6 +16,12 @@ import { TEMPLATES } from "../templates/index.generated.ts";
 import { contentStamp } from "./content-stamp.ts";
 import { composeAssetForRel } from "./fine-tune.ts";
 import {
+  SKILL_FILE,
+  findSkillDirs,
+  readFrontmatterDescription,
+  readModelInvocable,
+} from "./skill-doc.ts";
+import {
   LEGACY_ENABLED_SKILL_PREFIX,
   aiServantRoot,
   enabledSkillDir,
@@ -27,8 +33,7 @@ import {
   userClaudeSkillsDir,
 } from "./paths.ts";
 
-/** The file that makes a directory a skill. */
-export const SKILL_FILE = "SKILL.md";
+export { SKILL_FILE };
 
 /** How deep below a source's root we look for skill directories. */
 const DISCOVERY_MAX_DEPTH = 3;
@@ -66,6 +71,19 @@ export const SKILL_MANIFEST_VERSION = 1;
  */
 export type SkillDrift = "clean" | "modified" | "missing";
 
+/**
+ * How the copy Claude actually loads compares to the store copy it was taken from.
+ *
+ * `drift` asks "did we change the store?". This asks the question nothing used to ask at all: is
+ * what loads the store's bytes? An edit to an enabled copy was invisible to every drift report and
+ * silently discarded by the next enable, so a hand-tuned skill could be shaping every session with
+ * no surface admitting it existed.
+ *
+ * `none` is the resting state of a disabled skill. `unexpected` is a copy that outlived its
+ * enablement — it still loads, while the record says the skill is off.
+ */
+export type EnabledCopyState = "none" | "clean" | "modified" | "missing" | "unexpected";
+
 /** An entry joined with everything derivable from it — what every read surface actually wants. */
 export type InstalledSkill = SkillEntry & {
   name: string;
@@ -85,6 +103,10 @@ export type InstalledSkill = SkillEntry & {
    * surfaces need it because such a skill is *unjudgeable*, not merely unjudged — see `UNJUDGEABLE`.
    */
   modelInvocable: boolean;
+  /** How the loaded copy compares to the store copy — see {@link EnabledCopyState}. */
+  enabledCopy: EnabledCopyState;
+  /** The loaded copy's hash right now, or null when there is no copy. */
+  enabledHash: string | null;
 };
 
 /** A source's identity: what the user typed, the store namespace, and the URL git is given. */
@@ -392,10 +414,36 @@ export async function coreSkills(): Promise<InstalledSkill[]> {
         modelInvocable: readModelInvocable(
           composed.find((f) => f.rel === SKILL_FILE)?.content ?? "",
         ),
+        // A core skill's store *is* the directory Claude loads, so there is no second copy that
+        // could disagree with the first — `drift` already carries the whole answer.
+        enabledCopy: (localHash === null ? "missing" : "clean") as EnabledCopyState,
+        enabledHash: localHash,
       };
     }),
   );
   return rows.sort((a, b) => a.name.localeCompare(b.name));
+}
+
+/**
+ * Read the loaded copy's state for one skill. The store copy's hash is passed in because it is
+ * already computed by every caller — and because a `missing` store makes the comparison meaningless
+ * rather than false.
+ */
+async function readEnabledCopy(
+  name: string,
+  enabled: boolean,
+  storeHash: string | null,
+): Promise<{ enabledCopy: EnabledCopyState; enabledHash: string | null }> {
+  const dir = enabledSkillDir(name);
+  if (!existsSync(dir)) {
+    return { enabledCopy: enabled ? "missing" : "none", enabledHash: null };
+  }
+  const enabledHash = await hashSkillDir(dir);
+  if (!enabled) return { enabledCopy: "unexpected", enabledHash };
+  return {
+    enabledCopy: storeHash === null ? "modified" : enabledHash === storeHash ? "clean" : "modified",
+    enabledHash,
+  };
 }
 
 /**
@@ -505,6 +553,7 @@ export async function listInstalledSkills(): Promise<InstalledSkill[]> {
         drift,
         localHash,
         modelInvocable: readModelInvocable(await readTextOr(join(storeDir, SKILL_FILE), "")),
+        ...(await readEnabledCopy(name, e.enabled, localHash)),
       };
     }),
   );
@@ -534,19 +583,7 @@ export async function resolveSkill(selector: string): Promise<InstalledSkill> {
 
 /** Relative paths of every skill directory in a checkout, `"."` when the repo itself is a skill. */
 export async function discoverSkills(repoDir: string): Promise<string[]> {
-  if (existsSync(join(repoDir, SKILL_FILE))) return ["."];
-  const found: string[] = [];
-  const walk = async (rel: string, depth: number): Promise<void> => {
-    if (depth > DISCOVERY_MAX_DEPTH) return;
-    for (const e of await readdir(join(repoDir, rel), { withFileTypes: true })) {
-      if (!e.isDirectory() || e.name.startsWith(".")) continue;
-      const child = rel ? `${rel}/${e.name}` : e.name;
-      if (existsSync(join(repoDir, child, SKILL_FILE))) found.push(child);
-      else await walk(child, depth + 1);
-    }
-  };
-  await walk("", 1);
-  return found.sort();
+  return findSkillDirs(repoDir, DISCOVERY_MAX_DEPTH);
 }
 
 /** One skill a source offers, as read without installing it. */
@@ -606,35 +643,6 @@ export async function catalogSource(
   } finally {
     await rm(tmp, { recursive: true, force: true });
   }
-}
-
-/**
- * Whether the agent ever sees this skill offered, from its YAML frontmatter.
- *
- * `disable-model-invocation: true` makes Claude Code omit the skill from the listing it keeps in
- * context — verified over 396 sessions on one machine: zero appearances, ever. Absent or malformed
- * frontmatter reads as invocable, which is the default the agent actually applies.
- */
-function readModelInvocable(doc: string | null): boolean {
-  return parseFrontmatter(doc ?? "")?.["disable-model-invocation"] !== true;
-}
-
-function parseFrontmatter(doc: string): Record<string, unknown> | null {
-  const match = doc.match(/^---\r?\n([\s\S]*?)\r?\n---/);
-  if (!match?.[1]) return null;
-  try {
-    const parsed: unknown = Bun.YAML.parse(match[1]);
-    return parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>) : null;
-  } catch {
-    // Malformed frontmatter is the source's problem, not a reason to fail the catalog.
-    return null;
-  }
-}
-
-/** A skill's stated purpose, from its YAML frontmatter. */
-function readFrontmatterDescription(doc: string): string {
-  const value = parseFrontmatter(doc)?.description;
-  return typeof value === "string" ? value.trim().replace(/\s+/g, " ") : "";
 }
 
 /**
@@ -872,6 +880,8 @@ export type CheckResult = {
   status: CheckStatus;
   /** How the local store directory compares to the hash recorded for it. */
   drift: SkillDrift;
+  /** How the copy Claude loads compares to the store copy — the drift no surface used to watch. */
+  enabledCopy: EnabledCopyState;
   /** The source's head at check time (absent when unreachable). */
   head?: string;
   /** Upstream's hash for this skill, when it differs from the installed one. */
@@ -881,7 +891,13 @@ export type CheckResult = {
 /** What the last `check` observed, keyed by `<source>/<name>`. Derived, so it lives in the cache. */
 export type CheckCache = Record<
   string,
-  { ts: number; status: CheckStatus; drift: SkillDrift; upstreamHash?: string }
+  {
+    ts: number;
+    status: CheckStatus;
+    drift: SkillDrift;
+    enabledCopy?: EnabledCopyState;
+    upstreamHash?: string;
+  }
 >;
 
 export async function readCheckResults(): Promise<CheckCache> {
@@ -930,7 +946,12 @@ export async function checkForUpdates(opts: { git?: SkillGitOps } = {}): Promise
   const results: CheckResult[] = [];
 
   for (const skill of skills) {
-    const base = { name: skill.name, source: skill.source, drift: skill.drift };
+    const base = {
+      name: skill.name,
+      source: skill.source,
+      drift: skill.drift,
+      enabledCopy: skill.enabledCopy,
+    };
     const head = heads.get(skill.source) ?? null;
     if (head === null) {
       results.push({ ...base, status: "unreachable" });
@@ -964,6 +985,7 @@ export async function checkForUpdates(opts: { git?: SkillGitOps } = {}): Promise
       ts,
       status: r.status,
       drift: r.drift,
+      enabledCopy: r.enabledCopy,
       ...(r.upstreamHash ? { upstreamHash: r.upstreamHash } : {}),
     };
   }

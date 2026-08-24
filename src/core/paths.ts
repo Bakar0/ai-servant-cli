@@ -305,6 +305,22 @@ export function userClaudeSkillsDir(): string {
   return join(userClaudeDir(), "skills");
 }
 
+/** Where Claude Code keeps installed plugins. Read-only to servant, and to be kept that way. */
+export function userClaudePluginsDir(): string {
+  return join(userClaudeDir(), "plugins");
+}
+
+/**
+ * Claude Code's record of which plugins are installed and where their bytes are.
+ *
+ * Preferred over walking `plugins/cache/`, which also holds directories nothing installed points at
+ * any more — a stale cached copy reaches no session, and reporting one as reachable would be the
+ * same kind of wrong this record exists to avoid.
+ */
+export function userClaudeInstalledPluginsPath(): string {
+  return join(userClaudePluginsDir(), "installed_plugins.json");
+}
+
 /**
  * The prefix servant used while it materialized skills into `~/.claude/skills/` (ADR-0002 moved them
  * under the servant root). Kept for exactly one purpose: recognizing those copies so they can be

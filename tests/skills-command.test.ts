@@ -72,10 +72,52 @@ type ListedSkill = {
   drift: string;
   storeDir: string;
   modelInvocable: boolean;
+  enabledCopy: string;
+  enabledHash: string | null;
+  localHash: string | null;
   lastCheck: { status: string } | null;
+  score: { sessions: number; justified: number; wasteful: number; net: number } | null;
 };
 
-const listJson = async (): Promise<ListedSkill[]> => JSON.parse(await run("list", "--json"));
+type ListedForeign = {
+  name: string;
+  invocation: string;
+  dir: string;
+  origin: { kind: string; id?: string; plugin?: string; scope?: string; dir?: string };
+  description: string;
+  modelInvocable: boolean;
+  approxTokens: number;
+};
+
+type ListPayload = {
+  skills: ListedSkill[];
+  foreign: ListedForeign[];
+  collisions: {
+    name: string;
+    foreignInvocation: string;
+    foreignOrigin: { kind: string };
+    storeSources: string[];
+  }[];
+};
+
+const listPayload = async (): Promise<ListPayload> => JSON.parse(await run("list", "--json"));
+
+const listJson = async (): Promise<ListedSkill[]> => (await listPayload()).skills;
+
+const FOREIGN_HEADING = "FOREIGN — reachable by a session, not owned by the store";
+
+/** The store's own table: everything `list` prints before the foreign section starts. */
+const storeSection = (out: string): string[] => out.split("\n").slice(0, sectionStart(out));
+
+/** The foreign section, heading included. */
+const foreignSection = (out: string): string[] => out.split("\n").slice(sectionStart(out));
+
+function sectionStart(out: string): number {
+  const lines = out.split("\n");
+  const at = lines.indexOf(FOREIGN_HEADING);
+  // The blank line before the heading belongs to neither table.
+  return at === -1 ? lines.length : at - 1;
+}
 
 // Core skills are in every listing by construction. Assertions about what a *source* put in the
 // store filter them out; the core rows have their own describe block.
@@ -235,18 +277,146 @@ describe("servant skills list", () => {
   test("--json stays parseable when a repair happened on the way in", async () => {
     await rm(enabledSkillDir("tdd"), { recursive: true, force: true });
     const parsed = JSON.parse(await run("list", "--json"));
-    expect(Array.isArray(parsed)).toBe(true);
+    expect(Array.isArray(parsed.skills)).toBe(true);
     expect(existsSync(enabledSkillDir("tdd"))).toBe(true);
   });
 
   test("prints the state | source | name | score | update? columns", async () => {
-    const out = await run("list");
-    const [header, ...rows] = out.split("\n");
+    const [header, ...rows] = storeSection(await run("list"));
     expect(header).toMatch(/STATE\s+SOURCE\s+NAME\s+SCORE\s+UPDATE\?/);
     expect(rows.find((r) => r.includes("tdd"))).toMatch(/^on\s/);
     expect(rows.find((r) => r.includes("teach"))).toMatch(/^off\s/);
     // Listing never touches the network, so update state reads as unchecked until `check` runs.
     expect(rows.every((r) => r.includes("unchecked"))).toBe(true);
+  });
+});
+
+// The store listing only ever claimed to be the whole account of what a session can invoke. These
+// cover the half it never read: enabled plugins and the user's own ~/.claude/skills.
+describe("the foreign sources a session can also reach", () => {
+  /** Register a plugin the way Claude Code does: an install record plus a cache directory. */
+  async function installPlugin(opts: {
+    id: string;
+    skills: string[];
+    enabled?: boolean;
+    scope?: string;
+  }): Promise<void> {
+    const [plugin, marketplace] = opts.id.split("@");
+    const installPath = join(
+      claudeHome,
+      "plugins",
+      "cache",
+      String(marketplace),
+      String(plugin),
+      "1.0.0",
+    );
+    for (const rel of opts.skills) {
+      const dir = join(installPath, "skills", rel);
+      await mkdir(dir, { recursive: true });
+      await writeFile(
+        join(dir, "SKILL.md"),
+        `---\nname: ${rel.split("/").pop()}\ndescription: what it is for\n---\nbody\n`,
+      );
+    }
+    await mkdir(join(claudeHome, "plugins"), { recursive: true });
+    await writeFile(
+      join(claudeHome, "plugins", "installed_plugins.json"),
+      JSON.stringify({
+        version: 2,
+        plugins: {
+          [opts.id]: [{ scope: opts.scope ?? "user", installPath, version: "1.0.0" }],
+        },
+      }),
+    );
+    await writeFile(
+      join(claudeHome, "settings.json"),
+      JSON.stringify({ enabledPlugins: { [opts.id]: opts.enabled ?? true } }),
+    );
+  }
+
+  async function forgetPlugins(): Promise<void> {
+    await rm(join(claudeHome, "plugins"), { recursive: true, force: true });
+    await rm(join(claudeHome, "settings.json"), { force: true });
+  }
+
+  test("lists an enabled plugin's skills under their own section, with the plugin as the origin", async () => {
+    await installPlugin({ id: "kit@market", skills: ["engineering/wizard"] });
+    try {
+      const out = await run("list");
+      const foreign = foreignSection(out);
+      expect(foreign.join("\n")).toContain("plugin kit@market");
+      expect(foreign.find((r) => r.includes("kit:wizard"))).toBeDefined();
+      // and it is not smuggled into the store's own rows
+      expect(storeSection(out).join("\n")).not.toContain("wizard");
+    } finally {
+      await forgetPlugins();
+    }
+  });
+
+  test("calls out a bare-name collision with a store skill instead of merely listing it", async () => {
+    await installPlugin({ id: "kit@market", skills: ["engineering/tdd"] });
+    try {
+      const out = await run("list");
+      expect(out).toContain("1 colliding with a store name");
+      expect(foreignSection(out).find((r) => r.includes("kit:tdd"))).toContain(source);
+      expect(out).toContain("name collision");
+
+      const { collisions } = await listPayload();
+      expect(collisions).toEqual([
+        {
+          name: "tdd",
+          foreignInvocation: "kit:tdd",
+          foreignOrigin: expect.anything(),
+          storeSources: [source],
+        },
+      ]);
+    } finally {
+      await forgetPlugins();
+    }
+  });
+
+  test("a disabled plugin contributes nothing — that is the whole point of reading enabledPlugins", async () => {
+    await installPlugin({ id: "kit@market", skills: ["engineering/wizard"], enabled: false });
+    try {
+      expect((await listPayload()).foreign.map((f) => f.name)).not.toContain("wizard");
+    } finally {
+      await forgetPlugins();
+    }
+  });
+
+  test("separates reachable from model-visible so the resident cost is not overstated", async () => {
+    await installPlugin({ id: "kit@market", skills: ["engineering/shown", "engineering/hidden"] });
+    await writeFile(
+      join(
+        claudeHome,
+        "plugins",
+        "cache",
+        "market",
+        "kit",
+        "1.0.0",
+        "skills",
+        "engineering",
+        "hidden",
+        "SKILL.md",
+      ),
+      "---\nname: hidden\ndescription: only by slash\ndisable-model-invocation: true\n---\nbody\n",
+    );
+    try {
+      const out = await run("list");
+      expect(out).toMatch(/3 skill\(s\) · 2 model-visible/);
+      expect(foreignSection(out).find((r) => r.includes("kit:hidden"))).toMatch(/\sno\s/);
+      expect(foreignSection(out).find((r) => r.includes("kit:shown"))).toMatch(/\syes\s/);
+      expect((await listPayload()).foreign.find((f) => f.name === "hidden")?.approxTokens).toBe(0);
+    } finally {
+      await forgetPlugins();
+    }
+  });
+
+  test("the user's own ~/.claude/skills shows up too, named by its directory", async () => {
+    const payload = await listPayload();
+    const mine = payload.foreign.find((f) => f.name === "my-own-skill");
+    expect(mine?.origin.kind).toBe("personal");
+    expect(mine?.invocation).toBe("my-own-skill");
   });
 });
 
@@ -275,10 +445,8 @@ describe("the score column", () => {
       expect(rows.find((r) => r.includes("tdd"))).toMatch(/\s\+1\/3\s/);
       // a skill no session has judged still reads as unscored, not as neutral.
       expect(rows.find((r) => r.includes("teach"))).toMatch(/\s—\s/);
-      const scored = JSON.parse(await run("list", "--json")).find(
-        (s: { name: string }) => s.name === "tdd",
-      );
-      expect(scored.score).toMatchObject({ sessions: 3, justified: 2, wasteful: 1, net: 1 });
+      const scored = (await listJson()).find((s) => s.name === "tdd");
+      expect(scored?.score).toMatchObject({ sessions: 3, justified: 2, wasteful: 1, net: 1 });
     } finally {
       await rm(insightsJudgmentsDir(), { recursive: true, force: true });
     }
@@ -491,6 +659,37 @@ describe("local changes at the CLI", () => {
     await expect(run("install", source, "--skill", "teach")).rejects.toThrow(/--force/);
     await run("install", source, "--skill", "teach", "--force");
     expect((await listJson()).find((s) => s.name === "teach")?.drift).toBe("clean");
+  });
+});
+
+// Drift used to watch the store copy only, so an edit to the copy Claude actually loads was
+// invisible to every report and thrown away by the next enable, silently.
+describe("the copy Claude loads, when it is not the store's", () => {
+  test("shows in the update column, in check, and in what check tells you to run", async () => {
+    await run("enable", "teach");
+    await writeFile(
+      join(enabledSkillDir("teach"), "SKILL.md"),
+      "---\nname: teach\n---\nedited where it loads from\n",
+    );
+
+    const row = storeSection(await run("list")).find((r) => r.includes("teach"));
+    expect(row).toContain("loaded copy edited");
+
+    const checked = await run("check");
+    expect(checked).toContain("1 with a loaded copy that is not the store's");
+    expect(checked).toContain("loaded copy edited (re-enable to discard it)");
+    expect(checked).toContain("servant skills enable teach");
+
+    expect((await listJson()).find((s) => s.name === "teach")?.enabledCopy).toBe("modified");
+  });
+
+  test("re-enabling is what clears it, and the store's bytes are what land", async () => {
+    await run("enable", "teach");
+    const listed = (await listJson()).find((s) => s.name === "teach");
+    expect(listed?.enabledCopy).toBe("clean");
+    expect(listed?.enabledHash).toBe(listed?.localHash);
+    expect(await run("check")).toContain("0 with a loaded copy that is not the store's");
+    await run("disable", "teach");
   });
 });
 

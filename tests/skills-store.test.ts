@@ -447,6 +447,45 @@ describe("local adaptation", () => {
     expect(await readFile(join(after?.storeDir ?? "", "SKILL.md"), "utf8")).not.toBe(localEdit);
   });
 
+  test("an edited *enabled* copy is drift the store copy cannot show", async () => {
+    await enableSkill(`${alpha}/tdd`);
+    expect((await listSkills()).find((s) => s.name === "tdd")?.enabledCopy).toBe("clean");
+
+    // Editing the copy Claude loads, which is precisely what no surface used to notice.
+    await writeFile(
+      join(enabledSkillDir("tdd"), "SKILL.md"),
+      "---\nname: tdd\n---\nedited in place\n",
+    );
+
+    const after = (await listSkills()).find((s) => s.name === "tdd");
+    expect(after?.enabledCopy).toBe("modified");
+    expect(after?.drift).toBe("clean");
+    expect(after?.enabledHash).not.toBe(after?.localHash);
+  });
+
+  test("check reports the drifted enabled copy alongside the upstream question", async () => {
+    const tdd = (await checkForUpdates()).find((r) => r.name === "tdd");
+    expect(tdd?.enabledCopy).toBe("modified");
+    expect(tdd?.drift).toBe("clean");
+  });
+
+  test("re-enabling discards the in-place edit and clears the drift", async () => {
+    await enableSkill(`${alpha}/tdd`);
+    const after = (await listSkills()).find((s) => s.name === "tdd");
+    expect(after?.enabledCopy).toBe("clean");
+    await disableSkill(`${alpha}/tdd`);
+    expect((await listSkills()).find((s) => s.name === "tdd")?.enabledCopy).toBe("none");
+  });
+
+  test("a copy left behind by a disabled skill is reported rather than silently loading", async () => {
+    const stray = enabledSkillDir("tdd");
+    await mkdir(stray, { recursive: true });
+    await writeFile(join(stray, "SKILL.md"), "---\nname: tdd\n---\nstray\n");
+
+    expect((await listSkills()).find((s) => s.name === "tdd")?.enabledCopy).toBe("unexpected");
+    await rm(stray, { recursive: true, force: true });
+  });
+
   test("a store directory deleted out from under the record reads as missing", async () => {
     const store = skillStoreDir(parseSource(alpha).slug, "teach");
     await rm(store, { recursive: true, force: true });
