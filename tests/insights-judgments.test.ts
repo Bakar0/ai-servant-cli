@@ -265,12 +265,9 @@ describe("pure helpers", () => {
     const already: UnitJudgment[] = [
       { id: "ws:CLAUDE.md", kind: "doc", invoked: false, verdict: "justified", why: "" },
     ];
-    const pick = selectUnitsToJudge(
-      units,
-      already,
-      3,
-      (u) => u.kind === "doc" || u.id === "servant-lead",
-    );
+    const pick = selectUnitsToJudge(units, already, 3, {
+      isJudgeable: (u) => u.kind === "doc" || u.id === "servant-lead",
+    });
     // the doc is already judged; the unmanaged skill has no lever behind it.
     expect(pick.map((u) => u.id)).toEqual(["servant-lead"]);
     // cap already spent by prior verdicts → nothing more this run.
@@ -282,6 +279,29 @@ describe("pure helpers", () => {
       why: "",
     }));
     expect(selectUnitsToJudge(units, [...already, ...judgedNow], 2)).toHaveLength(0);
+  });
+
+  test("selectUnitsToJudge: a unit no session has judged yet outranks a bigger, well-covered one", () => {
+    const units = [
+      unit({ id: "code-review", approxTokens: 114 }),
+      unit({ id: "servant-recall", approxTokens: 65 }),
+      unit({ id: "unslop", approxTokens: 15 }),
+    ];
+    // `code-review` has been judged in every session so far; the small ones never got a slot.
+    const priorVerdicts = new Map([["code-review", 27]]);
+    const pick = selectUnitsToJudge(units, [], 2, { priorVerdicts });
+    expect(pick.map((u) => u.id)).toEqual(["servant-recall", "unslop"]);
+  });
+
+  test("selectUnitsToJudge: within the same coverage, the costliest unit still goes first", () => {
+    const units = [unit({ id: "small", approxTokens: 15 }), unit({ id: "big", approxTokens: 900 })];
+    const pick = selectUnitsToJudge(units, [], 1, {
+      priorVerdicts: new Map([
+        ["small", 1],
+        ["big", 1],
+      ]),
+    });
+    expect(pick.map((u) => u.id)).toEqual(["big"]);
   });
 
   test("mergeUnitJudgments dedups by unit id", () => {
@@ -451,6 +471,47 @@ describe("runJudgeDrain", () => {
     const rec = await readJudgment(SESSION_ID);
     expect(rec?.units.map((u) => u.id)).toContain("servant-lead");
     expect(rec?.units.find((u) => u.id === "root:CLAUDE.md")?.kind).toBe("doc");
+  });
+
+  test("one drain spreads its unit slots — the second session does not re-judge the first's pick", async () => {
+    // Two sessions, one drain, one unit slot each. Size ordering alone would spend both slots on
+    // the largest unit; coverage has to move as the drain writes, not just when it starts.
+    const listing = {
+      type: "attachment",
+      cwd: wsCwd,
+      attachment: {
+        type: "skill_listing",
+        isInitial: true,
+        names: ["servant-lead"],
+        content: "- servant-lead: Report where the whole initiative stands.",
+      },
+    };
+    await writeFile(join(tmpRoot, "CLAUDE.md"), "# servant conventions\n".repeat(200));
+    const second = "bbbbbbbb-bbbb-cccc-dddd-eeeeeeeeeeee";
+    for (const id of [SESSION_ID, second]) {
+      const transcript = await writeSessionTranscript(id, [listing, ...fixtureRecords()]);
+      await runJudgeFromHook(hookPayload({ session_id: id }, transcript), { kick: false });
+    }
+
+    await runJudgeDrain({
+      maxUnits: 1,
+      runner: async ({ units }) => ({
+        sessionId: "h",
+        judgments: [],
+        units: units.map((u) => ({
+          id: u.id,
+          kind: u.kind,
+          invoked: false,
+          verdict: "neutral" as const,
+          why: "",
+        })),
+      }),
+    });
+
+    const first = (await readJudgment(SESSION_ID))?.units.map((u) => u.id) ?? [];
+    const rest = (await readJudgment(second))?.units.map((u) => u.id) ?? [];
+    expect(first).toEqual(["root:CLAUDE.md"]); // costliest, nothing judged yet
+    expect(rest).toEqual(["servant-lead"]); // the doc is covered now, so the slot moves on
   });
 
   test("units are judged at most once per session (the axis is idempotent too)", async () => {

@@ -80,7 +80,7 @@ function buildRows(
     state: s.source === CORE_SOURCE ? "core" : s.enabled ? "on" : "off",
     source: s.source,
     name: s.contested ? `${s.name} (contested)` : s.name,
-    score: formatUnitScore(scores.get(s.name)),
+    score: formatUnitScore(scores.get(s.name), s.modelInvocable),
     update: updateCell(s, checks),
   }));
   const width = (key: "state" | "source" | "name" | "score", min: number) =>
@@ -124,7 +124,7 @@ function preview(
     `source:  ${skill.source}`,
     `hash:    ${skill.hash}${skill.drift === "clean" ? "" : `  (as installed; local ${skill.localHash ?? "gone"})`}`,
     skill.source === CORE_SOURCE ? "" : `ref:     ${skill.ref || "(unknown)"}`,
-    `score:   ${describeUnitScore(scores.get(skill.name))}`,
+    `score:   ${describeUnitScore(scores.get(skill.name), skill.modelInvocable)}`,
     `update:  ${updateCell(skill, checks)}`,
     skill.source === CORE_SOURCE
       ? "store:   ships inside the servant binary — always on, never removable"
@@ -197,6 +197,7 @@ const listCommand = defineCommand({
             drift: s.drift,
             localHash: s.localHash,
             storeDir: s.storeDir,
+            modelInvocable: s.modelInvocable,
             lastCheck: checks[`${s.source}/${s.name}`] ?? null,
             score: scores.get(s.name) ?? null,
           })),

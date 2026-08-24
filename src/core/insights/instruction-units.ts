@@ -17,6 +17,9 @@ import { readWorkspaceAgent } from "../workspace.ts";
 //   - The top-level instruction docs — servant's root conventions, the workspace rendering, GOAL.md
 //     — live only in the unrecorded system prompt, so they are enumerated from disk the same way
 //     the setup fingerprint enumerates its parts when the transcript did not embed them.
+//
+// A doc that servant generates into is more than one unit, and is split accordingly — see
+// `splitGeneratedRegions`.
 
 export type InstructionUnitKind = "skill" | "doc";
 
@@ -38,7 +41,11 @@ export interface InstructionUnit {
    * not the ending one, is what a per-session verdict is about.
    */
   fromStart: boolean;
-  /** Mechanical uses: Skill/slash-command invocations for a skill, `Read` calls for a doc. */
+  /**
+   * Mechanical uses: Skill/slash-command invocations for a skill; for a doc, every way a session
+   * went and read it — the `Read` tool *and* read-shaped Bash (`cat`, `sed -n`, `grep`), which is
+   * how docs are actually read and therefore the only way this is ever non-zero.
+   */
   uses: number;
 }
 
@@ -89,6 +96,66 @@ export function parseSkillListing(content: string): Map<string, number> {
     if (current) out.set(current, (out.get(current) ?? 0) + line.length + 1);
   }
   return out;
+}
+
+/** One slice of an instruction doc: its authored text, or one region servant generates into it. */
+export interface DocRegion {
+  /** The region's marker name (`knowledge`), or null for the doc's own authored text. */
+  name: string | null;
+  chars: number;
+}
+
+/**
+ * A generated region announces itself: its opening marker says edits *below* it are overwritten,
+ * and it runs to the next such marker or to EOF. A whole-file stamp says edits *here* are
+ * overwritten and is deliberately not a boundary — it describes the file, not a region inside it.
+ */
+const GENERATED_REGION_RE =
+  /^<!--[ \t]*servant:([a-z0-9-]+)\b.*edits below are overwritten.*-->[ \t]*$/gim;
+
+/**
+ * Split a doc into the text a human tunes and the regions servant renders into it.
+ *
+ * The split exists because a single verdict on a mixed doc says the wrong thing. Measured on this
+ * workspace, `ws:CLAUDE.md` scored 7/7 justified and every stated reason cited the 279 tokens of
+ * board conventions — while 6,793 tokens of generated knowledge index rode along unmentioned. The
+ * two halves also have different levers: prose is tuned through the fine-tune overlay, a generated
+ * region only by changing what renders it.
+ *
+ * The marker is the only thing read here, never a renderer's name, which keeps this module as
+ * ignorant of specific units as the rest of servant is: the next block that declares itself
+ * overwritable splits out without this file learning anything.
+ *
+ * A marker that does *not* declare it (`<!-- servant:agent-skills -->`) stays charged to the
+ * authored text on purpose — it anchors a section of servant's own prose, and prose is prose
+ * whoever typed it. The split tracks levers, not authorship.
+ */
+export function splitGeneratedRegions(text: string): DocRegion[] {
+  const marks: { name: string; start: number }[] = [];
+  for (const m of text.matchAll(GENERATED_REGION_RE)) {
+    if (m.index !== undefined && m[1]) marks.push({ name: m[1], start: m.index });
+  }
+  if (marks.length === 0) return [{ name: null, chars: text.length }];
+  const byName = new Map<string, number>();
+  for (const [i, mark] of marks.entries()) {
+    const end = marks[i + 1]?.start ?? text.length;
+    byName.set(mark.name, (byName.get(mark.name) ?? 0) + (end - mark.start));
+  }
+  return [
+    { name: null, chars: marks[0]?.start ?? 0 },
+    ...[...byName].map(([name, chars]) => ({ name, chars })),
+  ];
+}
+
+/** A generated region's unit id, namespaced under the doc it lives in. */
+export function regionUnitId(docId: string, region: string): string {
+  return `${docId}#${region}`;
+}
+
+/** The inverse: the doc and region a unit id names, or null when it is not a region id. */
+export function parseRegionUnitId(id: string): { docId: string; region: string } | null {
+  const at = id.indexOf("#");
+  return at > 0 ? { docId: id.slice(0, at), region: id.slice(at + 1) } : null;
 }
 
 function asStringArray(v: unknown): string[] {
@@ -165,13 +232,14 @@ export function unitsFromRecords(records: readonly UnitRecord[]): AttachmentUnit
 interface EnumeratedDoc {
   id: string;
   path: string;
-  chars: number;
+  /** The authored text plus every generated region, authored first. */
+  regions: DocRegion[];
   resident: boolean;
 }
 
-async function fileChars(path: string): Promise<number | null> {
+async function docRegions(path: string): Promise<DocRegion[] | null> {
   try {
-    return (await readFile(path, "utf8")).length;
+    return splitGeneratedRegions(await readFile(path, "utf8"));
   } catch {
     return null;
   }
@@ -188,9 +256,9 @@ async function fileChars(path: string): Promise<number | null> {
 export async function enumerateDocUnits(workspace: string | null): Promise<EnumeratedDoc[]> {
   const out: EnumeratedDoc[] = [];
   const rootConventions = join(aiServantRoot(), "CLAUDE.md");
-  const rootChars = await fileChars(rootConventions);
-  if (rootChars !== null) {
-    out.push({ id: "root:CLAUDE.md", path: rootConventions, chars: rootChars, resident: true });
+  const rootRegions = await docRegions(rootConventions);
+  if (rootRegions) {
+    out.push({ id: "root:CLAUDE.md", path: rootConventions, regions: rootRegions, resident: true });
   }
   if (!workspace) return out;
 
@@ -199,13 +267,13 @@ export async function enumerateDocUnits(workspace: string | null): Promise<Enume
   const rendering = backend === "codex" ? "AGENTS.md" : "CLAUDE.md";
   for (const rel of [rendering, "GOAL.md"]) {
     const path = join(wsDir, rel);
-    const chars = await fileChars(path);
-    if (chars !== null) out.push({ id: `ws:${rel}`, path, chars, resident: true });
+    const regions = await docRegions(path);
+    if (regions) out.push({ id: `ws:${rel}`, path, regions, resident: true });
   }
   for (const rel of ON_DEMAND_DOC_FILES) {
     const path = join(wsDir, rel);
-    const chars = await fileChars(path);
-    if (chars !== null) out.push({ id: `ws:${rel}`, path, chars, resident: false });
+    const regions = await docRegions(path);
+    if (regions) out.push({ id: `ws:${rel}`, path, regions, resident: false });
   }
   for (const dir of ON_DEMAND_DOC_DIRS) {
     let names: string[] = [];
@@ -217,8 +285,8 @@ export async function enumerateDocUnits(workspace: string | null): Promise<Enume
     for (const name of names.toSorted()) {
       const rel = `${dir}/${name}`;
       const path = join(wsDir, rel);
-      const chars = await fileChars(path);
-      if (chars !== null) out.push({ id: `ws:${rel}`, path, chars, resident: false });
+      const regions = await docRegions(path);
+      if (regions) out.push({ id: `ws:${rel}`, path, regions, resident: false });
     }
   }
   return out;
@@ -252,6 +320,12 @@ export async function collectInstructionUnits(opts: {
   invocations: readonly string[];
   /** Absolute path → `Read` count, for joining reads to doc units. */
   readCounts: ReadonlyMap<string, number>;
+  /**
+   * Absolute path → read-shaped Bash count (`cat`, `sed -n`, `grep`). Kept separate from
+   * `readCounts` on the way in because only the doc join wants it: the `Read`-tool map also feeds
+   * the repeated-read friction signal, and every `cat` in a session is not that.
+   */
+  bashReadCounts?: ReadonlyMap<string, number>;
   workspace: string | null;
   maxUnits?: number;
 }): Promise<InstructionUnit[]> {
@@ -272,15 +346,25 @@ export async function collectInstructionUnits(opts: {
       uses: 0,
     });
   }
+  // Split so a verdict lands on the half it can actually act on.
+  const regionsOf = new Map<string, string[]>();
   for (const d of enumerated) {
-    set({
-      id: d.id,
-      kind: "doc",
-      approxTokens: approxTokens(d.chars),
-      resident: d.resident,
-      fromStart: true,
-      uses: 0,
-    });
+    for (const region of d.regions) {
+      const id = region.name === null ? d.id : regionUnitId(d.id, region.name);
+      if (id !== d.id) {
+        const siblings = regionsOf.get(d.id);
+        if (siblings) siblings.push(id);
+        else regionsOf.set(d.id, [id]);
+      }
+      set({
+        id,
+        kind: "doc",
+        approxTokens: approxTokens(region.chars),
+        resident: d.resident,
+        fromStart: true,
+        uses: 0,
+      });
+    }
   }
   // Repo-level CLAUDE.md/AGENTS.md files load when the session touches their directory, so they are
   // resident from that point on but not part of the starting set.
@@ -303,11 +387,17 @@ export async function collectInstructionUnits(opts: {
     const unit = id ? units.get(id) : undefined;
     if (unit) unit.uses += 1;
   }
-  for (const [path, count] of opts.readCounts) {
+  // Reading a file reads everything in it, so a doc's regions count the read too.
+  const countRead = (path: string, count: number) => {
     const id = docIdForPath(path, wsDir);
-    const unit = id ? units.get(id) : undefined;
-    if (unit) unit.uses += count;
-  }
+    if (!id) return;
+    for (const target of [id, ...(regionsOf.get(id) ?? [])]) {
+      const unit = units.get(target);
+      if (unit) unit.uses += count;
+    }
+  };
+  for (const [path, count] of opts.readCounts) countRead(path, count);
+  for (const [path, count] of opts.bashReadCounts ?? []) countRead(path, count);
 
   return [...units.values()]
     .toSorted((a, b) => b.approxTokens - a.approxTokens || a.id.localeCompare(b.id))

@@ -71,6 +71,7 @@ type ListedSkill = {
   contested: boolean;
   drift: string;
   storeDir: string;
+  modelInvocable: boolean;
   lastCheck: { status: string } | null;
 };
 
@@ -490,5 +491,31 @@ describe("local changes at the CLI", () => {
     await expect(run("install", source, "--skill", "teach")).rejects.toThrow(/--force/);
     await run("install", source, "--skill", "teach", "--force");
     expect((await listJson()).find((s) => s.name === "teach")?.drift).toBe("clean");
+  });
+});
+
+describe("a skill Claude Code never lists", () => {
+  test("reads as unjudgeable rather than unjudged, because no session can score it", async () => {
+    const slashOnly = join(scratch, "slash-only-skills");
+    await $`git init -q -b main ${slashOnly}`.quiet();
+    await git(slashOnly, "config", "user.email", "test@example.com");
+    await git(slashOnly, "config", "user.name", "Test");
+    await mkdir(join(slashOnly, "handcrank"), { recursive: true });
+    await writeFile(
+      join(slashOnly, "handcrank", "SKILL.md"),
+      "---\nname: handcrank\ndescription: A human triggers this one.\ndisable-model-invocation: true\n---\nbody\n",
+    );
+    await git(slashOnly, "add", "-A");
+    await git(slashOnly, "commit", "-qm", "initial");
+
+    await run("install", slashOnly, "--skill", "handcrank");
+    const rows = (await run("list")).split("\n");
+    expect(rows.find((r) => r.includes("handcrank"))).toMatch(/\sn\/a\s/);
+    // the model-invocable ones keep the plain unjudged dash
+    expect(rows.find((r) => r.includes("teach"))).toMatch(/\s—\s/);
+
+    const json = (await listJson()).find((s) => s.name === "handcrank");
+    expect(json?.modelInvocable).toBe(false);
+    expect((await listJson()).find((s) => s.name === "teach")?.modelInvocable).toBe(true);
   });
 });

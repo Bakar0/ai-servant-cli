@@ -29,9 +29,11 @@ import {
   commitInsights,
   ensureInsightsStore,
   getOrComputeMetrics,
+  readAllJudgments,
   readJudgment,
   writeJudgment,
 } from "../core/insights/store.ts";
+import { unitCoverage } from "../core/insights/unit-scores.ts";
 import { applyRootOverride, workspacesRoot } from "../core/paths.ts";
 import { servantReinvokeArgv } from "../core/self-exec.ts";
 import { detectWorkspaceNameFromCwd, readWorkspaceAgent } from "../core/workspace.ts";
@@ -163,6 +165,12 @@ export async function runJudgeDrain(
   const cap = opts.maxCandidates ?? DEFAULT_MAX_JUDGE_CANDIDATES;
   const unitCap = opts.maxUnits ?? DEFAULT_MAX_JUDGE_UNITS;
   const judgeable = await judgeableUnitFilter();
+  // Coverage is what stops the cap from re-judging the same costly units forever. Read from the
+  // store, never stored back — the same on-read rule every other unit aggregate follows. A drain
+  // processes a whole queue, so it also has to count what it writes as it goes: reading once and
+  // never updating would give every session in one drain the same all-zero coverage, which is the
+  // starvation this is here to fix.
+  const priorVerdicts = unitCoverage(await readAllJudgments());
   let processed = 0;
   let judged = 0;
   let firstError: string | undefined;
@@ -178,12 +186,10 @@ export async function runJudgeDrain(
         const existing = stored?.judgments ?? [];
         const existingUnits = stored?.units ?? [];
         const toJudge = selectCandidatesToJudge(record.candidates, existing, cap);
-        const unitsToJudge = selectUnitsToJudge(
-          record.instructionUnits,
-          existingUnits,
-          unitCap,
-          judgeable,
-        );
+        const unitsToJudge = selectUnitsToJudge(record.instructionUnits, existingUnits, unitCap, {
+          isJudgeable: judgeable,
+          priorVerdicts,
+        });
         // Nothing new on either axis — the idempotent no-op.
         if (toJudge.length === 0 && unitsToJudge.length === 0) continue;
         const { judgments, units } = await runner({
@@ -197,6 +203,7 @@ export async function runJudgeDrain(
           judgments: mergeJudgments(existing, judgments),
           units: mergeUnitJudgments(existingUnits, units),
         });
+        for (const u of units) priorVerdicts.set(u.id, (priorVerdicts.get(u.id) ?? 0) + 1);
         judged += judgments.length + units.length;
         processed += 1;
       } catch (err) {
