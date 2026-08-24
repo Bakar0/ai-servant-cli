@@ -430,6 +430,11 @@ The binary is fully self-contained: there is no source tree to read at runtime.
   the status-line script) are embedded via a generated manifest, `src/templates/index.generated.ts`
   (`with { type: "text" }` imports). Regenerate it with `bun run gen:templates`; CI fails if it
   drifts from the files on disk. Never edit the generated file by hand.
+  - Template files are stored under **escaped** names - `CLAUDE.tmpl.md`, `_claude/` for
+    `.claude/` - so the tree is not itself discovered as an instruction surface by an agent
+    working in this repo. The manifest maps each name back to the path it means
+    (`scripts/template-paths.ts`), so consumers still read the real path. Add a template under
+    a name an agent auto-loads and `tests/templates-not-instruction-surface.test.ts` fails.
 - **Version** comes from `git describe --tags`, stamped into `src/version.generated.ts` by
   `bun run gen:version`. In dev (`bun run`) the live `git describe` is used; the compiled binary
   uses the value embedded at build time.
