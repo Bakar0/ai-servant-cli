@@ -165,8 +165,11 @@ export async function runJudgeDrain(
   const cap = opts.maxCandidates ?? DEFAULT_MAX_JUDGE_CANDIDATES;
   const unitCap = opts.maxUnits ?? DEFAULT_MAX_JUDGE_UNITS;
   const judgeable = await judgeableUnitFilter();
-  // Coverage is what stops the cap from re-judging the same costly units forever. Read once per
-  // drain, never stored — the same on-read rule every other unit aggregate follows.
+  // Coverage is what stops the cap from re-judging the same costly units forever. Read from the
+  // store, never stored back — the same on-read rule every other unit aggregate follows. A drain
+  // processes a whole queue, so it also has to count what it writes as it goes: reading once and
+  // never updating would give every session in one drain the same all-zero coverage, which is the
+  // starvation this is here to fix.
   const priorVerdicts = unitCoverage(await readAllJudgments());
   let processed = 0;
   let judged = 0;
@@ -200,6 +203,7 @@ export async function runJudgeDrain(
           judgments: mergeJudgments(existing, judgments),
           units: mergeUnitJudgments(existingUnits, units),
         });
+        for (const u of units) priorVerdicts.set(u.id, (priorVerdicts.get(u.id) ?? 0) + 1);
         judged += judgments.length + units.length;
         processed += 1;
       } catch (err) {

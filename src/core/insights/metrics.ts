@@ -343,17 +343,22 @@ const MAX_FRICTION_SAMPLES = 8;
  * Returns null when there's no clean program token (e.g. a bare subshell), so the caller falls back.
  */
 function bashHead(command: string): string | null {
-  const tokens = command.trim().split(/\s+/);
+  const { head } = splitShellSegment(command);
+  if (!head) return null;
+  const base = head.replace(/^.*\//, "");
+  return /^[\w.-]+$/.test(base) ? base : null;
+}
+
+/** A shell segment as its program token plus everything after it, past any `sudo` / `FOO=bar`. */
+function splitShellSegment(segment: string): { head: string | null; rest: string[] } {
+  const tokens = segment.trim().split(/\s+/).filter(Boolean);
   let i = 0;
   while (i < tokens.length) {
     const t = tokens[i] ?? "";
     if (t === "sudo" || /^[A-Za-z_][A-Za-z0-9_]*=/.test(t)) i += 1;
     else break;
   }
-  const tok = tokens[i];
-  if (!tok) return null;
-  const base = tok.replace(/^.*\//, "");
-  return /^[\w.-]+$/.test(base) ? base : null;
+  return { head: tokens[i] ?? null, rest: tokens.slice(i + 1) };
 }
 
 /** Shell programs whose operands are files being read into the session's context. */
@@ -390,16 +395,12 @@ const READ_SHAPED_HEADS = new Set([
 export function readShapedBashPaths(command: string): string[] {
   const out: string[] = [];
   for (const segment of command.split(/\|\||&&|[;|\n]/)) {
-    const head = bashHead(segment);
+    const { head, rest } = splitShellSegment(segment);
     if (!head || !READ_SHAPED_HEADS.has(head)) continue;
-    const tokens = segment.trim().split(/\s+/).filter(Boolean);
-    let i = 0;
-    while (i < tokens.length) {
-      const t = tokens[i] ?? "";
-      if (t === "sudo" || /^[A-Za-z_][A-Za-z0-9_]*=/.test(t)) i += 1;
-      else break;
-    }
-    for (const raw of tokens.slice(i + 1)) {
+    // `sed -i` / `awk -i` rewrite the file rather than print it. Counting one as a read would let
+    // an edit masquerade as the re-read that tells the judge a doc's guidance did not stick.
+    if (rest.some((t) => t === "-i" || t === "--in-place" || /^-i[^-]/.test(t))) continue;
+    for (const raw of rest) {
       // A redirect ends the operand list — what follows is a destination being written, not read.
       if (/[<>]/.test(raw)) break;
       if (raw.startsWith("-")) continue;
@@ -506,6 +507,20 @@ export async function extractSessionMetrics(
   let pendingRecall = false; // a recall awaiting a knowledge Read (feeds recallFollowedByRead)
   let recallAwaitingConsume = false; // a recall not yet counted consumed (surfaced ∪ read)
 
+  /** Record a knowledge note read, and settle any recall it consumes. */
+  const noteKnowledgeRead = (path: string): void => {
+    if (!KNOWLEDGE_PATH_RE.test(path)) return;
+    knowledgeReads.add(path);
+    if (pendingRecall) {
+      recallFollowedByRead += 1;
+      pendingRecall = false;
+    }
+    if (recallAwaitingConsume) {
+      recallsConsumed += 1;
+      recallAwaitingConsume = false;
+    }
+  };
+
   const reposSeen = new Set<string>();
   const allRecords: AnyRecord[] = [];
   let lastTurnWasAssistantAction = false;
@@ -518,7 +533,7 @@ export async function extractSessionMetrics(
     if (typeof rec.cwd === "string" && rec.cwd.length > 0 && !launchCwd) {
       launchCwd = rec.cwd;
     }
-    // Relative operands in a Bash command resolve against the cwd of the record that ran it.
+    // Per record, not per session: a session that cd's into a repo resolves `cat GOAL.md` there.
     const recCwd = typeof rec.cwd === "string" && rec.cwd.length > 0 ? rec.cwd : launchCwd;
     if (!version && typeof rec.version === "string") version = rec.version;
 
@@ -613,16 +628,7 @@ export async function extractSessionMetrics(
               for (const operand of readShapedBashPaths(command)) {
                 const p = resolve(recCwd ?? "", operand);
                 bashReadCounts.set(p, (bashReadCounts.get(p) ?? 0) + 1);
-                if (!KNOWLEDGE_PATH_RE.test(p)) continue;
-                knowledgeReads.add(p);
-                if (pendingRecall) {
-                  recallFollowedByRead += 1;
-                  pendingRecall = false;
-                }
-                if (recallAwaitingConsume) {
-                  recallsConsumed += 1;
-                  recallAwaitingConsume = false;
-                }
+                noteKnowledgeRead(p);
               }
             }
           }
@@ -678,21 +684,7 @@ export async function extractSessionMetrics(
               errorSamples.push({ tool: bucket, snippet: oneLine(text, 120), permission });
             }
           }
-          // A recall is "consumed" if a knowledge note is Read after it.
-          if (tool === "Read") {
-            const p = asString(input.file_path ?? input.path);
-            if (p && KNOWLEDGE_PATH_RE.test(p)) {
-              knowledgeReads.add(p);
-              if (pendingRecall) {
-                recallFollowedByRead += 1;
-                pendingRecall = false;
-              }
-              if (recallAwaitingConsume) {
-                recallsConsumed += 1;
-                recallAwaitingConsume = false;
-              }
-            }
-          }
+          if (tool === "Read") noteKnowledgeRead(asString(input.file_path ?? input.path));
           // `servant recall` returns note bodies inline (each hit prints its absolute path), so the
           // surfaced notes are used without any Read. Attribute them off the Bash *result* text.
           if (tool === "Bash" && /\bservant recall\b/.test(asString(input.command))) {

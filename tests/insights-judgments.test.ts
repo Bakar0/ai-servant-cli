@@ -473,6 +473,47 @@ describe("runJudgeDrain", () => {
     expect(rec?.units.find((u) => u.id === "root:CLAUDE.md")?.kind).toBe("doc");
   });
 
+  test("one drain spreads its unit slots — the second session does not re-judge the first's pick", async () => {
+    // Two sessions, one drain, one unit slot each. Size ordering alone would spend both slots on
+    // the largest unit; coverage has to move as the drain writes, not just when it starts.
+    const listing = {
+      type: "attachment",
+      cwd: wsCwd,
+      attachment: {
+        type: "skill_listing",
+        isInitial: true,
+        names: ["servant-lead"],
+        content: "- servant-lead: Report where the whole initiative stands.",
+      },
+    };
+    await writeFile(join(tmpRoot, "CLAUDE.md"), "# servant conventions\n".repeat(200));
+    const second = "bbbbbbbb-bbbb-cccc-dddd-eeeeeeeeeeee";
+    for (const id of [SESSION_ID, second]) {
+      const transcript = await writeSessionTranscript(id, [listing, ...fixtureRecords()]);
+      await runJudgeFromHook(hookPayload({ session_id: id }, transcript), { kick: false });
+    }
+
+    await runJudgeDrain({
+      maxUnits: 1,
+      runner: async ({ units }) => ({
+        sessionId: "h",
+        judgments: [],
+        units: units.map((u) => ({
+          id: u.id,
+          kind: u.kind,
+          invoked: false,
+          verdict: "neutral" as const,
+          why: "",
+        })),
+      }),
+    });
+
+    const first = (await readJudgment(SESSION_ID))?.units.map((u) => u.id) ?? [];
+    const rest = (await readJudgment(second))?.units.map((u) => u.id) ?? [];
+    expect(first).toEqual(["root:CLAUDE.md"]); // costliest, nothing judged yet
+    expect(rest).toEqual(["servant-lead"]); // the doc is covered now, so the slot moves on
+  });
+
   test("units are judged at most once per session (the axis is idempotent too)", async () => {
     const records = [
       {

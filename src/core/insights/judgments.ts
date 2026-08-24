@@ -5,7 +5,11 @@ import { headlessModelArgs } from "../headless-model.ts";
 import { registerHeadlessSession } from "../headless-sessions.ts";
 import { cacheDir, workspacesRoot } from "../paths.ts";
 import { detectWorkspaceNameFromCwd, readWorkspaceAgent } from "../workspace.ts";
-import type { InstructionUnit, InstructionUnitKind } from "./instruction-units.ts";
+import {
+  type InstructionUnit,
+  type InstructionUnitKind,
+  parseRegionUnitId,
+} from "./instruction-units.ts";
 import type { Candidate, CandidateKind, TranscriptAnchor } from "./metrics.ts";
 
 // Tier 2 of the insights model: a headless agent reads ONLY the anchored spans of a session's
@@ -273,11 +277,10 @@ function describeUnit(u: InstructionUnit): string {
     : `~${u.approxTokens} tok, only if read`;
   const used = u.kind === "doc" ? `read ${u.uses}×` : `invoked ${u.uses}×`;
   const start = u.fromStart ? "in the starting set" : "loaded mid-session";
-  const hash = u.id.indexOf("#");
-  const part =
-    u.kind === "doc" && hash > 0
-      ? `, a generated region inside ${u.id.slice(0, hash)} (servant renders it; nobody wrote it by hand)`
-      : "";
+  const region = u.kind === "doc" ? parseRegionUnitId(u.id) : null;
+  const part = region
+    ? `, a generated region inside ${region.docId} (servant renders it; nobody wrote it by hand)`
+    : "";
   return `${u.kind} ${u.id} — ${cost}, ${used}, ${start}${part}`;
 }
 

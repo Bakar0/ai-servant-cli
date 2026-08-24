@@ -81,10 +81,8 @@ export type InstalledSkill = SkillEntry & {
   localHash: string | null;
   /**
    * False when the skill's frontmatter carries `disable-model-invocation`, which keeps it out of the
-   * agent's skill listing entirely: it is `/`-invocable only, costs zero resident tokens, and no
-   * session evaluator can ever score it. That is a coherent state, not a measurement failure, so it
-   * has to be sayable — a score column showing the same dash for "unjudged" and "unjudgeable"
-   * cannot tell a reader which one it is looking at.
+   * agent's skill listing entirely: it is `/`-invocable only and costs zero resident tokens. Read
+   * surfaces need it because such a skill is *unjudgeable*, not merely unjudged — see `UNJUDGEABLE`.
    */
   modelInvocable: boolean;
 };
@@ -506,9 +504,7 @@ export async function listInstalledSkills(): Promise<InstalledSkill[]> {
         contested: (counts.get(name) ?? 0) > 1,
         drift,
         localHash,
-        modelInvocable: readModelInvocable(
-          (await readTextOr(join(storeDir, SKILL_FILE), "")) ?? "",
-        ),
+        modelInvocable: readModelInvocable(await readTextOr(join(storeDir, SKILL_FILE), "")),
       };
     }),
   );
@@ -619,8 +615,8 @@ export async function catalogSource(
  * context — verified over 396 sessions on one machine: zero appearances, ever. Absent or malformed
  * frontmatter reads as invocable, which is the default the agent actually applies.
  */
-function readModelInvocable(doc: string): boolean {
-  return parseFrontmatter(doc)?.["disable-model-invocation"] !== true;
+function readModelInvocable(doc: string | null): boolean {
+  return parseFrontmatter(doc ?? "")?.["disable-model-invocation"] !== true;
 }
 
 function parseFrontmatter(doc: string): Record<string, unknown> | null {

@@ -5,7 +5,9 @@ import { join } from "node:path";
 import {
   collectInstructionUnits,
   normalizeInvocationName,
+  parseRegionUnitId,
   parseSkillListing,
+  regionUnitId,
   splitGeneratedRegions,
 } from "../src/core/insights/instruction-units.ts";
 import type { JudgmentRecord } from "../src/core/insights/judgments.ts";
@@ -315,6 +317,14 @@ describe("readShapedBashPaths", () => {
     );
   });
 
+  test("an in-place edit is not a read — otherwise a rewrite fakes the re-read signal", () => {
+    expect(readShapedBashPaths("sed -i '' s/a/b/ GOAL.md")).toEqual([]);
+    expect(readShapedBashPaths("sed -i.bak s/a/b/ GOAL.md")).toEqual([]);
+    expect(readShapedBashPaths("sed --in-place s/a/b/ GOAL.md")).toEqual([]);
+    // the printing form still counts
+    expect(readShapedBashPaths("sed -n 1,5p GOAL.md")).toContain("GOAL.md");
+  });
+
   test("ignores commands that are not reads, and tokens that are not operands", () => {
     expect(readShapedBashPaths("servant recall foo")).toEqual([]);
     expect(readShapedBashPaths("rm -rf GOAL.md")).toEqual([]);
@@ -406,6 +416,17 @@ describe("unjudgeable units", () => {
       },
     ]);
     expect(formatUnitScore(scores.get("implement"), false)).toBe("+1/1");
+  });
+});
+
+describe("region unit ids", () => {
+  test("round-trip, and a plain doc id is not a region", () => {
+    expect(parseRegionUnitId(regionUnitId("ws:CLAUDE.md", "knowledge"))).toEqual({
+      docId: "ws:CLAUDE.md",
+      region: "knowledge",
+    });
+    expect(parseRegionUnitId("ws:CLAUDE.md")).toBeNull();
+    expect(parseRegionUnitId("#leading")).toBeNull();
   });
 });
 

@@ -122,9 +122,13 @@ const GENERATED_REGION_RE =
  * two halves also have different levers: prose is tuned through the fine-tune overlay, a generated
  * region only by changing what renders it.
  *
- * The marker is the only thing read here, never a renderer's name. That is what makes the next
- * generated block split out on its own, and keeps this module as ignorant of specific units as the
- * rest of servant is.
+ * The marker is the only thing read here, never a renderer's name, which keeps this module as
+ * ignorant of specific units as the rest of servant is: the next block that declares itself
+ * overwritable splits out without this file learning anything.
+ *
+ * A marker that does *not* declare it (`<!-- servant:agent-skills -->`) stays charged to the
+ * authored text on purpose — it anchors a section of servant's own prose, and prose is prose
+ * whoever typed it. The split tracks levers, not authorship.
  */
 export function splitGeneratedRegions(text: string): DocRegion[] {
   const marks: { name: string; start: number }[] = [];
@@ -146,6 +150,12 @@ export function splitGeneratedRegions(text: string): DocRegion[] {
 /** A generated region's unit id, namespaced under the doc it lives in. */
 export function regionUnitId(docId: string, region: string): string {
   return `${docId}#${region}`;
+}
+
+/** The inverse: the doc and region a unit id names, or null when it is not a region id. */
+export function parseRegionUnitId(id: string): { docId: string; region: string } | null {
+  const at = id.indexOf("#");
+  return at > 0 ? { docId: id.slice(0, at), region: id.slice(at + 1) } : null;
 }
 
 function asStringArray(v: unknown): string[] {
@@ -336,13 +346,16 @@ export async function collectInstructionUnits(opts: {
       uses: 0,
     });
   }
-  // A doc contributes one unit for its authored text plus one per generated region, so a verdict
-  // lands on the half it can actually act on.
+  // Split so a verdict lands on the half it can actually act on.
   const regionsOf = new Map<string, string[]>();
   for (const d of enumerated) {
     for (const region of d.regions) {
       const id = region.name === null ? d.id : regionUnitId(d.id, region.name);
-      if (region.name !== null) regionsOf.set(d.id, [...(regionsOf.get(d.id) ?? []), id]);
+      if (id !== d.id) {
+        const siblings = regionsOf.get(d.id);
+        if (siblings) siblings.push(id);
+        else regionsOf.set(d.id, [id]);
+      }
       set({
         id,
         kind: "doc",
