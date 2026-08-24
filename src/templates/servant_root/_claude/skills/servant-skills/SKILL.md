@@ -26,8 +26,8 @@ name, that is the signal to stop and say so, not to add it.
 | `servant skills catalog <source>` | Read what a source offers — name, stated purpose, and which siblings each one points at — installing nothing. |
 | `servant skills install <source> --skill <name>` | Take one (repeatable, comma-separable). `--enable` in the same breath. `--all` takes everything the source has. |
 | `servant skills enable <name>` · `servant skills disable <name>` | Whether Claude loads it. Enable copies out of the store; disable deletes the copy and keeps the record. |
-| `servant skills check` | Ask every source whether it moved. Detects; never applies. |
-| `servant skills list [--json]` | State, source, name, score, and the last `check` verdict. Offline and instant — it reads a cache, never the network. |
+| `servant skills check` | Ask every source whether it moved, **and whether the copy Claude loads is still the store's bytes**. Detects; never applies. |
+| `servant skills list [--json]` | State, source, name, score, and the last `check` verdict — **plus a `FOREIGN` section** for what a session can reach that the store does not own. Offline and instant: it reads a cache, never the network. |
 | `servant skills` | The picker: browse, preview each `SKILL.md`, flip enablement on the rows you mark. |
 
 `--force` exists on `install` alone, and **only ever with the user saying so** — see *Drift* below.
@@ -83,6 +83,57 @@ the fix is what servant renders into `docs/agents/`, not a setup skill.
 A newly enabled skill is announced to a running session at the **next turn boundary** — so it is
 usable in this conversation, just not in this turn.
 
+## The store is not the only thing a session loads
+
+`list` ends with a **`FOREIGN`** section: every skill a session can invoke that the store did not
+install. Two places they come from, and servant manages neither:
+
+- **an enabled plugin** — read from Claude Code's own install records, so a stale cached copy nothing
+  points at is not reported. A plugin's skills are namespaced, so the invocation is
+  `<plugin>:<name>`.
+- **`~/.claude/skills/`** — the user's hand-installed directory.
+
+This section exists because the listing above it used to be presented as the account of what a
+session can invoke while reading only the store. That gap is not academic: it is how seven skills
+came to be loaded twice at two different versions, and thirteen never-once-invoked ones sat resident
+across 394 sessions, with no servant surface saying so. It took a bespoke audit to find.
+
+**Reachable is not model-visible, and the section reports both.** `MODEL? no` means the skill carries
+`disable-model-invocation`, so the agent is never shown it: `/`-invocable only, zero resident tokens.
+Quote the model-visible count and its `~tok resident` when the question is what a session *pays* —
+conflating the two overstates it by more than double on a large plugin, which is the same direction
+the store-only listing was already wrong in.
+
+**`COLLIDES WITH` is the finding, not a footnote** — but read which kind. A foreign skill sharing a
+**bare name** with an *enabled* store skill is **competing** when the agent is shown both: two
+near-identical descriptions, and the model picks. Measured on one plugin here, the namespaced twins
+took **81** invocations to the store copies' **5**, so a competing collision quietly decides which
+bytes run. The report counts those separately (`N of M name collision(s) competing for an
+invocation`) because the rest are inert: same name, but `MODEL? no`, so only a human typing it can
+pick the wrong one. Quote the competing number when the question is what is actually going wrong —
+and note it is a different word from the listing's `(contested)`, which means two *store* sources
+ship one name. Two halves to settling one, and only the first is yours:
+
+- servant's side — `servant skills disable <name>`, if the store's copy is the loser. (A store skill
+  that is already `off` never collides: it is not in the session, so there is nothing to confuse it
+  with. Enabling it is what would create the collision.)
+- the foreign side — **the user's action, always.** Servant writes nothing outside
+  `~/.ai_servant/` (ADR-0002). Say where the copy is and what would remove it; do not remove it.
+
+Three things this section cannot see, worth saying out loud rather than implying otherwise:
+
+- **Claude Code's own per-skill `/skills` toggle.** Its key (`skillOverrides`) is known; the shape of
+  its value is not, and inventing one would put this surface back to being confidently wrong.
+- **A project-level `.claude/skills/`** — in the workspace directory or in a mounted repo. Only the
+  user's own `~/.claude/skills/` is scanned.
+- **A plugin enabled for some other project.** A plugin absent from the settings map reads as **on**:
+  that is how an org-managed plugin arrives, and the origin names any scope that is not `user`
+  (`plugin <id> (managed)`) — because a managed one is policy, not the user's to disable, and telling
+  someone to remove what they cannot remove is worse than saying nothing.
+
+So the section is a floor, not a ceiling. If what a session invoked does not appear anywhere in
+`list`, one of these three is where to look next — do not conclude the invocation was imagined.
+
 ## One name, one skill
 
 - **Two sources, same name** — both install side by side and the listing marks them `(contested)`.
@@ -101,8 +152,9 @@ usable in this conversation, just not in this turn.
 ## Drift: what `check` and `list` are telling you
 
 Drift compares the **store copy** against the hash recorded when it was installed. It is a
-different question from whether upstream moved, and the two are reported side by side
-(`modified · moved → 4dd61e72fcb8`).
+different question from whether upstream moved, and from whether the copy Claude loads still matches
+the store — all three are reported side by side
+(`store modified · loaded copy edited · moved → 4dd61e72fcb8`).
 
 | State | What happened | What to do |
 |---|---|---|
@@ -115,10 +167,21 @@ different question from whether upstream moved, and the two are reported side by
 Offer to save the local version first — a `git diff`-able copy, or an ADR if it turned out to be a
 decision.
 
-One trap worth knowing before you edit anything: drift watches the store, not the copy Claude
-loads. Editing the store copy of an already-enabled skill does **not** reach the session until you
-`enable` it again. Editing the loaded copy directly is worse — invisible to every state servant
-reports, and thrown away by the next enable or install. Edit the store, then re-enable.
+### The other drift: the copy Claude actually loads
+
+`enable` copies the store directory to where Claude loads it, so there are two copies and they can
+disagree. That second question is now reported in its own right — in the `UPDATE?` column, in
+`check`, and as `enabledCopy` in `--json`:
+
+| Says | What happened | What to do |
+|---|---|---|
+| `loaded copy is not the store's` | Usually: somebody edited the copy Claude loads rather than the store. **It is what shapes every session, and nothing else records it.** Also what a *missing store* yields — the copy still loads with nothing to compare it against, which is why the wording says mismatch and not "edited". | Salvage anything worth keeping into the store copy first, then `servant skills enable <name>` — which discards the edit. With the store gone, reinstall first. |
+| `loaded copy gone` | Recorded as enabled with nothing loaded. | Usually already fixed by the time you read it: `list`, `enable` and `disable` re-materialize a missing copy on the way in (and say so on stderr). It survives to be reported only when the **store** copy is gone too — reinstall from the source, which is the command `check` prints for it. |
+| `loaded copy left behind` | Recorded as off, but a copy is still there **and still loading**. | `servant skills disable <name>` clears it. |
+
+Editing the store copy of an already-enabled skill does **not** reach the session until you `enable`
+again. Editing the loaded copy directly still loses the work on the next enable or install — the
+difference is that it is no longer silent. **Edit the store, then re-enable.**
 
 `check` never applies what it finds (ADR-0001: an instruction set that changes underneath a session
 without a recorded transition is not something the evaluator can score honestly). Reaching a new
@@ -148,6 +211,8 @@ therefore temporary. The supported way to change one is the fine-tune overlay
   unmeasured.
 - **Claude Code's own `/skills` toggle** (`skillOverrides` in settings). Servant's enablement is the
   one mechanism; writing both is how two records of one state come to disagree.
-- **`~/.claude/skills/`.** The user's hand-installed skills are theirs. Servant enables into
-  `~/.ai_servant/.claude/skills/` and never writes outside it (ADR-0002) — so a skill wanted
-  everywhere, not just in servant work, is a deliberate install there that servant does not manage.
+- **Removing anything foreign.** `list` now *reports* what a plugin or `~/.claude/skills/` puts in a
+  session, and reporting is the whole intervention. The user's hand-installed skills are theirs, and
+  servant enables into `~/.ai_servant/.claude/skills/` and never writes outside it (ADR-0002) — so a
+  skill wanted everywhere, not just in servant work, is a deliberate install there that servant does
+  not manage. Name the collision, name the directory, and leave the keystroke to the user.
