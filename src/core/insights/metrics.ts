@@ -26,7 +26,11 @@ import { type RuleViolation, type ToolCall, checkRules } from "./rules.ts";
 // only the `Read` tool, which touched a workspace doc zero times across every transcript on this
 // machine while Bash touched one 64 times. Knowledge-note reads count the same way, and a generated
 // region inside a doc is now its own unit.
-export const METRICS_SCHEMA_VERSION = 8;
+// v9 repoints the setup fingerprint at the core skills — it hashed four slash-command files deleted
+// in servant-skill-rework#8, so tuning a core skill moved nothing — and drops those bodies from the
+// footprint, which counts resident text only. Every cached record must recompute: leaving them would
+// mix two fingerprint compositions in one timeline, which reads as a change that never happened.
+export const METRICS_SCHEMA_VERSION = 9;
 
 /**
  * A stable pointer back into a transcript so a later (qualitative) pass can re-locate the exact
@@ -150,7 +154,7 @@ export interface SessionMetrics {
     topToolResults: LargeToolResult[];
     /** Per-turn context-window trajectory: how it grew, when, and what drove each jump. */
     contextCurve: ContextPoint[];
-    /** Static per-session overhead servant imposes (CLAUDE.md + commands + knowledge section). */
+    /** Resident per-session overhead: the conventions doc + the inlined knowledge section. */
     instructionFootprintTokens: number;
   };
 
@@ -794,18 +798,21 @@ export async function extractSessionMetrics(
   const fingerprint = fingerprintFromParts({
     version,
     claudeMd,
-    commands: composed.commands,
+    coreSkills: composed.coreSkills,
     knowledgeSection: composed.knowledgeSection,
   });
-  // Footprint is the *actual* static per-session overhead: CLAUDE.md + command bodies + the real
-  // inlined knowledge section for this session's repos (which the fingerprint deliberately omits).
+  // Only *resident* text counts here — in context every turn whether or not it is used. The core
+  // skills are in the fingerprint but deliberately not in this: Claude Code keeps a skill's
+  // description resident and loads its body on invocation, so charging seven bodies to every session
+  // would over-report by more than the whole conventions doc. Their resident descriptions are
+  // measured per session on the instruction-units axis instead, where each also carries a verdict.
   let knowledgeSectionChars = 0;
   try {
     knowledgeSectionChars = (await renderWorkspaceKnowledgeSection(repos)).length;
   } catch {
     // knowledge store may not exist yet
   }
-  const footprintChars = claudeMd.length + composed.commands.length + knowledgeSectionChars;
+  const footprintChars = claudeMd.length + knowledgeSectionChars;
 
   const instructionUnits = await collectInstructionUnits({
     records: allRecords,
