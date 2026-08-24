@@ -136,10 +136,16 @@ therefore temporary. The supported way to change one is the fine-tune overlay
 
 - **Scoring.** The `SCORE` column is *reported* here, never decided here. It nets the session
   evaluator's per-session verdicts on this skill as an instruction unit (`+1/3` = one more
-  `justified` than `wasteful`, over three sessions that judged it) and reads `—` until some session
-  has judged it. Do not guess a score, do not compute one, and do not describe a skill as earning or
-  wasting its place on your own read of it. `servant insights --units` is the full picture,
-  instruction docs included; `/servant-fine-tune` is where a score turns into a decision.
+  `justified` than `wasteful`, over three sessions that judged it). Do not guess a score, do not
+  compute one, and do not describe a skill as earning or wasting its place on your own read of it.
+  `servant insights --units` is the full picture, instruction docs included; `/servant-fine-tune` is
+  where a score turns into a decision.
+- **Two ways to have no score, and they mean opposite things.** `—` is *not yet* — no session has
+  judged it, and one eventually will. **`n/a` is never**: the skill's frontmatter carries
+  `disable-model-invocation`, so the agent is never shown it and no session can score it. That is not
+  a gap to fix. It is `/`-invocable only and costs **zero resident tokens**, which is arguably the
+  right shape for a skill a human triggers deliberately — say that rather than treating it as
+  unmeasured.
 - **Claude Code's own `/skills` toggle** (`skillOverrides` in settings). Servant's enablement is the
   one mechanism; writing both is how two records of one state come to disagree.
 - **`~/.claude/skills/`.** The user's hand-installed skills are theirs. Servant enables into

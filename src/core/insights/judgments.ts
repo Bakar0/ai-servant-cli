@@ -116,22 +116,41 @@ export function mergeJudgments(existing: Judgment[], fresh: Judgment[]): Judgmen
 }
 
 /**
- * Choose which instruction units this run should judge: the costliest not-yet-judged ones servant
- * has a lever on, bounded by `cap`. `isJudgeable` is what keeps the pass affordable and the verdicts
- * actionable — a session can load dozens of skills servant neither installed nor can disable, and a
- * verdict with no lever behind it is a token spent for nothing. The full inventory stays in the
- * metrics record either way.
+ * Choose which instruction units this run should judge: the least-covered not-yet-judged ones
+ * servant has a lever on, bounded by `cap`.
+ *
+ * `isJudgeable` is what keeps the pass affordable and the verdicts actionable — a session can load
+ * dozens of skills servant neither installed nor can disable, and a verdict with no lever behind it
+ * is a token spent for nothing. The full inventory stays in the metrics record either way.
+ *
+ * `priorVerdicts` is what makes the cap fair over time rather than only cheap. Size-descending
+ * alone re-judges the same big units every session: simulated over 27 sessions, `code-review` took
+ * a slot in 27 of them and `unslop` in none, so a small unit's verdict was unreachable no matter how
+ * many sessions ran. Fewest verdicts first, then costliest — so a session spends its slots on what
+ * is still unknown, and the cap stays where it is.
  */
 export function selectUnitsToJudge(
   units: InstructionUnit[],
   alreadyJudged: UnitJudgment[],
   cap: number,
-  isJudgeable: (unit: InstructionUnit) => boolean = () => true,
+  opts: {
+    isJudgeable?: (unit: InstructionUnit) => boolean;
+    /** Unit id → sessions that already carry a verdict for it. Computed on read, never stored. */
+    priorVerdicts?: ReadonlyMap<string, number>;
+  } = {},
 ): InstructionUnit[] {
   const slots = cap - alreadyJudged.length;
   if (slots <= 0) return [];
+  const isJudgeable = opts.isJudgeable ?? (() => true);
+  const priors = opts.priorVerdicts ?? new Map<string, number>();
   const judged = new Set(alreadyJudged.map((u) => u.id));
-  return units.filter((u) => !judged.has(u.id) && isJudgeable(u)).slice(0, slots);
+  return units
+    .filter((u) => !judged.has(u.id) && isJudgeable(u))
+    .toSorted(
+      (a, b) =>
+        (priors.get(a.id) ?? 0) - (priors.get(b.id) ?? 0) || b.approxTokens - a.approxTokens,
+    )
+    .slice(0, slots);
 }
 
 /** Append freshly-produced unit verdicts to the existing set, de-duplicating by unit id. */
@@ -254,7 +273,12 @@ function describeUnit(u: InstructionUnit): string {
     : `~${u.approxTokens} tok, only if read`;
   const used = u.kind === "doc" ? `read ${u.uses}×` : `invoked ${u.uses}×`;
   const start = u.fromStart ? "in the starting set" : "loaded mid-session";
-  return `${u.kind} ${u.id} — ${cost}, ${used}, ${start}`;
+  const hash = u.id.indexOf("#");
+  const part =
+    u.kind === "doc" && hash > 0
+      ? `, a generated region inside ${u.id.slice(0, hash)} (servant renders it; nobody wrote it by hand)`
+      : "";
+  return `${u.kind} ${u.id} — ${cost}, ${used}, ${start}${part}`;
 }
 
 /**
@@ -309,6 +333,7 @@ Judge it honestly, and specifically **not** by whether it fired:
 - A resident cost is paid every single turn, invoked or not. That is what makes a large, irrelevant unit wasteful even though it did no harm.
 - An instruction document is never "invoked". Judge it on whether the session's work needed the guidance it carries, and whether the session's behaviour actually reflected it.
 - A resident document that the session went and **read again** is evidence its guidance did not stick — that leans wasteful, or at least says the doc is not doing its job where it sits.
+- A doc marked "a generated region inside <doc>" is a block servant renders into that doc, and it is listed separately from the doc's own prose because the two have different levers. Judge it on its own: did *this payload* earn the tokens it costs every turn? Do not let the surrounding document's usefulness answer for it, and do not judge the parent doc on the payload's size.
 - A unit marked "only if read" cost nothing unless it was read. Never call that one wasteful for sitting unread; judge whether it was worth reading when it was, and stay **neutral** when it was not touched.
 - "Loaded mid-session" means it was not part of the starting set — judge only what it cost from then on.
 - Use **neutral** when the session genuinely gives you nothing to go on. Do not guess.

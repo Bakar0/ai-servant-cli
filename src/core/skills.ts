@@ -79,6 +79,14 @@ export type InstalledSkill = SkillEntry & {
   drift: SkillDrift;
   /** The store directory's hash right now — differs from `hash` exactly when drift is `modified`. */
   localHash: string | null;
+  /**
+   * False when the skill's frontmatter carries `disable-model-invocation`, which keeps it out of the
+   * agent's skill listing entirely: it is `/`-invocable only, costs zero resident tokens, and no
+   * session evaluator can ever score it. That is a coherent state, not a measurement failure, so it
+   * has to be sayable — a score column showing the same dash for "unjudged" and "unjudgeable"
+   * cannot tell a reader which one it is looking at.
+   */
+  modelInvocable: boolean;
 };
 
 /** A source's identity: what the user typed, the store namespace, and the URL git is given. */
@@ -364,7 +372,8 @@ export async function coreSkills(): Promise<InstalledSkill[]> {
   const rows = await Promise.all(
     [...coreSkillFiles()].map(async ([name, files]) => {
       const dir = enabledSkillDir(name);
-      const hash = hashFiles(await composedCoreSkillFiles(name, files));
+      const composed = await composedCoreSkillFiles(name, files);
+      const hash = hashFiles(composed);
       const localHash = existsSync(dir) ? await hashSkillDir(dir) : null;
       return {
         source: CORE_SOURCE,
@@ -382,6 +391,9 @@ export async function coreSkills(): Promise<InstalledSkill[]> {
             ? "clean"
             : "modified") as SkillDrift,
         localHash,
+        modelInvocable: readModelInvocable(
+          composed.find((f) => f.rel === SKILL_FILE)?.content ?? "",
+        ),
       };
     }),
   );
@@ -494,6 +506,9 @@ export async function listInstalledSkills(): Promise<InstalledSkill[]> {
         contested: (counts.get(name) ?? 0) > 1,
         drift,
         localHash,
+        modelInvocable: readModelInvocable(
+          (await readTextOr(join(storeDir, SKILL_FILE), "")) ?? "",
+        ),
       };
     }),
   );
@@ -597,20 +612,33 @@ export async function catalogSource(
   }
 }
 
-/** A skill's stated purpose, from its YAML frontmatter. */
-function readFrontmatterDescription(doc: string): string {
+/**
+ * Whether the agent ever sees this skill offered, from its YAML frontmatter.
+ *
+ * `disable-model-invocation: true` makes Claude Code omit the skill from the listing it keeps in
+ * context — verified over 396 sessions on one machine: zero appearances, ever. Absent or malformed
+ * frontmatter reads as invocable, which is the default the agent actually applies.
+ */
+function readModelInvocable(doc: string): boolean {
+  return parseFrontmatter(doc)?.["disable-model-invocation"] !== true;
+}
+
+function parseFrontmatter(doc: string): Record<string, unknown> | null {
   const match = doc.match(/^---\r?\n([\s\S]*?)\r?\n---/);
-  if (!match?.[1]) return "";
+  if (!match?.[1]) return null;
   try {
     const parsed: unknown = Bun.YAML.parse(match[1]);
-    if (parsed && typeof parsed === "object") {
-      const value = (parsed as Record<string, unknown>).description;
-      if (typeof value === "string") return value.trim().replace(/\s+/g, " ");
-    }
+    return parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>) : null;
   } catch {
     // Malformed frontmatter is the source's problem, not a reason to fail the catalog.
+    return null;
   }
-  return "";
+}
+
+/** A skill's stated purpose, from its YAML frontmatter. */
+function readFrontmatterDescription(doc: string): string {
+  const value = parseFrontmatter(doc)?.description;
+  return typeof value === "string" ? value.trim().replace(/\s+/g, " ") : "";
 }
 
 /**

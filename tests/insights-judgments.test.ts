@@ -265,12 +265,9 @@ describe("pure helpers", () => {
     const already: UnitJudgment[] = [
       { id: "ws:CLAUDE.md", kind: "doc", invoked: false, verdict: "justified", why: "" },
     ];
-    const pick = selectUnitsToJudge(
-      units,
-      already,
-      3,
-      (u) => u.kind === "doc" || u.id === "servant-lead",
-    );
+    const pick = selectUnitsToJudge(units, already, 3, {
+      isJudgeable: (u) => u.kind === "doc" || u.id === "servant-lead",
+    });
     // the doc is already judged; the unmanaged skill has no lever behind it.
     expect(pick.map((u) => u.id)).toEqual(["servant-lead"]);
     // cap already spent by prior verdicts → nothing more this run.
@@ -282,6 +279,29 @@ describe("pure helpers", () => {
       why: "",
     }));
     expect(selectUnitsToJudge(units, [...already, ...judgedNow], 2)).toHaveLength(0);
+  });
+
+  test("selectUnitsToJudge: a unit no session has judged yet outranks a bigger, well-covered one", () => {
+    const units = [
+      unit({ id: "code-review", approxTokens: 114 }),
+      unit({ id: "servant-recall", approxTokens: 65 }),
+      unit({ id: "unslop", approxTokens: 15 }),
+    ];
+    // `code-review` has been judged in every session so far; the small ones never got a slot.
+    const priorVerdicts = new Map([["code-review", 27]]);
+    const pick = selectUnitsToJudge(units, [], 2, { priorVerdicts });
+    expect(pick.map((u) => u.id)).toEqual(["servant-recall", "unslop"]);
+  });
+
+  test("selectUnitsToJudge: within the same coverage, the costliest unit still goes first", () => {
+    const units = [unit({ id: "small", approxTokens: 15 }), unit({ id: "big", approxTokens: 900 })];
+    const pick = selectUnitsToJudge(units, [], 1, {
+      priorVerdicts: new Map([
+        ["small", 1],
+        ["big", 1],
+      ]),
+    });
+    expect(pick.map((u) => u.id)).toEqual(["big"]);
   });
 
   test("mergeUnitJudgments dedups by unit id", () => {

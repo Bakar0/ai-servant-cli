@@ -124,6 +124,12 @@ Each kind has its own lever, and they are not interchangeable:
 |---|---|---|
 | skill | earning its resident cost | `/servant-skills` — disable it, or remove it from the store |
 | doc | carrying guidance the work actually needs | **§ Tuning an aspect** — the `general` overlay for servant's own conventions |
+| `<doc>#<region>` | a **generated region** inside that doc earning its own cost | whatever renders it — an overlay edit cannot touch it |
+
+A unit id with a `#` is a block servant generates into a document (`ws:CLAUDE.md#knowledge` is the
+inlined knowledge index). It is split out because the two halves lie about each other otherwise: the
+prose can be indispensable while the payload is the largest resident cost in the session, and one
+verdict on the pair lands on neither. When a region scores badly, name the renderer, not the overlay.
 
 A `wasteful` verdict on a document is rarely "delete it": it usually means the guidance is too long,
 too general, or sitting in the wrong place. A resident doc that sessions keep **re-reading** is the
