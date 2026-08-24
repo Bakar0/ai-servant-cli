@@ -13,7 +13,6 @@
 // servant runs writes outside `~/.ai_servant/`, and detection is what keeps the measurement pipeline
 // that found the problem intact. See the closing comment on #11 for why isolation was rejected.
 
-import { readFile } from "node:fs/promises";
 import { basename, join } from "node:path";
 import {
   userClaudeInstalledPluginsPath,
@@ -82,7 +81,7 @@ type PluginInstall = {
 };
 
 /**
- * Every skill a session can reach from outside the store, sorted by name.
+ * Every skill a session can reach from outside the store, grouped by where it comes from.
  *
  * Deliberately tolerant: an unreadable settings file or install record yields fewer plugins, never
  * an exception. A listing that fails because one JSON file is mid-write is worse than a listing that
@@ -147,7 +146,7 @@ async function describe(
   dir: string,
   origin: ForeignOrigin,
 ): Promise<ForeignSkill> {
-  const doc = await readFile(join(dir, SKILL_FILE), "utf8").catch(() => "");
+  const doc = await readSkillText(join(dir, SKILL_FILE));
   const description = readFrontmatterDescription(doc);
   const modelInvocable = readModelInvocable(doc);
   return {
@@ -170,8 +169,9 @@ async function describe(
  * and over-reporting a foreign skill is the honest direction for a surface whose whole job is to
  * stop one going unnoticed.
  *
- * Not read here: Claude Code's own per-skill `/skills` toggle. Its stored shape is undocumented, and
- * guessing at it would put this surface back to being confidently wrong about reachability.
+ * Not read here: Claude Code's own per-skill `/skills` toggle. Its key (`skillOverrides`) is known
+ * but the shape of its value is not, and inventing one would put this surface back to being
+ * confidently wrong about reachability — the exact failure it exists to end.
  */
 async function readEnabledPlugins(): Promise<Record<string, boolean>> {
   const raw = await readJson(userClaudeSettingsPath());
@@ -190,21 +190,34 @@ async function readPluginInstalls(): Promise<PluginInstall[]> {
   if (!plugins || typeof plugins !== "object") return [];
   const out: PluginInstall[] = [];
   for (const [id, entries] of Object.entries(plugins as Record<string, unknown>)) {
-    // One id can carry several records (the same plugin installed at different scopes). Each is a
-    // separate place bytes could load from, so each is reported rather than collapsed.
-    for (const entry of Array.isArray(entries) ? entries : [entries]) {
-      if (!entry || typeof entry !== "object") continue;
-      const e = entry as Record<string, unknown>;
-      if (typeof e.installPath !== "string" || e.installPath.length === 0) continue;
-      out.push({
-        id,
-        scope: typeof e.scope === "string" ? e.scope : "unknown",
-        version: typeof e.version === "string" ? e.version : "unknown",
-        installPath: e.installPath,
-      });
-    }
+    // One record per id, even when the file holds several (the same plugin recorded at more than one
+    // scope). A plugin's skills are invoked as `<plugin>:<name>`, so only one of those copies is ever
+    // reachable under that name — emitting both would double every count downstream while adding no
+    // skill a session can actually call.
+    const record = (Array.isArray(entries) ? entries : [entries]).find(
+      (e): e is Record<string, unknown> =>
+        !!e &&
+        typeof e === "object" &&
+        typeof (e as Record<string, unknown>).installPath === "string",
+    );
+    if (!record) continue;
+    out.push({
+      id,
+      scope: typeof record.scope === "string" ? record.scope : "unknown",
+      version: typeof record.version === "string" ? record.version : "unknown",
+      installPath: String(record.installPath),
+    });
   }
   return out;
+}
+
+/** A skill doc, or empty when it cannot be read — an unreadable SKILL.md is a row, not a failure. */
+async function readSkillText(path: string): Promise<string> {
+  try {
+    return await Bun.file(path).text();
+  } catch {
+    return "";
+  }
 }
 
 async function readJson(path: string): Promise<unknown> {
@@ -223,21 +236,36 @@ export type SkillCollision = {
   foreignOrigin: ForeignOrigin;
   /** Every store source shipping the same bare name. */
   storeSources: string[];
+  /**
+   * True when the agent is actually shown the foreign twin, so the two compete for an invocation and
+   * the model decides. A collision with a `disable-model-invocation` skill is real but inert: it only
+   * shares a name a human might type.
+   *
+   * Deliberately not called `contested` — `InstalledSkill.contested` already means "two *store*
+   * sources ship this name", and one word for two things here is how a reader draws the wrong
+   * conclusion from a count.
+   */
+  competing: boolean;
 };
 
 /**
- * Pair each foreign skill with the store skills sharing its bare name.
+ * Pair each foreign skill with the *loaded* store skills sharing its bare name.
  *
  * Bare name, not invocation: `kit:code-review` and `code-review` are different strings to type and
  * the same skill to choose between. That is the failure mode measured in #12 — the namespaced twin
  * took 81 invocations to the store copy's 5, so the collision decided which bytes ran, silently.
+ *
+ * Only enabled store skills count. A disabled one is not in the session at all, so there is nothing
+ * for the foreign copy to be confused with — reporting it would be inventing a collision that has
+ * not happened yet.
  */
 export function findCollisions(
-  store: readonly { name: string; source: string }[],
+  store: readonly { name: string; source: string; enabled: boolean }[],
   foreign: readonly ForeignSkill[],
 ): SkillCollision[] {
   const sourcesByName = new Map<string, string[]>();
   for (const s of store) {
+    if (!s.enabled) continue;
     sourcesByName.set(s.name, [...(sourcesByName.get(s.name) ?? []), s.source]);
   }
   const out: SkillCollision[] = [];
@@ -249,12 +277,19 @@ export function findCollisions(
       foreignInvocation: f.invocation,
       foreignOrigin: f.origin,
       storeSources: [...storeSources].sort(),
+      competing: f.modelInvocable,
     });
   }
   return out;
 }
 
-/** Where a foreign skill comes from, as one line a person can act on. */
+/**
+ * Where a foreign skill comes from, as one line a person can act on.
+ *
+ * A scope other than `user` is named, because it changes who may act: a `managed` plugin is org
+ * policy, and telling someone to remove one they cannot remove is worse than saying nothing.
+ */
 export function describeOrigin(origin: ForeignOrigin): string {
-  return origin.kind === "personal" ? origin.dir : `plugin ${origin.id}`;
+  if (origin.kind === "personal") return origin.dir;
+  return `plugin ${origin.id}${origin.scope === "user" ? "" : ` (${origin.scope})`}`;
 }

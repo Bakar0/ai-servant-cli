@@ -37,7 +37,7 @@ Seven **core skills** ship inside the servant binary. They are the only ones gua
 /servant-skills            manage which skills are installed and enabled
 ```
 
-**Everything else is installed, not bundled.** servant does not own the engineering flow — shaping specs, breaking work down, implementing, reviewing, TDD are all skills installed from a source, and which ones is the user's choice. `servant skills list` says what is installed and enabled right now; `/servant-skills` is where the judgment about sources, additions and removals lives. Do not assume a skill is available because it is conventional — check, or ask.
+**Everything else is installed, not bundled.** servant does not own the engineering flow — shaping specs, breaking work down, implementing, reviewing, TDD are all skills installed from a source, and which ones is the user's choice. `servant skills list` says what is installed and enabled right now, and what else a session can reach that servant does not manage; `/servant-skills` is where the judgment about sources, additions and removals lives. Do not assume a skill is available because it is conventional — check, or ask.
 
 Specs and tickets are **published to the board**, not written as files here. Domain terms and decisions live in `CONTEXT.md` + `docs/adr/`, created lazily when there is something to record.
 

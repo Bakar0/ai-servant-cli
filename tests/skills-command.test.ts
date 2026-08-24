@@ -97,6 +97,7 @@ type ListPayload = {
     foreignInvocation: string;
     foreignOrigin: { kind: string };
     storeSources: string[];
+    competing: boolean;
   }[];
 };
 
@@ -357,9 +358,9 @@ describe("the foreign sources a session can also reach", () => {
     await installPlugin({ id: "kit@market", skills: ["engineering/tdd"] });
     try {
       const out = await run("list");
-      expect(out).toContain("1 colliding with a store name");
+      expect(out).toContain("1 of 1 name collision(s) competing for an invocation");
       expect(foreignSection(out).find((r) => r.includes("kit:tdd"))).toContain(source);
-      expect(out).toContain("name collision");
+      expect(out).toContain("competing name(s) — the agent is shown both copies and picks");
 
       const { collisions } = await listPayload();
       expect(collisions).toEqual([
@@ -368,8 +369,59 @@ describe("the foreign sources a session can also reach", () => {
           foreignInvocation: "kit:tdd",
           foreignOrigin: expect.anything(),
           storeSources: [source],
+          competing: true,
         },
       ]);
+    } finally {
+      await forgetPlugins();
+    }
+  });
+
+  test("separates a contested collision from one the agent is never offered", async () => {
+    await installPlugin({ id: "kit@market", skills: ["engineering/tdd", "engineering/teach"] });
+    // `teach` collides too, but Claude Code never shows it — so nothing can pick it by mistake.
+    await writeFile(
+      join(
+        claudeHome,
+        "plugins",
+        "cache",
+        "market",
+        "kit",
+        "1.0.0",
+        "skills",
+        "engineering",
+        "teach",
+        "SKILL.md",
+      ),
+      "---\nname: teach\ndescription: hidden twin\ndisable-model-invocation: true\n---\nbody\n",
+    );
+    try {
+      const out = await run("list");
+      // `teach` is off in the store by this point, so only the enabled `tdd` collides at all.
+      expect(out).toContain("1 of 1 name collision(s) competing for an invocation");
+      expect(out).toContain("the measured");
+      expect((await listPayload()).collisions.map((c) => [c.name, c.competing])).toEqual([
+        ["tdd", true],
+      ]);
+    } finally {
+      await forgetPlugins();
+    }
+  });
+
+  test("a store skill that is off is not a collision — it is not in the session", async () => {
+    await installPlugin({ id: "kit@market", skills: ["engineering/teach"] });
+    try {
+      expect((await listJson()).find((s) => s.name === "teach")?.enabled).toBe(false);
+      expect((await listPayload()).collisions).toEqual([]);
+    } finally {
+      await forgetPlugins();
+    }
+  });
+
+  test("names a scope that is not the user's own, because it changes who may act", async () => {
+    await installPlugin({ id: "policy@org", skills: ["engineering/mandated"], scope: "managed" });
+    try {
+      expect(foreignSection(await run("list")).join("\n")).toContain("plugin policy@org (managed)");
     } finally {
       await forgetPlugins();
     }
@@ -673,11 +725,13 @@ describe("the copy Claude loads, when it is not the store's", () => {
     );
 
     const row = storeSection(await run("list")).find((r) => r.includes("teach"));
-    expect(row).toContain("loaded copy edited");
+    expect(row).toContain("loaded copy is not the store's");
 
     const checked = await run("check");
     expect(checked).toContain("1 with a loaded copy that is not the store's");
-    expect(checked).toContain("loaded copy edited (re-enable to discard it)");
+    expect(checked).toContain(
+      "loaded copy is not the store's (re-enable to take the store's bytes)",
+    );
     expect(checked).toContain("servant skills enable teach");
 
     expect((await listJson()).find((s) => s.name === "teach")?.enabledCopy).toBe("modified");

@@ -306,7 +306,7 @@ export function userClaudeSkillsDir(): string {
 }
 
 /** Where Claude Code keeps installed plugins. Read-only to servant, and to be kept that way. */
-export function userClaudePluginsDir(): string {
+function userClaudePluginsDir(): string {
   return join(userClaudeDir(), "plugins");
 }
 

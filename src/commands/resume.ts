@@ -12,6 +12,7 @@ import {
   resolveWorkspaceName,
 } from "../core/workspace.ts";
 import { detectTerminal, getDriver } from "../terminals/index.ts";
+import { collapseHome } from "../ui/paths-display.ts";
 import { pickSession } from "../ui/resume-picker.ts";
 
 // Backends whose session stores are searched (in order) when resuming a bare id with no --agent.
@@ -245,13 +246,6 @@ export function formatPreview(meta: SessionMeta, live: CmuxLiveState | undefined
   lines.push(truncate(meta.lastAssistantMessage ?? "(none)", 2000));
   lines.push("");
   return lines.join("\n");
-}
-
-function collapseHome(path: string): string {
-  const home = process.env.HOME;
-  if (home && path.startsWith(`${home}/`)) return `~/${path.slice(home.length + 1)}`;
-  if (home && path === home) return "~";
-  return path;
 }
 
 function truncate(s: string, max: number): string {

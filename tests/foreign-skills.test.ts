@@ -250,7 +250,7 @@ describe("findCollisions", () => {
 
   test("pairs a foreign skill with a store skill of the same bare name", () => {
     const collisions = findCollisions(
-      [{ name: "code-review", source: "owner/repo" }],
+      [{ name: "code-review", source: "owner/repo", enabled: true }],
       [foreign("code-review", "kit:code-review"), foreign("wizard", "kit:wizard")],
     );
 
@@ -265,8 +265,8 @@ describe("findCollisions", () => {
   test("names every store source that shares the colliding name", () => {
     const collisions = findCollisions(
       [
-        { name: "tdd", source: "a/one" },
-        { name: "tdd", source: "b/two" },
+        { name: "tdd", source: "a/one", enabled: true },
+        { name: "tdd", source: "b/two", enabled: true },
       ],
       [foreign("tdd", "kit:tdd")],
     );
@@ -274,9 +274,34 @@ describe("findCollisions", () => {
     expect(collisions[0]?.storeSources).toEqual(["a/one", "b/two"]);
   });
 
+  test("a disabled store skill is not a collision — it is not in the session to be confused with", () => {
+    expect(
+      findCollisions(
+        [{ name: "code-review", source: "owner/repo", enabled: false }],
+        [foreign("code-review", "kit:code-review")],
+      ),
+    ).toEqual([]);
+  });
+
+  test("marks a collision contested only when the agent is shown the foreign twin", () => {
+    const hidden = { ...foreign("tdd", "kit:tdd"), modelInvocable: false };
+    const [shown, inert] = [
+      findCollisions(
+        [{ name: "tdd", source: "a/one", enabled: true }],
+        [foreign("tdd", "kit:tdd")],
+      ),
+      findCollisions([{ name: "tdd", source: "a/one", enabled: true }], [hidden]),
+    ];
+    expect(shown[0]?.competing).toBe(true);
+    expect(inert[0]?.competing).toBe(false);
+  });
+
   test("reports no collision when the names do not meet", () => {
     expect(
-      findCollisions([{ name: "implement", source: "a/one" }], [foreign("wizard", "k:wizard")]),
+      findCollisions(
+        [{ name: "implement", source: "a/one", enabled: true }],
+        [foreign("wizard", "k:wizard")],
+      ),
     ).toEqual([]);
   });
 });

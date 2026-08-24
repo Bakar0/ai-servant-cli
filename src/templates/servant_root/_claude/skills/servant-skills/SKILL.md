@@ -104,20 +104,35 @@ Quote the model-visible count and its `~tok resident` when the question is what 
 conflating the two overstates it by more than double on a large plugin, which is the same direction
 the store-only listing was already wrong in.
 
-**`COLLIDES WITH` is the finding, not a footnote.** A foreign skill sharing a **bare name** with a
-store skill means a session is offered both, with near-identical descriptions, and picks. Measured on
-one plugin here: the namespaced twins took **81** invocations to the store copies' **5**. So a
-collision quietly decides which bytes run. Two halves to settling one, and only the first is yours:
+**`COLLIDES WITH` is the finding, not a footnote** — but read which kind. A foreign skill sharing a
+**bare name** with an *enabled* store skill is **competing** when the agent is shown both: two
+near-identical descriptions, and the model picks. Measured on one plugin here, the namespaced twins
+took **81** invocations to the store copies' **5**, so a competing collision quietly decides which
+bytes run. The report counts those separately (`N of M name collision(s) competing for an
+invocation`) because the rest are inert: same name, but `MODEL? no`, so only a human typing it can
+pick the wrong one. Quote the competing number when the question is what is actually going wrong —
+and note it is a different word from the listing's `(contested)`, which means two *store* sources
+ship one name. Two halves to settling one, and only the first is yours:
 
-- servant's side — `servant skills disable <name>`, if the store's copy is the loser.
+- servant's side — `servant skills disable <name>`, if the store's copy is the loser. (A store skill
+  that is already `off` never collides: it is not in the session, so there is nothing to confuse it
+  with. Enabling it is what would create the collision.)
 - the foreign side — **the user's action, always.** Servant writes nothing outside
   `~/.ai_servant/` (ADR-0002). Say where the copy is and what would remove it; do not remove it.
 
-Two things this section cannot see, worth saying out loud rather than implying otherwise: Claude
-Code's own per-skill `/skills` toggle (its stored shape is undocumented, and guessing would put this
-surface back to being confidently wrong), and a plugin enabled only for some other project. A plugin
-absent from the settings map reads as **on** — that is how an org-managed plugin arrives, and a
-managed one is policy, not the user's to disable.
+Three things this section cannot see, worth saying out loud rather than implying otherwise:
+
+- **Claude Code's own per-skill `/skills` toggle.** Its key (`skillOverrides`) is known; the shape of
+  its value is not, and inventing one would put this surface back to being confidently wrong.
+- **A project-level `.claude/skills/`** — in the workspace directory or in a mounted repo. Only the
+  user's own `~/.claude/skills/` is scanned.
+- **A plugin enabled for some other project.** A plugin absent from the settings map reads as **on**:
+  that is how an org-managed plugin arrives, and the origin names any scope that is not `user`
+  (`plugin <id> (managed)`) — because a managed one is policy, not the user's to disable, and telling
+  someone to remove what they cannot remove is worse than saying nothing.
+
+So the section is a floor, not a ceiling. If what a session invoked does not appear anywhere in
+`list`, one of these three is where to look next — do not conclude the invocation was imagined.
 
 ## One name, one skill
 
@@ -160,8 +175,8 @@ disagree. That second question is now reported in its own right — in the `UPDA
 
 | Says | What happened | What to do |
 |---|---|---|
-| `loaded copy edited` | Somebody edited the copy Claude loads, not the store. **It is what shapes every session, and nothing else records it.** | Salvage anything worth keeping into the store copy first, then `servant skills enable <name>` — which discards the edit. |
-| `loaded copy gone` | Recorded as enabled with nothing loaded. | Any `list`, `enable` or `disable` re-materializes it. |
+| `loaded copy is not the store's` | Usually: somebody edited the copy Claude loads rather than the store. **It is what shapes every session, and nothing else records it.** Also what a *missing store* yields — the copy still loads with nothing to compare it against, which is why the wording says mismatch and not "edited". | Salvage anything worth keeping into the store copy first, then `servant skills enable <name>` — which discards the edit. With the store gone, reinstall first. |
+| `loaded copy gone` | Recorded as enabled with nothing loaded. | Usually already fixed by the time you read it: `list`, `enable` and `disable` re-materialize a missing copy on the way in (and say so on stderr). It survives to be reported only when the **store** copy is gone too — reinstall from the source, which is the command `check` prints for it. |
 | `loaded copy left behind` | Recorded as off, but a copy is still there **and still loading**. | `servant skills disable <name>` clears it. |
 
 Editing the store copy of an already-enabled skill does **not** reach the session until you `enable`

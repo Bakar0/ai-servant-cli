@@ -10,6 +10,7 @@ import {
   type CatalogEntry,
   type CheckCache,
   type CheckResult,
+  type EnabledCopyState,
   type InstalledSkill,
   catalogSource,
   checkForUpdates,
@@ -38,6 +39,7 @@ import {
   summarizeUnits,
 } from "../core/insights/unit-scores.ts";
 import { readAllJudgments } from "../core/insights/store.ts";
+import { collapseHome } from "../ui/paths-display.ts";
 import { type PickerOpts, pickMultipleFromList } from "../ui/picker.ts";
 
 const rootArg = {
@@ -62,6 +64,17 @@ async function readSkillScores(): Promise<UnitScores> {
 }
 
 const pad = (s: string, w: number) => s.padEnd(w);
+
+/**
+ * Widest an origin cell gets. A personal skills directory is a path, and one deep path would
+ * otherwise set the column width for every row in the table.
+ */
+const MAX_ORIGIN_WIDTH = 44;
+
+/** Trim from the front, keeping the tail — the end of a path is the part that identifies it. */
+function elide(text: string, max: number): string {
+  return text.length <= max ? text : `…${text.slice(text.length - max + 1)}`;
+}
 
 export type SkillRow = {
   skill: InstalledSkill;
@@ -117,31 +130,41 @@ function updateCell(skill: InstalledSkill, checks: CheckCache): string {
       : seen.status === "outdated"
         ? `moved → ${seen.upstreamHash ?? "?"}`
         : "current";
-  const parts = [
+  const loaded = LOADED_COPY_NOTES[skill.enabledCopy]?.cell;
+  return [
     ...(skill.drift === "clean" ? [] : [`store ${skill.drift}`]),
-    ...(enabledCopyNote(skill) ? [enabledCopyNote(skill)] : []),
+    ...(loaded ? [loaded] : []),
     upstream,
-  ];
-  return parts.join(" · ");
+  ].join(" · ");
 }
 
 /**
- * What to say about the loaded copy, or nothing when it is the store's bytes.
+ * What to say about the loaded copy, in two lengths — the terse one for a table cell, the one with a
+ * remedy for `check`'s report.
  *
- * Only ever the abnormal states: `clean` and `none` are the two ways a skill is behaving, and naming
- * them on every row would bury the one row that matters.
+ * Only the abnormal states are here: `clean` and `none` are the two ways a skill is behaving, and
+ * naming them on every row would bury the one row that matters.
+ *
+ * `modified` is worded as a mismatch rather than as an edit on purpose. It is also what a *missing*
+ * store yields — the copy still loads with nothing to compare it against — and nobody edited that
+ * one.
  */
-function enabledCopyNote(skill: InstalledSkill): string {
-  switch (skill.enabledCopy) {
-    case "modified":
-      return "loaded copy edited";
-    case "missing":
-      return "loaded copy gone";
-    case "unexpected":
-      return "loaded copy left behind";
-    default:
-      return "";
-  }
+const LOADED_COPY_NOTES: Partial<Record<EnabledCopyState, { cell: string; report: string }>> = {
+  modified: {
+    cell: "loaded copy is not the store's",
+    report: "loaded copy is not the store's (re-enable to take the store's bytes)",
+  },
+  missing: { cell: "loaded copy gone", report: "loaded copy gone while recorded as enabled" },
+  unexpected: {
+    cell: "loaded copy left behind",
+    report: "loaded copy left behind while disabled — it still loads",
+  },
+};
+
+/** The preview's loaded-copy line, or empty when the copy is what it should be. */
+function loadedCopyPreviewLine(skill: InstalledSkill): string {
+  const note = LOADED_COPY_NOTES[skill.enabledCopy]?.report;
+  return note ? `         ${note}` : "";
 }
 
 function preview(
@@ -161,9 +184,7 @@ function preview(
       ? "store:   ships inside the servant binary — always on, never removable"
       : `store:   ${skill.storeDir}`,
     skill.enabled ? `loaded:  ${enabledSkillDir(skill.name)}` : "",
-    enabledCopyNote(skill)
-      ? `         ${enabledCopyNote(skill)} — re-enable to take the store's bytes`
-      : "",
+    loadedCopyPreviewLine(skill),
     "",
     doc,
   ]
@@ -215,6 +236,12 @@ function reportEmptyStore(): void {
  * twice at two different versions. Reporting is the whole intervention: removing a foreign skill is
  * the user's action, and servant writes nothing outside its own root (ADR-0002).
  */
+/** The collision clause of the summary line. "0 of 0" is a sentence nobody should have to read. */
+function collisionSummary(total: number, competing: number): string {
+  if (total === 0) return "no name collisions";
+  return `${competing} of ${total} name collision(s) competing for an invocation`;
+}
+
 function foreignSection(foreign: ForeignSkill[], collisions: SkillCollision[]): string[] {
   if (foreign.length === 0) return [];
   const visible = foreign.filter((f) => f.modelInvocable);
@@ -225,7 +252,7 @@ function foreignSection(foreign: ForeignSkill[], collisions: SkillCollision[]): 
     origin: elide(collapseHome(describeOrigin(f.origin)), MAX_ORIGIN_WIDTH),
     name: f.invocation,
     // Reachable and model-visible are different questions, and a report that answers only the first
-    // overstates what a session pays — on one plugin here, 35 against 20.
+    // overstates what a session pays — on one plugin here, 35 against 15.
     model: f.modelInvocable ? "yes" : "no",
     collides: collidingNames.get(f.invocation)?.storeSources.join(", ") ?? "",
   }));
@@ -234,10 +261,15 @@ function foreignSection(foreign: ForeignSkill[], collisions: SkillCollision[]): 
   const wOrigin = width("origin", 6);
   const wName = width("name", 4);
 
+  // Split by whether the agent is actually shown the foreign twin. Only a competing collision can be
+  // decided *wrongly* by the model; the rest share a name a human might type, which is a different
+  // and much smaller problem. One number for both would over-report by 1.7x on the plugin measured
+  // here — the same direction the store-only listing was already wrong in.
+  const competing = collisions.filter((c) => c.competing);
   const lines = [
     "",
     "FOREIGN — reachable by a session, not owned by the store",
-    `  ${foreign.length} skill(s) · ${visible.length} model-visible (~${resident} tok resident) · ${collisions.length} colliding with a store name`,
+    `  ${foreign.length} skill(s) · ${visible.length} model-visible (~${resident} tok resident) · ${collisionSummary(collisions.length, competing.length)}`,
     "",
     `${pad("ORIGIN", wOrigin)}  ${pad("NAME", wName)}  MODEL?  COLLIDES WITH`,
   ];
@@ -246,32 +278,28 @@ function foreignSection(foreign: ForeignSkill[], collisions: SkillCollision[]): 
       `${pad(c.origin, wOrigin)}  ${pad(c.name, wName)}  ${pad(c.model, 6)}  ${c.collides || "—"}`,
     );
   }
+  if (competing.length > 0) {
+    lines.push(
+      "",
+      `${competing.length} competing name(s) — the agent is shown both copies and picks, and the measured`,
+      `pattern is that the namespaced twin wins: ${competing.map((c) => c.name).join(", ")}`,
+    );
+  }
+  if (collisions.length > competing.length) {
+    lines.push(
+      "",
+      `${collisions.length - competing.length} more share a name but are never offered to the agent`,
+      "(`MODEL? no`) — only a human typing the name can pick the wrong one.",
+    );
+  }
   if (collisions.length > 0) {
     lines.push(
       "",
-      `${collisions.length} name collision(s): a session is offered both, and the measured pattern is that`,
-      "the namespaced plugin twin wins the invocation. `servant skills disable <name>` settles it in",
-      "the store; the foreign copy is removed where it came from, by you.",
+      "`servant skills disable <name>` settles servant's side; the foreign copy is removed where it",
+      "came from, by you.",
     );
   }
   return lines;
-}
-
-/**
- * Widest an origin cell gets. A personal skills directory is a path, and one deep path would
- * otherwise set the column width for every row in the table.
- */
-const MAX_ORIGIN_WIDTH = 44;
-
-function collapseHome(path: string): string {
-  const home = process.env.HOME;
-  if (home && path === home) return "~";
-  return home && path.startsWith(`${home}/`) ? `~/${path.slice(home.length + 1)}` : path;
-}
-
-/** Trim from the front, keeping the tail — the end of a path is the part that identifies it. */
-function elide(text: string, max: number): string {
-  return text.length <= max ? text : `…${text.slice(text.length - max + 1)}`;
 }
 
 const listCommand = defineCommand({
@@ -487,31 +515,17 @@ const disableCommand = defineCommand({
   },
 });
 
-/** Say something about the loaded copy only when it is not the store's bytes. */
-function loadedCopyPhrase(state: CheckResult["enabledCopy"]): string {
-  switch (state) {
-    case "modified":
-      return "loaded copy edited (re-enable to discard it)";
-    case "missing":
-      return "loaded copy gone while recorded as enabled";
-    case "unexpected":
-      return "loaded copy left behind while disabled — it still loads";
-    default:
-      return "";
-  }
-}
-
 function printCheck(results: CheckResult[]): void {
   const outdated = results.filter((r) => r.status === "outdated");
   const unreachable = results.filter((r) => r.status === "unreachable");
   const drifted = results.filter((r) => r.drift !== "clean");
-  const loadedDrift = results.filter((r) => loadedCopyPhrase(r.enabledCopy) !== "");
+  const loadedDrift = results.filter((r) => LOADED_COPY_NOTES[r.enabledCopy] !== undefined);
   console.log(
     `servant: checked ${results.length} skill(s) — ${outdated.length} outdated, ${drifted.length} locally changed, ${loadedDrift.length} with a loaded copy that is not the store's, ${unreachable.length} unreachable`,
   );
   for (const r of results) {
-    const loaded = loadedCopyPhrase(r.enabledCopy);
-    if (r.status === "current" && r.drift === "clean" && loaded === "") continue;
+    const loaded = LOADED_COPY_NOTES[r.enabledCopy]?.report;
+    if (r.status === "current" && r.drift === "clean" && loaded === undefined) continue;
     const upstream =
       r.status === "outdated"
         ? `upstream ${r.upstreamHash}`
@@ -520,7 +534,7 @@ function printCheck(results: CheckResult[]): void {
           : "upstream unchanged";
     const parts = [
       ...(r.drift === "clean" ? [] : [`store ${r.drift} locally`]),
-      ...(loaded === "" ? [] : [loaded]),
+      ...(loaded === undefined ? [] : [loaded]),
       upstream,
     ];
     console.log(`  ${r.name}  (${r.source})  ${parts.join(" · ")}`);
@@ -530,7 +544,13 @@ function printCheck(results: CheckResult[]): void {
       "\nThe copy Claude loads is not the store's — the store is authoritative (ADR-0001):",
     );
     for (const r of loadedDrift) {
-      console.log(`  servant skills enable ${r.name}  # re-materializes it from the store`);
+      // `enable` re-materializes from the store, so it is the remedy only while there is a store copy
+      // to materialize. With the store gone it throws, and the reinstall is the real first step.
+      console.log(
+        r.drift === "missing"
+          ? `  servant skills install ${r.source} --skill ${r.name}  # the store copy is gone; restore it first`
+          : `  servant skills enable ${r.name}  # re-materializes it from the store`,
+      );
     }
   }
   if (outdated.length > 0) {

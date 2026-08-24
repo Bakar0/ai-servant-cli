@@ -425,9 +425,13 @@ export async function coreSkills(): Promise<InstalledSkill[]> {
 }
 
 /**
- * Read the loaded copy's state for one skill. The store copy's hash is passed in because it is
- * already computed by every caller — and because a `missing` store makes the comparison meaningless
- * rather than false.
+ * Read the loaded copy's state for one skill.
+ *
+ * `storeHash` is the *live* hash of the store directory, passed in because every caller has already
+ * computed it — and it is nullable for a real case: a store directory deleted out from under the
+ * record, while the copy Claude loads survives it. There is then nothing to compare against and the
+ * copy is definitively not the store's bytes, so that reads as `modified` too. What the reader is
+ * told about it says "not the store's" rather than "edited", because nobody edited that one.
  */
 async function readEnabledCopy(
   name: string,
