@@ -324,6 +324,25 @@ async function composedCoreSkillFiles(
 }
 
 /**
+ * The same bytes `ensureCoreSkills` writes, so a caller measuring the effective instruction setup
+ * reads what lands on disk rather than the raw template.
+ *
+ * Exposed for the setup fingerprint, which must move when a core skill's instructions move
+ * (servant-skill-rework#13). It reaches the manifest through `coreSkillFiles` rather than naming
+ * skills, so a skill added or retired tomorrow is picked up with no list to maintain — the rot the
+ * four-entry hardcoded list it replaced could not avoid.
+ */
+export async function composedCoreSkillAssets(): Promise<{ rel: string; content: string }[]> {
+  const out: { rel: string; content: string }[] = [];
+  for (const [name, files] of coreSkillFiles()) {
+    for (const f of await composedCoreSkillFiles(name, files)) {
+      out.push({ rel: coreSkillAssetRel(name, f.rel), content: f.content });
+    }
+  }
+  return out.toSorted((a, b) => a.rel.localeCompare(b.rel));
+}
+
+/**
  * Write every core skill into the servant skills directory, and the only writer that does.
  *
  * Called from `ensureServantAssets` (so a spawn refreshes them) and from the `servant skills`

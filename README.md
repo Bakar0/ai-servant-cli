@@ -296,7 +296,7 @@ A feedback loop on how well servant's setup is steering your agents. It mines th
 - **Instructions** - `/servant-*` skill usage, checkable rule violations (e.g. writing a plan *inside* a repo worktree), tool errors, permission denials, and user-correction turns.
 - **Knowledge base** - recall usage and whether results were actually read, plus a store-health scan (note counts, confidence, stale/rotted/orphan/**dead** notes that are never recalled).
 
-Sessions are grouped by a **setup fingerprint** (CLAUDE.md + command bodies + a knowledge signature + the Claude Code version) and aligned to a change ledger, so the digest reads as a **before/after timeline** - change an instruction or fine-tune an overlay, and you can see how the metrics moved.
+Sessions are grouped by a **setup fingerprint** (CLAUDE.md + the core skills + a knowledge signature + the Claude Code version) and aligned to a change ledger, so the digest reads as a **before/after timeline** - change an instruction or fine-tune an overlay, and you can see how the metrics moved.
 
 ```bash
 servant insights                       # all workspaces, rolling 30 days, all three areas

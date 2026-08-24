@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { FINE_TUNE_ASPECTS, writeOverlay } from "../src/core/fine-tune.ts";
 import { METRICS_SCHEMA_VERSION, extractSessionMetrics } from "../src/core/insights/metrics.ts";
 import { setRootOverride } from "../src/core/paths.ts";
 
@@ -247,5 +248,57 @@ describe("extractSessionMetrics — recall-surfaced notes", () => {
     const m = await extractSessionMetrics(path);
     expect(m.knowledge.knowledgeReads).toEqual([knowledgePath]);
     expect(m.knowledge.recallSurfacedNotes).toEqual([]);
+  });
+});
+
+describe("extractSessionMetrics — what the instruction footprint charges", () => {
+  /** A minimal one-turn transcript; the fixture's content is irrelevant to the footprint. */
+  async function plainFixture(): Promise<string> {
+    return writeFixture([
+      { type: "user", cwd: worktree, version: "2.1.99", message: { role: "user", content: "go" } },
+      {
+        type: "assistant",
+        cwd: worktree,
+        message: {
+          role: "assistant",
+          model: "claude-opus-4-7",
+          usage: { input_tokens: 10, cache_read_input_tokens: 100, output_tokens: 20 },
+          content: [{ type: "text", text: "done" }],
+        },
+      },
+    ]);
+  }
+
+  async function overlay(id: string, body: string): Promise<void> {
+    const aspect = FINE_TUNE_ASPECTS.find((a) => a.id === id);
+    if (!aspect) throw new Error(`expected a '${id}' aspect`);
+    await writeOverlay(aspect, body);
+  }
+
+  test("a core skill's body moves the fingerprint but not the resident footprint", async () => {
+    // The footprint is what a session pays every turn. A core skill's body is not that: Claude Code
+    // keeps only its description resident and loads the body on invocation. So growing one must
+    // register as a setup change without inflating the per-session cost.
+    const path = await plainFixture();
+    const before = await extractSessionMetrics(path);
+
+    await overlay("recall", "x".repeat(20_000));
+    const after = await extractSessionMetrics(path);
+
+    expect(after.setupFingerprint).not.toBe(before.setupFingerprint);
+    expect(after.tokens.instructionFootprintTokens).toBe(before.tokens.instructionFootprintTokens);
+  });
+
+  test("the root conventions doc moves both — it is resident", async () => {
+    const path = await plainFixture();
+    const before = await extractSessionMetrics(path);
+
+    await overlay("general", "y".repeat(20_000));
+    const after = await extractSessionMetrics(path);
+
+    expect(after.setupFingerprint).not.toBe(before.setupFingerprint);
+    expect(after.tokens.instructionFootprintTokens).toBeGreaterThan(
+      before.tokens.instructionFootprintTokens + 4_000,
+    );
   });
 });
