@@ -354,12 +354,32 @@ export async function listAllNotes(): Promise<StoredNote[]> {
 }
 
 /**
+ * Markers a note's own description opens with once what it describes is gone: the surface was
+ * deleted, the design was reversed, another note replaced it. Deliberately *not* `RESOLVED` or
+ * `FIXED` — a fixed bug's note routinely still carries live guidance about the thing that broke,
+ * and measurement (servant-skill-rework#12) found those are exactly the retired-ish notes sessions
+ * still read.
+ */
+const SUPERSEDED_MARKER_RE = /^\s*(HISTORICAL|RETIRED|REVERSED|SUPERSEDED)\b/i;
+
+/** True when a note announces, in its own description, that what it describes no longer exists. */
+export function isSupersededNote(note: KnowledgeNote): boolean {
+  return SUPERSEDED_MARKER_RE.test(note.description);
+}
+
+/**
  * Render the knowledge section inlined into a workspace's own CLAUDE.md. We inline it
  * rather than `@`-importing `~/.ai_servant/knowledge/*` because those files live outside
  * the workspace cwd, and Claude Code gates such external imports behind a per-project
  * trust prompt that would fire on every fresh `servant spawn`. Inlining the lightweight
  * index keeps project knowledge eagerly in context (note bodies load on demand via
  * `servant recall`) with zero external imports.
+ *
+ * Superseded notes are counted, not listed. This section is the largest resident instruction unit
+ * a servant session carries — 46% of the whole surface when #12 measured it — and it is charged to
+ * every session whether or not anything reads it. A quarter of the notes in it announced their own
+ * obsolescence, and across 27 measured sessions not one read a note that was already marked
+ * superseded at the time. They stay in the store and stay recallable; they stop being resident.
  */
 export async function renderWorkspaceKnowledgeSection(repos: readonly string[]): Promise<string> {
   const lines = [
@@ -380,11 +400,19 @@ export async function renderWorkspaceKnowledgeSection(repos: readonly string[]):
 
   for (const repo of repos) {
     const notes = (await readProjectNotes(repo)).toSorted((a, b) => a.name.localeCompare(b.name));
+    const live = notes.filter((n) => !isSupersededNote(n));
+    const superseded = notes.length - live.length;
     lines.push("", `## ${repo} (project knowledge)`);
     if (notes.length === 0) {
       lines.push("_No notes captured yet._");
     } else {
-      for (const note of notes) lines.push(`- **${note.name}** — ${note.description}`);
+      for (const note of live) lines.push(`- **${note.name}** — ${note.description}`);
+      if (superseded > 0) {
+        lines.push(
+          `_Plus ${superseded} superseded note(s) (historical / retired / reversed), not listed here — ` +
+            "`servant recall` still finds them._",
+        );
+      }
     }
   }
 
