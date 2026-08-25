@@ -25,17 +25,7 @@ You are running inside a **servant workspace** at `~/.ai_servant/workspaces/<nam
 
 ## Skills
 
-Seven **core skills** ship inside the servant binary. They are the only ones guaranteed to be here, and they are always on:
-
-```
-/servant-goal              define or amend this workspace's GOAL.md
-/servant-lead              where the whole initiative stands; redirect a running session
-/servant-delegate          hand a chunk of work to a fresh session (see "Spawning & delegation")
-/servant-recall            what prior servants learned about this repo or topic
-/servant-extract-memories  distill this session's durable knowledge into the knowledge base
-/servant-fine-tune         read servant's own measured insights; tune its instructions
-/servant-skills            manage which skills are installed and enabled
-```
+Servant's own **core skills** are named `servant-*`. They ship inside the binary and are always on; `servant skills list` prints them alongside everything else installed.
 
 **Everything else is installed, not bundled.** servant does not own the engineering flow — shaping specs, breaking work down, implementing, reviewing, TDD are all skills installed from a source, and which ones is the user's choice. `servant skills list` says what is installed and enabled right now, and what else a session can reach that servant does not manage; `/servant-skills` is where the judgment about sources, additions and removals lives. Do not assume a skill is available because it is conventional — check, or ask.
 
@@ -87,7 +77,7 @@ There are two ways to move work to another agent — pick by layer:
 - **In-session subagent (the `Agent` tool)** — ephemeral, runs inside *your* session and returns a report to your context. It is how review, research and design skills fan out. Reach for it for tightly-scoped, AFK work you want back in this thread.
 - **`servant spawn` (a new tab / fresh top-level agent)** — persistent, its own context, human-visible. Reach for it when a chunk of work deserves its own session: an independent subtask you want running in parallel, a sibling agent, or the continuation of work you are handing on. **Proactively suggest `servant spawn`** when you notice work that should live in its own session rather than crowding this one.
 
-**Handing work forward — `/servant-delegate`.** The one "take it forward" gesture at any seam in the flow, and there is **no handoff document**: the context goes into a comment on the ticket (`servant ticket comment <n>`), and the spawn prompt collapses to one line pointing the new session at that ticket. Nothing on disk, no path to pass. It **spawns the continuation session(s) itself** — one per dispatchable ticket — so the user never hand-types a `servant spawn`. It reads the dispatchable set from `servant tasks --frontier --ws <name> --json`, which sorts open tickets into `ready` (unblocked, unclaimed), `stale` (claimed by a session that is gone — reclaimed silently, and said so in the report), `inFlight` (someone is on it — **refused** without an explicit override) and `blocked`. It fans out over `ready` + `stale`: tickets on different repos run in parallel; two on the same repo run first-then-rest. Claiming and spawning are one indivisible step — `servant spawn` writes no Claim of its own, and without `--name` the session picks its own name, so a Claim written around it points at an address nothing answers to. `servant spawn --prompt "…"` remains the one-session primitive underneath.
+**Handing work forward — invoke `/servant-delegate`.** It owns the whole procedure: reading which tickets are actually dispatchable, writing the comment on the ticket that *is* the handoff (there is no handoff document and no path to pass), and claiming and spawning as one indivisible step. Run the skill rather than reconstructing the steps by hand — each of them has a failure mode this doc is too short to warn you about. `servant spawn --prompt "…"` remains the one-session primitive underneath.
 
 **Worktree safety for subagents.** A mounted repo under `repos/` is a live git **worktree**. A subagent that does `git checkout -b research/<name>` there would switch the shared checkout's branch out from under the main agent. Read-only subagents — research, review, exploration — must stay read-only or take a worktree of their own; never switch the shared checkout.
 
@@ -95,7 +85,7 @@ There are two ways to move work to another agent — pick by layer:
 
 ```
 servant tasks [--ws <name>]     # cross-workspace ticket view (grouped, deep-linked)
-servant tasks --frontier --ws … # ready / stale / in-flight / blocked; feeds /servant-delegate
+servant tasks --frontier --ws … # what is dispatchable; read by /servant-delegate
 servant ticket <new|show|…>      # file, read and edit tickets on the board
 servant claim <n> --session …    # who is carrying a ticket
 servant recall <query>          # search accumulated knowledge notes

@@ -46,12 +46,36 @@ describe("the conventions prose a workspace session loads", () => {
     }
   });
 
-  // Derived from what actually ships, not a hand-kept list: a core skill added or renamed without
-  // the prose following would leave a session unable to find it (or reaching for a ghost).
-  test("names every core skill that ships, and no name that does not", () => {
+  // The doc used to enumerate all seven core skills. It stopped (#17): Claude Code already keeps
+  // every skill's name *and* description resident in the session's skill listing, so the roster was
+  // a second copy of a list the session was handed anyway. The direction that still has a failure
+  // mode is the other one — a name here that ships nowhere sends a session after a ghost.
+  test("names no servant skill that does not ship", () => {
     const named = [...CONVENTIONS.matchAll(/\/(servant-[a-z-]+)/g)].map((m) => m[1] ?? "");
-    const byName = (a: string, b: string) => a.localeCompare(b);
-    expect([...new Set(named)].toSorted(byName)).toEqual(coreSkillNames().toSorted(byName));
+    const ships = new Set<string>(coreSkillNames());
+    expect([...new Set(named)].filter((n) => !ships.has(n))).toEqual([]);
+  });
+
+  // #17 again, the larger half: the doc carried the whole delegate procedure — the frontier
+  // buckets, the ticket comment, the claim-and-spawn pair — and measurement found sessions running
+  // it from the prose by hand (11 hand-written handoffs) while the skill went uninvoked (0). Two
+  // copies, and the resident one won. The doc points now; the skill teaches. Every marker below
+  // belongs to the procedure, not to a pointer at it.
+  test("points at /servant-delegate rather than restating its procedure", () => {
+    expect(CONVENTIONS).toContain("/servant-delegate");
+    for (const step of [
+      "unblocked",
+      "in-flight",
+      "inFlight",
+      "reclaim",
+      "ticket comment",
+      "--name",
+    ]) {
+      expect(
+        CONVENTIONS,
+        `the conventions doc names "${step}" — that is the delegate procedure, and it belongs in the skill`,
+      ).not.toContain(step);
+    }
   });
 
   test("points at the skills surface for everything that is not core", () => {
