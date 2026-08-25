@@ -123,7 +123,7 @@ describe("launchWorkspaceSession", () => {
     } finally {
       unregister();
     }
-    expect(tabs[0]?.command).toContain("/servant:goal");
+    expect(tabs[0]?.command).toContain("/servant-goal");
   });
 
   test("an explicit prompt wins over the goal bootstrap; a blank one does not", async () => {
@@ -138,7 +138,7 @@ describe("launchWorkspaceSession", () => {
       withTask.unregister();
     }
     expect(withTask.tabs[0]?.command).toContain("do the task");
-    expect(withTask.tabs[0]?.command).not.toContain("/servant:goal");
+    expect(withTask.tabs[0]?.command).not.toContain("/servant-goal");
 
     const blank = captureTabs();
     try {
@@ -146,7 +146,7 @@ describe("launchWorkspaceSession", () => {
     } finally {
       blank.unregister();
     }
-    expect(blank.tabs[0]?.command).toContain("/servant:goal");
+    expect(blank.tabs[0]?.command).toContain("/servant-goal");
   });
 
   test("beforeLaunch runs against the scaffolded workspace, before the tab opens", async () => {

@@ -1,6 +1,8 @@
 import { existsSync } from "node:fs";
 import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { dirname, join, relative, resolve, sep } from "node:path";
+import { TEMPLATES } from "../templates/index.generated.ts";
+import { contentStamp } from "./content-stamp.ts";
 import { ensureProjectIndex, renderWorkspaceKnowledgeSection } from "./knowledge.ts";
 import { aiServantRoot, workspacePath, workspacesRoot } from "./paths.ts";
 import {
@@ -10,13 +12,6 @@ import {
   renderTriageLabelsDoc,
 } from "./skills-config.ts";
 import { parseWorktreeDirName, reposRoot } from "./worktree-naming.ts";
-
-// Imports at the top of a workspace's CLAUDE.md: the servant-root conventions doc and the
-// workspace's own GOAL.md. Both are auto-loaded every session. We do NOT @-import the
-// knowledge store (`~/.ai_servant/knowledge/*`) — those files are outside the workspace
-// cwd and Claude Code gates external imports behind a per-spawn trust prompt. Instead the
-// knowledge index is inlined into the body below (see renderWorkspaceKnowledgeSection).
-const WORKSPACE_CLAUDE_MD_BASE = ["@../../CLAUDE.md", "@GOAL.md"];
 
 // SessionEnd hooks that fire when a servant session ends: (1) enqueue a knowledge-extraction job,
 // and (2) enqueue a qualitative insight-judgment job. Both are instant enqueues that never block
@@ -103,9 +98,9 @@ const SCAFFOLD_FILES: ReadonlyArray<readonly [string, string]> = [
   ["CONTEXT.md", "# Context\n\nShared language / domain glossary for this workspace.\n"],
 ];
 
-// Per-workspace mattpocock-skills config (docs/agents/*). Parameterized by workspace name, so
-// generated in ensureWorkspaceDir rather than listed statically. Rewritten when their content
-// stamp moves — see writeStamped.
+// The contract servant publishes to whatever instruction set is installed (docs/agents/*).
+// Parameterized by workspace name, so generated in ensureWorkspaceDir rather than listed
+// statically. Rewritten when their content stamp moves — see writeStamped.
 function skillsConfigFiles(workspace: string): ReadonlyArray<readonly [string, string]> {
   return [
     ["docs/agents/issue-tracker.md", renderIssueTrackerDoc(workspace)],
@@ -127,11 +122,12 @@ async function writeIfMissing(path: string, body: string): Promise<void> {
 /**
  * Write a generated agent doc, refreshing it whenever its content has moved.
  *
- * These are the *only* scaffold files that are not write-if-missing, and the exception is
- * deliberate (ADR-0011): they describe how to operate the tracker, so a workspace created before a
- * tracker change would otherwise keep instructing agents to use the old one forever. The stamped
- * first line means an unstamped doc — every workspace predating this — never compares equal, and so
- * is always replaced.
+ * Used for every stamped doc servant generates into a workspace: the `docs/agents/*` board contract
+ * and the two agent-conventions docs. These are the *only* scaffold files that are not
+ * write-if-missing, and the exception is deliberate (ADR-0011): they describe how to operate the
+ * tracker and how to work here, so a workspace created before a change would otherwise keep
+ * instructing agents from the old prose forever. The stamped first line means an unstamped doc —
+ * every workspace predating this — never compares equal, and so is always replaced.
  */
 async function writeStamped(path: string, desired: string): Promise<void> {
   const existing = await readFileOr(path, "");
@@ -247,43 +243,70 @@ export async function mountedRepoSubdirs(workspace: string): Promise<string[]> {
   return [...subdirs].toSorted();
 }
 
-async function buildWorkspaceClaudeMd(
-  workspace: string,
-  repoSubdirs: readonly string[],
-): Promise<string> {
-  const header = `${WORKSPACE_CLAUDE_MD_BASE.join("\n")}\n`;
-  const agentSkills = renderAgentSkillsBlock(workspace);
-  const knowledge = await renderWorkspaceKnowledgeSection(repoSubdirs);
-  return `${header}\n${agentSkills}\n${knowledge}`;
+// ---------------------------------------------------------------------------------------------
+// One source, two renderings.
+//
+// A workspace ships two agent-conventions docs because the two backends read different files:
+// Claude reads CLAUDE.md and resolves `@path` imports, Codex reads AGENTS.md as plain text and has
+// no import mechanism at all. That is the *only* difference between them. Everything that decides
+// what a session here believes — servant's conventions prose, this workspace's GOAL.md, the
+// docs/agents pointer block, the inlined knowledge index — is gathered once, into
+// `WorkspaceConventions`, and each renderer only chooses how to deliver it.
+//
+// So the size difference between the two files is inlining, not divergence, and adding a section to
+// one without the other is not something a renderer can do by accident.
+// ---------------------------------------------------------------------------------------------
+
+/** servant's conventions prose exactly as it ships in the binary — before any fine-tune overlay. */
+function bundledConventions(): string {
+  return TEMPLATES.find((t) => t.rel === "servant_root/CLAUDE.md")?.content ?? "";
 }
+
+const CONVENTIONS_STAMP_PREFIX = "<!-- servant:conventions v=";
 
 /**
- * Rewrite the workspace CLAUDE.md: the base imports (servant-root conventions + GOAL.md)
- * followed by the inlined knowledge index — the topic tag directory plus a per-repo note
- * list for every mounted repo. Creates any missing per-repo index in the store so project
- * knowledge follows the repo. Inlined (not @-imported) to avoid Claude Code's external-
- * import trust prompt. Idempotent — safe to call on every spawn / repo add / repo rm.
+ * The version line both docs open with — deliberately the *same* value in each, since that is the
+ * claim the stamp exists to make: these are two renderings of one source.
+ *
+ * It stamps servant's bundled conventions prose, NOT the rendered file. Unlike `docs/agents/*`
+ * (which stamp their whole body, because their whole body is servant's), these two docs also carry
+ * workspace-owned content — GOAL.md, the knowledge index — that churns on every repo mount and
+ * every note captured. A whole-file digest here would move constantly, differ between any two
+ * workspaces, and differ between the Claude twin and the Codex twin, which is all three of the
+ * questions the stamp is supposed to answer. Stamping the base also keeps it comparable across
+ * machines whose users have different fine-tune overlays (`fine-tune.ts`): the stamp names the
+ * version of servant's prose, and the overlay is by definition not that.
+ *
+ * Nothing reads the stamp to decide whether to rewrite — `writeStamped` compares full content — so
+ * the narrower stamp costs no refresh accuracy. The docs/agents pointer block is not hashed either;
+ * it points at three documents that carry their own stamps.
  */
-export async function syncWorkspaceClaudeMd(workspace: string): Promise<void> {
-  const repoSubdirs = await mountedRepoSubdirs(workspace);
-  for (const repo of repoSubdirs) await ensureProjectIndex(repo);
-  const claudeMdPath = join(workspacePath(workspace), "CLAUDE.md");
-  const desired = await buildWorkspaceClaudeMd(workspace, repoSubdirs);
-  let existing: string | null = null;
-  try {
-    existing = await readFile(claudeMdPath, "utf8");
-  } catch {
-    // missing, will write
-  }
-  if (existing !== desired) await writeFile(claudeMdPath, desired);
+function conventionsStampLine(): string {
+  return `${CONVENTIONS_STAMP_PREFIX}${contentStamp(bundledConventions())} — generated by servant; edits here are overwritten -->`;
 }
 
-// Header for the generated AGENTS.md, explaining that it is servant-managed and why content is
-// inlined rather than imported (Codex reads AGENTS.md and has no `@path` import mechanism).
+// Explains to a reader of AGENTS.md why its content is inlined rather than imported.
 const WORKSPACE_AGENTS_MD_HEADER =
-  "<!-- Managed by servant — do not edit by hand. This is the Codex-facing twin of CLAUDE.md.\n" +
-  "     Codex reads AGENTS.md and has no @-import mechanism, so the servant-root conventions and\n" +
-  "     this workspace's GOAL.md are inlined below (CLAUDE.md @-imports them instead). -->";
+  "<!-- This is the Codex-facing twin of CLAUDE.md. Codex reads AGENTS.md and has no @-import\n" +
+  "     mechanism, so the servant-root conventions and this workspace's GOAL.md are inlined below\n" +
+  "     (CLAUDE.md @-imports them instead). Same substance, one source. -->";
+
+// What CLAUDE.md @-imports and AGENTS.md inlines: the servant-root conventions doc and the
+// workspace's own GOAL.md. We do NOT @-import the knowledge store (`~/.ai_servant/knowledge/*`) —
+// those files are outside the workspace cwd and Claude Code gates external imports behind a
+// per-spawn trust prompt. The knowledge index is inlined into both docs instead.
+const CLAUDE_IMPORTS = ["@../../CLAUDE.md", "@GOAL.md"];
+
+interface WorkspaceConventions {
+  /** servant's conventions prose, composed on disk (base + any fine-tune overlay). */
+  readonly rootConventions: string;
+  /** This workspace's GOAL.md. */
+  readonly goal: string;
+  /** The docs/agents pointer block. */
+  readonly agentSkills: string;
+  /** The inlined knowledge index — topic tags plus a note list per mounted repo. */
+  readonly knowledge: string;
+}
 
 async function readFileOr(path: string, fallback: string): Promise<string> {
   try {
@@ -293,37 +316,58 @@ async function readFileOr(path: string, fallback: string): Promise<string> {
   }
 }
 
-async function buildWorkspaceAgentsMd(
+async function gatherWorkspaceConventions(
   workspace: string,
   repoSubdirs: readonly string[],
-): Promise<string> {
-  // Codex has no @-imports, so inline what CLAUDE.md would import: the servant-root conventions
-  // doc and the workspace GOAL.md, the per-workspace Agent skills block (hub pin), plus the same
-  // inlined knowledge index.
-  const rootConventions = (await readFileOr(join(aiServantRoot(), "CLAUDE.md"), "")).trim();
-  const goal = (await readFileOr(join(workspacePath(workspace), "GOAL.md"), "")).trim();
-  const agentSkills = renderAgentSkillsBlock(workspace).trim();
-  const knowledge = await renderWorkspaceKnowledgeSection(repoSubdirs);
-  const sections = [WORKSPACE_AGENTS_MD_HEADER];
-  if (rootConventions) sections.push(rootConventions);
-  if (goal) sections.push(`# Workspace goal (GOAL.md)\n\n${goal}`);
-  sections.push(agentSkills);
-  sections.push(knowledge.trimEnd());
-  return `${sections.join("\n\n")}\n`;
+): Promise<WorkspaceConventions> {
+  return {
+    rootConventions: (await readFileOr(join(aiServantRoot(), "CLAUDE.md"), "")).trim(),
+    goal: (await readFileOr(join(workspacePath(workspace), "GOAL.md"), "")).trim(),
+    agentSkills: renderAgentSkillsBlock(workspace).trim(),
+    knowledge: (await renderWorkspaceKnowledgeSection(repoSubdirs)).trimEnd(),
+  };
+}
+
+/** The Claude rendering: import what can be imported, inline the rest. */
+function renderClaudeMd(src: WorkspaceConventions): string {
+  const sections = [
+    conventionsStampLine(),
+    CLAUDE_IMPORTS.join("\n"),
+    src.agentSkills,
+    src.knowledge,
+  ];
+  return `${sections.filter(Boolean).join("\n\n")}\n`;
+}
+
+/** The Codex rendering: identical substance, everything inlined. */
+function renderAgentsMd(src: WorkspaceConventions): string {
+  const sections = [conventionsStampLine(), WORKSPACE_AGENTS_MD_HEADER];
+  if (src.rootConventions) sections.push(src.rootConventions);
+  if (src.goal) sections.push(`# Workspace goal (GOAL.md)\n\n${src.goal}`);
+  sections.push(src.agentSkills, src.knowledge);
+  return `${sections.filter(Boolean).join("\n\n")}\n`;
 }
 
 /**
- * Rewrite the workspace AGENTS.md — the Codex-facing twin of CLAUDE.md. Same substance (servant-root
- * conventions + GOAL.md + inlined knowledge index) but everything is inlined, since Codex reads
- * AGENTS.md as plain text with no `@`-import mechanism. Idempotent — only writes on real change.
+ * Rewrite the workspace CLAUDE.md — the Claude-facing rendering of the shared source. Creates any
+ * missing per-repo knowledge index so project knowledge follows the repo. Idempotent — safe to call
+ * on every spawn / repo add / repo rm.
+ */
+export async function syncWorkspaceClaudeMd(workspace: string): Promise<void> {
+  const repoSubdirs = await mountedRepoSubdirs(workspace);
+  for (const repo of repoSubdirs) await ensureProjectIndex(repo);
+  const src = await gatherWorkspaceConventions(workspace, repoSubdirs);
+  await writeStamped(join(workspacePath(workspace), "CLAUDE.md"), renderClaudeMd(src));
+}
+
+/**
+ * Rewrite the workspace AGENTS.md — the Codex-facing rendering of the same source. Idempotent.
  */
 export async function syncWorkspaceAgentsMd(workspace: string): Promise<void> {
   const repoSubdirs = await mountedRepoSubdirs(workspace);
   for (const repo of repoSubdirs) await ensureProjectIndex(repo);
-  const agentsMdPath = join(workspacePath(workspace), "AGENTS.md");
-  const desired = await buildWorkspaceAgentsMd(workspace, repoSubdirs);
-  const existing = await readFileOr(agentsMdPath, " missing");
-  if (existing !== desired) await writeFile(agentsMdPath, desired);
+  const src = await gatherWorkspaceConventions(workspace, repoSubdirs);
+  await writeStamped(join(workspacePath(workspace), "AGENTS.md"), renderAgentsMd(src));
 }
 
 /**

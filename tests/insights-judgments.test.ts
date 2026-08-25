@@ -13,12 +13,19 @@ import {
   releaseJudgeLock,
 } from "../src/core/insights/judge-queue.ts";
 import {
+  JUDGMENTS_SCHEMA_VERSION,
   type Judgment,
+  type UnitJudgment,
   anchorKey,
+  buildJudgePrompt,
   mergeJudgments,
+  mergeUnitJudgments,
   parseJudgments,
+  parseUnitJudgments,
   selectCandidatesToJudge,
+  selectUnitsToJudge,
 } from "../src/core/insights/judgments.ts";
+import type { InstructionUnit } from "../src/core/insights/instruction-units.ts";
 import type { Candidate } from "../src/core/insights/metrics.ts";
 import { readJudgment } from "../src/core/insights/store.ts";
 import { insightsJudgmentsDir, setRootOverride } from "../src/core/paths.ts";
@@ -132,6 +139,19 @@ function candidate(over: Partial<Candidate> = {}): Candidate {
   };
 }
 
+/** A deterministic instruction unit (a resident skill by default). */
+function unit(over: Partial<InstructionUnit> = {}): InstructionUnit {
+  return {
+    id: "servant-lead",
+    kind: "skill",
+    approxTokens: 60,
+    resident: true,
+    fromStart: true,
+    uses: 0,
+    ...over,
+  };
+}
+
 beforeEach(async () => {
   tmpRoot = await mkdtemp(join(tmpdir(), "servant-judge-"));
   setRootOverride(tmpRoot);
@@ -228,6 +248,110 @@ describe("pure helpers", () => {
     expect(out[1]?.verdict).toBe("neutral");
     expect(out[1]?.tokens).toBe(0);
   });
+
+  test("parseJudgments still reads the object form the units prompt asks for", () => {
+    const cands = [candidate()];
+    const raw =
+      '{"candidates":[{"index":0,"verdict":"justified","reasoning":"worth it"}],"units":[]}';
+    expect(parseJudgments(raw, cands)[0]?.verdict).toBe("justified");
+  });
+
+  test("selectUnitsToJudge: costliest-first, skips judged, honors the lever filter and cap", () => {
+    const units = [
+      unit({ id: "ws:CLAUDE.md", kind: "doc", approxTokens: 2500 }),
+      unit({ id: "servant-lead", approxTokens: 60 }),
+      unit({ id: "someone-elses-skill", approxTokens: 50 }),
+    ];
+    const already: UnitJudgment[] = [
+      { id: "ws:CLAUDE.md", kind: "doc", invoked: false, verdict: "justified", why: "" },
+    ];
+    const pick = selectUnitsToJudge(units, already, 3, {
+      isJudgeable: (u) => u.kind === "doc" || u.id === "servant-lead",
+    });
+    // the doc is already judged; the unmanaged skill has no lever behind it.
+    expect(pick.map((u) => u.id)).toEqual(["servant-lead"]);
+    // cap already spent by prior verdicts → nothing more this run.
+    const judgedNow: UnitJudgment[] = pick.map((u) => ({
+      id: u.id,
+      kind: u.kind,
+      invoked: false,
+      verdict: "neutral",
+      why: "",
+    }));
+    expect(selectUnitsToJudge(units, [...already, ...judgedNow], 2)).toHaveLength(0);
+  });
+
+  test("selectUnitsToJudge: a unit no session has judged yet outranks a bigger, well-covered one", () => {
+    const units = [
+      unit({ id: "code-review", approxTokens: 114 }),
+      unit({ id: "servant-recall", approxTokens: 65 }),
+      unit({ id: "unslop", approxTokens: 15 }),
+    ];
+    // `code-review` has been judged in every session so far; the small ones never got a slot.
+    const priorVerdicts = new Map([["code-review", 27]]);
+    const pick = selectUnitsToJudge(units, [], 2, { priorVerdicts });
+    expect(pick.map((u) => u.id)).toEqual(["servant-recall", "unslop"]);
+  });
+
+  test("selectUnitsToJudge: within the same coverage, the costliest unit still goes first", () => {
+    const units = [unit({ id: "small", approxTokens: 15 }), unit({ id: "big", approxTokens: 900 })];
+    const pick = selectUnitsToJudge(units, [], 1, {
+      priorVerdicts: new Map([
+        ["small", 1],
+        ["big", 1],
+      ]),
+    });
+    expect(pick.map((u) => u.id)).toEqual(["big"]);
+  });
+
+  test("mergeUnitJudgments dedups by unit id", () => {
+    const u: UnitJudgment = {
+      id: "servant-lead",
+      kind: "skill",
+      invoked: true,
+      verdict: "justified",
+      why: "x",
+    };
+    expect(mergeUnitJudgments([u], [u, { ...u, id: "ws:GOAL.md", kind: "doc" }])).toHaveLength(2);
+  });
+
+  test("parseUnitJudgments takes only the verdict from the agent — id, kind and invoked are ours", () => {
+    const units = [unit({ uses: 2 }), unit({ id: "ws:GOAL.md", kind: "doc", uses: 0 })];
+    const raw =
+      'done:\n{"candidates":[],"units":[{"index":0,"verdict":"justified","why":"drove the work"},{"index":1,"verdict":"bogus","why":"?"}]}';
+    const out = parseUnitJudgments(raw, units);
+    expect(out[0]).toEqual({
+      id: "servant-lead",
+      kind: "skill",
+      invoked: true,
+      verdict: "justified",
+      why: "drove the work",
+    });
+    // an unknown verdict coerces to neutral; a doc with no reads is not "invoked".
+    expect(out[1]?.verdict).toBe("neutral");
+    expect(out[1]?.invoked).toBe(false);
+  });
+
+  test("parseUnitJudgments: a bare array is read as candidates, so units stay empty", () => {
+    const raw = '[{"index":0,"verdict":"justified","reasoning":"x"}]';
+    expect(parseUnitJudgments(raw, [unit()])).toHaveLength(0);
+  });
+
+  test("buildJudgePrompt states the cost, the use count and the not-invoked-is-not-waste rule", () => {
+    const prompt = buildJudgePrompt({
+      transcriptPath: "/t.jsonl",
+      candidates: [candidate()],
+      units: [
+        unit({ id: "servant-lead", uses: 0 }),
+        unit({ id: "ws:docs/agents/issue-tracker.md", kind: "doc", resident: false, uses: 1 }),
+      ],
+      outPath: "/out.json",
+    });
+    expect(prompt).toContain("[u0] skill servant-lead — ~60 tok resident every turn, invoked 0×");
+    expect(prompt).toContain("ws:docs/agents/issue-tracker.md — ~60 tok, only if read, read 1×");
+    expect(prompt).toContain("never invoked");
+    expect(prompt).toContain("can still be **justified**");
+  });
 });
 
 describe("runJudgeFromHook guards", () => {
@@ -273,6 +397,7 @@ describe("runJudgeDrain", () => {
     const result = await runJudgeDrain({
       runner: async ({ candidates }) => ({
         sessionId: "headless-1",
+        units: [],
         judgments: candidates.map((c) => ({
           anchor: c.anchor,
           kind: c.kind,
@@ -287,7 +412,7 @@ describe("runJudgeDrain", () => {
 
     const rec = await readJudgment(SESSION_ID);
     expect(rec?.sessionId).toBe(SESSION_ID);
-    expect(rec?.schema).toBe(1);
+    expect(rec?.schema).toBe(JUDGMENTS_SCHEMA_VERSION);
     expect(rec && rec.judgments.length).toBeGreaterThan(0);
     for (const j of rec!.judgments) {
       expect(["justified", "wasteful", "neutral", "efficient", "inefficient"]).toContain(j.verdict);
@@ -299,10 +424,156 @@ describe("runJudgeDrain", () => {
     expect(rec!.judgments.some((j) => j.anchor.line === 3)).toBe(true);
   });
 
+  test("judges the instruction units the session ran with, alongside the moments", async () => {
+    // The transcript records its own starting skill set; the workspace doc is enumerated from disk.
+    const records = [
+      {
+        type: "attachment",
+        cwd: wsCwd,
+        attachment: {
+          type: "skill_listing",
+          isInitial: true,
+          names: ["servant-lead", "someone-elses-skill"],
+          content:
+            "- servant-lead: Report where the whole initiative stands.\n- someone-elses-skill: Something servant never installed.",
+        },
+      },
+      ...fixtureRecords(),
+    ];
+    await writeFile(join(tmpRoot, "CLAUDE.md"), "# servant conventions\n".repeat(20));
+    const transcript = await writeSessionTranscript(SESSION_ID, records);
+    await runJudgeFromHook(hookPayload({}, transcript), { kick: false });
+
+    let seen: InstructionUnit[] = [];
+    await runJudgeDrain({
+      runner: async ({ units }) => {
+        seen = units;
+        return {
+          sessionId: "h",
+          judgments: [],
+          units: units.map((u) => ({
+            id: u.id,
+            kind: u.kind,
+            invoked: u.uses > 0,
+            verdict: "justified" as const,
+            why: "reasonable to have loaded",
+          })),
+        };
+      },
+    });
+
+    // The root conventions doc and the managed skill are judged; the skill servant never installed
+    // is in the inventory but has no lever, so it is not.
+    expect(seen.map((u) => u.id)).toContain("root:CLAUDE.md");
+    expect(seen.map((u) => u.id)).toContain("servant-lead");
+    expect(seen.map((u) => u.id)).not.toContain("someone-elses-skill");
+
+    const rec = await readJudgment(SESSION_ID);
+    expect(rec?.units.map((u) => u.id)).toContain("servant-lead");
+    expect(rec?.units.find((u) => u.id === "root:CLAUDE.md")?.kind).toBe("doc");
+  });
+
+  test("one drain spreads its unit slots — the second session does not re-judge the first's pick", async () => {
+    // Two sessions, one drain, one unit slot each. Size ordering alone would spend both slots on
+    // the largest unit; coverage has to move as the drain writes, not just when it starts.
+    const listing = {
+      type: "attachment",
+      cwd: wsCwd,
+      attachment: {
+        type: "skill_listing",
+        isInitial: true,
+        names: ["servant-lead"],
+        content: "- servant-lead: Report where the whole initiative stands.",
+      },
+    };
+    await writeFile(join(tmpRoot, "CLAUDE.md"), "# servant conventions\n".repeat(200));
+    const second = "bbbbbbbb-bbbb-cccc-dddd-eeeeeeeeeeee";
+    for (const id of [SESSION_ID, second]) {
+      const transcript = await writeSessionTranscript(id, [listing, ...fixtureRecords()]);
+      await runJudgeFromHook(hookPayload({ session_id: id }, transcript), { kick: false });
+    }
+
+    await runJudgeDrain({
+      maxUnits: 1,
+      runner: async ({ units }) => ({
+        sessionId: "h",
+        judgments: [],
+        units: units.map((u) => ({
+          id: u.id,
+          kind: u.kind,
+          invoked: false,
+          verdict: "neutral" as const,
+          why: "",
+        })),
+      }),
+    });
+
+    const first = (await readJudgment(SESSION_ID))?.units.map((u) => u.id) ?? [];
+    const rest = (await readJudgment(second))?.units.map((u) => u.id) ?? [];
+    expect(first).toEqual(["root:CLAUDE.md"]); // costliest, nothing judged yet
+    expect(rest).toEqual(["servant-lead"]); // the doc is covered now, so the slot moves on
+  });
+
+  test("units are judged at most once per session (the axis is idempotent too)", async () => {
+    const records = [
+      {
+        type: "attachment",
+        cwd: wsCwd,
+        attachment: {
+          type: "skill_listing",
+          isInitial: true,
+          names: ["servant-lead"],
+          content: "- servant-lead: Report where the whole initiative stands.",
+        },
+      },
+      ...fixtureRecords(),
+    ];
+    const transcript = await writeSessionTranscript(SESSION_ID, records);
+    const runner = async ({
+      candidates,
+      units,
+    }: { candidates: Candidate[]; units: InstructionUnit[] }) => ({
+      sessionId: "h",
+      judgments: candidates.map((c) => ({
+        anchor: c.anchor,
+        kind: c.kind,
+        verdict: "neutral" as const,
+        reasoning: "",
+        tokens: 0,
+      })),
+      units: units.map((u) => ({
+        id: u.id,
+        kind: u.kind,
+        invoked: false,
+        verdict: "neutral" as const,
+        why: "",
+      })),
+    });
+
+    await runJudgeFromHook(hookPayload({}, transcript), { kick: false });
+    await runJudgeDrain({ runner });
+    const before = await readJudgment(SESSION_ID);
+    expect(before?.units.length).toBeGreaterThan(0);
+
+    let secondCalls = 0;
+    await runJudgeFromHook(hookPayload({}, transcript), { kick: false });
+    const second = await runJudgeDrain({
+      runner: async (input) => {
+        secondCalls += 1;
+        return runner(input);
+      },
+    });
+
+    expect(second.processed).toBe(0); // nothing left to judge on either axis
+    expect(secondCalls).toBe(0);
+    expect((await readJudgment(SESSION_ID))?.units).toEqual(before?.units);
+  });
+
   test("idempotent: a second drain with no new candidates is a no-op", async () => {
     const transcript = await writeSessionTranscript(SESSION_ID, fixtureRecords());
     const runner = async ({ candidates }: { candidates: Candidate[] }) => ({
       sessionId: "h",
+      units: [],
       judgments: candidates.map((c) => ({
         anchor: c.anchor,
         kind: c.kind,
@@ -342,6 +613,7 @@ describe("runJudgeDrain", () => {
         received = candidates.length;
         return {
           sessionId: "h",
+          units: [],
           judgments: candidates.map((c) => ({
             anchor: c.anchor,
             kind: c.kind,
@@ -363,7 +635,7 @@ describe("runJudgeDrain", () => {
     expect(await acquireJudgeLock()).toBe(true);
     try {
       const result = await runJudgeDrain({
-        runner: async () => ({ sessionId: "h", judgments: [] }),
+        runner: async () => ({ sessionId: "h", judgments: [], units: [] }),
       });
       expect(result.skipped).toBe(true);
       expect(await judgeQueueDepth()).toBe(1); // untouched
@@ -412,6 +684,7 @@ describe("self-measurement exclusion", () => {
     await runJudgeDrain({
       runner: async ({ candidates }) => ({
         sessionId: "h",
+        units: [],
         judgments: candidates.map((c) => ({
           anchor: c.anchor,
           kind: c.kind,

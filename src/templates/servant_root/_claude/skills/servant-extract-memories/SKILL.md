@@ -1,13 +1,14 @@
 ---
-description: Distill durable knowledge from the current session into the servant knowledge base (projects + topics).
+name: servant-extract-memories
+description: Distill what this session learned that outlives the task into the servant knowledge base, as project- and topic-keyed notes. Use when the user asks to capture, save, or remember what was learned, or when finishing work a future session would want to inherit.
 ---
 
-# /servant:extract-memories
+# /servant-extract-memories
 
 Capture what this session learned that **outlives the task** into the durable, subject-keyed
 servant knowledge base at `~/.ai_servant/knowledge/` (relative to your cwd: `../../knowledge/`).
 This runs **in-session** — no new tab, no headless process. The same distillation also happens
-automatically at session end via a queue + headless drainer; this command is for capturing now,
+automatically at session end via a queue + headless drainer; this skill is for capturing now,
 watching it happen.
 
 ## What to capture

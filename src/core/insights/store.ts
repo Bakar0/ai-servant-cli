@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { $ } from "bun";
 import {
@@ -107,6 +107,27 @@ export async function readJudgment(sessionId: string): Promise<JudgmentRecord | 
   } catch {
     return null;
   }
+}
+
+/**
+ * Every judgment record in the store, skipping anything unreadable or schema-stale. The units axis
+ * aggregates over these on read, so the read has to be cheap and total: local JSON, no network, and
+ * a stale record is absent rather than fatal.
+ */
+export async function readAllJudgments(): Promise<JudgmentRecord[]> {
+  let names: string[] = [];
+  try {
+    names = await readdir(insightsJudgmentsDir());
+  } catch {
+    return []; // store not created yet
+  }
+  const out: JudgmentRecord[] = [];
+  for (const name of names.toSorted()) {
+    if (!name.endsWith(".json")) continue;
+    const rec = await readJudgment(name.slice(0, -".json".length));
+    if (rec) out.push(rec);
+  }
+  return out;
 }
 
 /** Persist a session's judgment record (pretty JSON), creating the judgments area if needed. */

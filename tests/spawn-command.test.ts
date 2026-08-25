@@ -137,7 +137,7 @@ describe("spawn goal bootstrap", () => {
       unregister();
     }
     expect(tabs).toHaveLength(1);
-    expect(tabs[0]?.command).toContain("/servant:goal");
+    expect(tabs[0]?.command).toContain("/servant-goal");
   });
 
   test("a blank --prompt does not suppress the goal bootstrap", async () => {
@@ -151,7 +151,7 @@ describe("spawn goal bootstrap", () => {
       unregister();
     }
     expect(tabs).toHaveLength(1);
-    expect(tabs[0]?.command).toContain("/servant:goal");
+    expect(tabs[0]?.command).toContain("/servant-goal");
   });
 
   test("`-repo` (clustered short flags) still triggers the goal bootstrap", async () => {
@@ -165,7 +165,7 @@ describe("spawn goal bootstrap", () => {
       unregister();
     }
     expect(tabs).toHaveLength(1);
-    expect(tabs[0]?.command).toContain("/servant:goal");
+    expect(tabs[0]?.command).toContain("/servant-goal");
   });
 
   test("an explicit --prompt wins over the goal bootstrap", async () => {
@@ -180,7 +180,7 @@ describe("spawn goal bootstrap", () => {
     }
     expect(tabs).toHaveLength(1);
     expect(tabs[0]?.command).toContain("do the task");
-    expect(tabs[0]?.command).not.toContain("/servant:goal");
+    expect(tabs[0]?.command).not.toContain("/servant-goal");
   });
 
   test("re-spawning while the goal is still unfilled keeps offering /goal", async () => {
@@ -203,7 +203,7 @@ describe("spawn goal bootstrap", () => {
       unregister();
     }
     expect(tabs).toHaveLength(1);
-    expect(tabs[0]?.command).toContain("/servant:goal");
+    expect(tabs[0]?.command).toContain("/servant-goal");
   });
 
   test("once the goal is defined, spawning no longer triggers /goal", async () => {
@@ -228,6 +228,6 @@ describe("spawn goal bootstrap", () => {
       unregister();
     }
     expect(tabs).toHaveLength(1);
-    expect(tabs[0]?.command).not.toContain("/servant:goal");
+    expect(tabs[0]?.command).not.toContain("/servant-goal");
   });
 });

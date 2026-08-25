@@ -26,8 +26,10 @@ const {
   readWorkspaceAgent,
   syncWorkspaceAgentsMd,
   syncWorkspaceClaudeMd,
+  syncWorkspaceConventions,
   writeWorkspaceAgent,
 } = await import("../src/core/workspace.ts");
+const { contentStamp } = await import("../src/core/content-stamp.ts");
 const { workspacePath, workspacesRoot, knowledgeProjectIndexPath } = await import(
   "../src/core/paths.ts"
 );
@@ -81,11 +83,12 @@ describe("ensureWorkspaceDir", () => {
     await expect(ensureWorkspaceDir("../evil")).rejects.toThrow();
   });
 
-  // The workspace CLAUDE.md imports the conventions doc + GOAL.md, then INLINES the
-  // knowledge index (no @-import of the external knowledge store, which would trigger
-  // Claude Code's external-import trust prompt on every spawn).
+  // The workspace CLAUDE.md opens with the conventions stamp, then imports the conventions doc +
+  // GOAL.md, then INLINES the knowledge index (no @-import of the external knowledge store, which
+  // would trigger Claude Code's external-import trust prompt on every spawn).
   const expectBaseClaudeMd = (body: string) => {
-    expect(body.startsWith("@../../CLAUDE.md\n@GOAL.md\n")).toBe(true);
+    expect(body).toMatch(/^<!-- servant:conventions v=[0-9a-f]{12} /);
+    expect(body).toContain("\n@../../CLAUDE.md\n@GOAL.md\n");
     expect(body).toContain("# Servant knowledge");
     expect(body).toContain("servant recall");
     expect(body).not.toContain("@../../knowledge"); // never @-import the external store
@@ -238,7 +241,7 @@ describe("ensureWorkspaceDir", () => {
     await syncWorkspaceAgentsMd(name);
 
     const agents = await readFile(join(repos, "AGENTS.md"), "utf8");
-    expect(agents).toContain("Managed by servant"); // header
+    expect(agents).toMatch(/^<!-- servant:conventions v=[0-9a-f]{12} /); // stamped like its twin
     expect(agents).not.toMatch(/^@/m); // inlined, never @-imported
     expect(agents).toContain("# Root conventions"); // root doc inlined
     expect(agents).toContain("Be a good servant.");
@@ -248,6 +251,52 @@ describe("ensureWorkspaceDir", () => {
 
     // Both docs coexist so the workspace works under either backend.
     expect(await stat(join(repos, "CLAUDE.md"))).toBeTruthy();
+  });
+
+  test("both conventions docs are two renderings of one source: same stamp, no divergence", async () => {
+    const name = `conventions-${process.pid}-${Date.now()}`;
+    await writeFile(join(tmpRoot, "CLAUDE.md"), "# Root conventions\nBe a good servant.\n");
+    const dir = await ensureWorkspaceDir(name);
+    await mkdir(join(dir, "repos", "api-gw__main"), { recursive: true });
+    await syncWorkspaceConventions(name);
+
+    const claude = await readFile(join(dir, "CLAUDE.md"), "utf8");
+    const agents = await readFile(join(dir, "AGENTS.md"), "utf8");
+    const stampOf = (body: string) => /^<!-- servant:conventions v=([0-9a-f]{12}) /.exec(body)?.[1];
+
+    // The same stamp in both is the claim the stamp exists to make.
+    expect(stampOf(claude)).toBeDefined();
+    expect(stampOf(agents)).toBe(stampOf(claude));
+
+    // ...and it stamps servant's *bundled* prose, so it is not a digest of either file.
+    expect(stampOf(claude)).not.toBe(contentStamp(claude));
+    expect(stampOf(agents)).not.toBe(contentStamp(agents));
+
+    // Everything but the delivery of the root conventions + GOAL.md is byte-identical.
+    for (const shared of [
+      "## Agent skills",
+      "# Servant knowledge",
+      "## api-gw (project knowledge)",
+    ]) {
+      expect(claude).toContain(shared);
+      expect(agents).toContain(shared);
+    }
+    // Claude imports; Codex inlines the same substance and never @-imports.
+    expect(claude).toContain("@../../CLAUDE.md");
+    expect(claude).not.toContain("Be a good servant.");
+    expect(agents).not.toMatch(/^@/m);
+    expect(agents).toContain("Be a good servant.");
+  });
+
+  test("an existing workspace picks up a conventions rewrite: an unstamped doc is always replaced", async () => {
+    const name = `conventions-upgrade-${process.pid}-${Date.now()}`;
+    const dir = await ensureWorkspaceDir(name);
+    // What every workspace predating the stamp looks like.
+    await writeFile(join(dir, "CLAUDE.md"), "@../../CLAUDE.md\n@GOAL.md\n");
+    await writeFile(join(dir, "AGENTS.md"), "<!-- Managed by servant -->\n# old\n");
+    await ensureWorkspaceDir(name);
+    expect(await readFile(join(dir, "CLAUDE.md"), "utf8")).toMatch(/^<!-- servant:conventions v=/);
+    expect(await readFile(join(dir, "AGENTS.md"), "utf8")).toMatch(/^<!-- servant:conventions v=/);
   });
 
   test("records and reads back the workspace's agent backend (null before any is set)", async () => {
@@ -284,7 +333,7 @@ describe("ensureWorkspaceDir", () => {
     expect(body).toBe("# Goal\n\n## Mission\nShip the thing.\n");
   });
 
-  test("scaffolds CONTEXT.md, docs/agents/* skills config, and a docs/adr/ dir", async () => {
+  test("scaffolds CONTEXT.md, the docs/agents/* board contract, and a docs/adr/ dir", async () => {
     const name = `scaffold-${process.pid}-${Date.now()}`;
     const dir = await ensureWorkspaceDir(name);
 
@@ -295,7 +344,7 @@ describe("ensureWorkspaceDir", () => {
     expect(existsSync(join(dir, "briefs"))).toBe(false);
     expect(existsSync(join(dir, "plans"))).toBe(false);
 
-    // mattpocock skills config, pointed at this workspace's own board rather than at `gh`.
+    // The published board contract, pointed at this workspace's own board rather than at `gh`.
     const tracker = await readFile(join(dir, "docs", "agents", "issue-tracker.md"), "utf8");
     expect(tracker).toContain("servant ticket new");
     expect(tracker).toContain(`--ws ${name}`);

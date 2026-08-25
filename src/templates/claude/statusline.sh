@@ -139,7 +139,7 @@ if [ "$show_tips" = "true" ]; then
     "servant recall <query> — search accumulated knowledge"
     "servant spawn -w fix-login-bug -r — new workspace for a task, pick repos"
     "servant resume — re-attach to an earlier session"
-    "/servant:goal — define what this workspace is for"
+    "/servant-goal — define what this workspace is for"
     "hide these tips: set \"showTips\": false in ~/.ai_servant/config.json"
   )
   count=${#tips[@]}

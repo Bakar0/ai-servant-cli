@@ -23,7 +23,7 @@ beforeEach(async () => {
 });
 
 const { ensureServantAssets } = await import("../src/core/claude-setup.ts");
-const { aiServantRoot, claudeCommandsDir, fineTuneAspectPath } = await import(
+const { aiServantRoot, fineTuneAspectPath, servantSkillsDir } = await import(
   "../src/core/paths.ts"
 );
 const { composeAsset, getAspect, readOverlayBody, resetOverlay, writeOverlay, isCustomized } =
@@ -36,7 +36,7 @@ function aspect(id: string) {
   return a;
 }
 
-const goalPath = () => join(claudeCommandsDir(), "servant", "goal.md");
+const goalPath = () => join(servantSkillsDir(), "servant-goal", "SKILL.md");
 
 describe("composeAsset", () => {
   test("returns the base unchanged when there is no overlay", () => {
@@ -79,7 +79,7 @@ describe("ensureServantAssets composition", () => {
     expect(delivered).toContain("GOAL.md");
   });
 
-  test("overlay is appended into the delivered slash command", async () => {
+  test("overlay is appended into the delivered core skill", async () => {
     await writeOverlay(aspect("goal"), "always use the RFC template");
     await ensureServantAssets();
     const delivered = await readFile(goalPath(), "utf8");
@@ -130,11 +130,14 @@ describe("memory-extraction overlay reaches both surfaces", () => {
     expect(prompt).toContain("always capture deploy runbooks");
   });
 
-  test("the extract-memories slash command also gets the overlay", async () => {
+  test("the extract-memories core skill also gets the overlay", async () => {
     await writeOverlay(aspect("memory-extraction"), "always capture deploy runbooks");
     await ensureServantAssets();
-    const cmd = await readFile(join(claudeCommandsDir(), "servant", "extract-memories.md"), "utf8");
-    expect(cmd).toContain("--reconcile"); // base
-    expect(cmd).toContain("always capture deploy runbooks"); // overlay
+    const skill = await readFile(
+      join(servantSkillsDir(), "servant-extract-memories", "SKILL.md"),
+      "utf8",
+    );
+    expect(skill).toContain("--reconcile"); // base
+    expect(skill).toContain("always capture deploy runbooks"); // overlay
   });
 });

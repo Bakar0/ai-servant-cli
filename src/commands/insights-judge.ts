@@ -12,21 +12,28 @@ import {
   releaseJudgeLock,
   writeJudgeStatus,
 } from "../core/insights/judge-queue.ts";
+import type { InstructionUnit } from "../core/insights/instruction-units.ts";
 import {
   DEFAULT_MAX_JUDGE_CANDIDATES,
+  DEFAULT_MAX_JUDGE_UNITS,
   JUDGMENTS_SCHEMA_VERSION,
   type JudgeRunner,
   defaultJudgeRunner,
   mergeJudgments,
+  mergeUnitJudgments,
   selectCandidatesToJudge,
+  selectUnitsToJudge,
 } from "../core/insights/judgments.ts";
+import { listSkills } from "../core/skills.ts";
 import {
   commitInsights,
   ensureInsightsStore,
   getOrComputeMetrics,
+  readAllJudgments,
   readJudgment,
   writeJudgment,
 } from "../core/insights/store.ts";
+import { unitCoverage } from "../core/insights/unit-scores.ts";
 import { applyRootOverride, workspacesRoot } from "../core/paths.ts";
 import { servantReinvokeArgv } from "../core/self-exec.ts";
 import { detectWorkspaceNameFromCwd, readWorkspaceAgent } from "../core/workspace.ts";
@@ -119,6 +126,25 @@ function kickDrainer(): void {
   }
 }
 
+/**
+ * Which instruction units this machine can act on: every doc servant renders, plus the skills in its
+ * own store. A session loads plenty of skills servant neither installed nor can disable — judging
+ * those spends tokens on a verdict with no lever behind it, and the `servant skills` picker has
+ * nowhere to show it. The full inventory still lives in the metrics record.
+ *
+ * The store is read as it is *now*, not as it was when the session ran. For a filter that only
+ * decides what is worth judging, that is close enough; the verdict itself stays per-session.
+ */
+async function judgeableUnitFilter(): Promise<(unit: InstructionUnit) => boolean> {
+  let managed = new Set<string>();
+  try {
+    managed = new Set((await listSkills()).map((s) => s.name));
+  } catch {
+    // no store yet — docs still judge fine
+  }
+  return (unit) => unit.kind === "doc" || managed.has(unit.id);
+}
+
 /** Keep only the latest job per session (a burst of /clears enqueues the same session). */
 function dedupeJobs(jobs: JudgeJob[]): JudgeJob[] {
   const bySession = new Map<string, JudgeJob>();
@@ -132,11 +158,19 @@ function dedupeJobs(jobs: JudgeJob[]): JudgeJob[] {
  * that has nothing new to judge for a session is a no-op for that session.
  */
 export async function runJudgeDrain(
-  opts: { runner?: JudgeRunner; maxCandidates?: number } = {},
+  opts: { runner?: JudgeRunner; maxCandidates?: number; maxUnits?: number } = {},
 ): Promise<{ processed: number; judged: number; skipped: boolean }> {
   if (!(await acquireJudgeLock())) return { processed: 0, judged: 0, skipped: true };
   const runner = opts.runner ?? defaultJudgeRunner;
   const cap = opts.maxCandidates ?? DEFAULT_MAX_JUDGE_CANDIDATES;
+  const unitCap = opts.maxUnits ?? DEFAULT_MAX_JUDGE_UNITS;
+  const judgeable = await judgeableUnitFilter();
+  // Coverage is what stops the cap from re-judging the same costly units forever. Read from the
+  // store, never stored back — the same on-read rule every other unit aggregate follows. A drain
+  // processes a whole queue, so it also has to count what it writes as it goes: reading once and
+  // never updating would give every session in one drain the same all-zero coverage, which is the
+  // starvation this is here to fix.
+  const priorVerdicts = unitCoverage(await readAllJudgments());
   let processed = 0;
   let judged = 0;
   let firstError: string | undefined;
@@ -148,17 +182,29 @@ export async function runJudgeDrain(
       try {
         const { mtimeMs } = await stat(job.transcript_path);
         const record = await getOrComputeMetrics(job.transcript_path, mtimeMs);
-        const existing = (await readJudgment(job.session_id))?.judgments ?? [];
+        const stored = await readJudgment(job.session_id);
+        const existing = stored?.judgments ?? [];
+        const existingUnits = stored?.units ?? [];
         const toJudge = selectCandidatesToJudge(record.candidates, existing, cap);
-        if (toJudge.length === 0) continue; // already judged (or no candidates) — idempotent no-op
-        const { judgments } = await runner({ job, candidates: toJudge });
-        const merged = mergeJudgments(existing, judgments);
+        const unitsToJudge = selectUnitsToJudge(record.instructionUnits, existingUnits, unitCap, {
+          isJudgeable: judgeable,
+          priorVerdicts,
+        });
+        // Nothing new on either axis — the idempotent no-op.
+        if (toJudge.length === 0 && unitsToJudge.length === 0) continue;
+        const { judgments, units } = await runner({
+          job,
+          candidates: toJudge,
+          units: unitsToJudge,
+        });
         await writeJudgment({
           schema: JUDGMENTS_SCHEMA_VERSION,
           sessionId: job.session_id,
-          judgments: merged,
+          judgments: mergeJudgments(existing, judgments),
+          units: mergeUnitJudgments(existingUnits, units),
         });
-        judged += judgments.length;
+        for (const u of units) priorVerdicts.set(u.id, (priorVerdicts.get(u.id) ?? 0) + 1);
+        judged += judgments.length + units.length;
         processed += 1;
       } catch (err) {
         if (!firstError) firstError = err instanceof Error ? err.message : String(err);

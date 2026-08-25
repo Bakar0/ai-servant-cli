@@ -1,5 +1,5 @@
 // The canonical extraction instructions. The headless drainer feeds this to `claude -p`;
-// the `/servant:extract-memories` slash command mirrors the same discipline for in-session
+// the `/servant-extract-memories` skill mirrors the same discipline for in-session
 // distillation. Both end by writing notes in the documented format and running
 // `servant extract-memories --reconcile` so index/master maintenance stays deterministic.
 

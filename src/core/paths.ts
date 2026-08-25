@@ -234,6 +234,32 @@ export function headlessSessionsPath(): string {
   return join(cacheDir(), "headless-sessions.json");
 }
 
+/**
+ * The skill store: every installed skill, namespaced by source. Authoritative — what Claude loads
+ * is a copy taken from here (ADR-0001).
+ */
+export function skillsStoreRoot(): string {
+  return join(aiServantRoot(), "skills");
+}
+
+/** The store's record: one entry per installed skill. */
+export function skillsManifestPath(): string {
+  return join(skillsStoreRoot(), "skills.json");
+}
+
+/** Where one installed skill's directory lives inside the store. */
+export function skillStoreDir(sourceSlug: string, name: string): string {
+  return join(skillsStoreRoot(), sourceSlug, name);
+}
+
+/**
+ * Last `servant skills check` result per skill. Derived and disposable, so it lives in the cache
+ * tier rather than in skills.json — the record holds identity, never a network observation.
+ */
+export function skillsCheckCachePath(): string {
+  return join(cacheDir(), "skills-check.json");
+}
+
 export function claudeDir(): string {
   return join(aiServantRoot(), ".claude");
 }
@@ -242,13 +268,65 @@ export function claudeCommandsDir(): string {
   return join(claudeDir(), "commands");
 }
 
+/**
+ * The user's Claude home (`~/.claude`), overridable via `CLAUDE_CONFIG_DIR` — Claude Code's own
+ * relocation variable. `setRootOverride` does not reach here: this directory is the user's, not
+ * servant's, so a test or throwaway root must pin `CLAUDE_CONFIG_DIR` to avoid writing into it.
+ */
 export function userClaudeDir(): string {
+  const override = process.env.CLAUDE_CONFIG_DIR;
+  if (override && override.length > 0) return override;
   return join(homedir(), ".claude");
 }
 
 export function userClaudeSettingsPath(): string {
   return join(userClaudeDir(), "settings.json");
 }
+
+/**
+ * Where enabling an installed skill copies it (ADR-0002). A directory servant owns outright, beside
+ * the slash commands it already ships from here — so a session under the servant root sees these
+ * skills and a session anywhere else does not.
+ */
+export function servantSkillsDir(): string {
+  return join(claudeDir(), "skills");
+}
+
+/**
+ * One enabled skill. Unprefixed: nothing else writes to this directory, so containment does the work
+ * a name prefix used to, and the copy's directory matches the `name:` in its own frontmatter.
+ */
+export function enabledSkillDir(name: string): string {
+  return join(servantSkillsDir(), name);
+}
+
+/** Claude's personal skills directory — the user's own, which servant no longer writes to. */
+export function userClaudeSkillsDir(): string {
+  return join(userClaudeDir(), "skills");
+}
+
+/** Where Claude Code keeps installed plugins. Read-only to servant, and to be kept that way. */
+function userClaudePluginsDir(): string {
+  return join(userClaudeDir(), "plugins");
+}
+
+/**
+ * Claude Code's record of which plugins are installed and where their bytes are.
+ *
+ * Preferred over walking `plugins/cache/`, which also holds directories nothing installed points at
+ * any more — a stale cached copy reaches no session, and reporting one as reachable would be the
+ * same kind of wrong this record exists to avoid.
+ */
+export function userClaudeInstalledPluginsPath(): string {
+  return join(userClaudePluginsDir(), "installed_plugins.json");
+}
+
+/**
+ * The prefix servant used while it materialized skills into `~/.claude/skills/` (ADR-0002 moved them
+ * under the servant root). Kept for exactly one purpose: recognizing those copies so they can be
+ * swept up. It is the prefix's last useful act.
+ */
+export const LEGACY_ENABLED_SKILL_PREFIX = "servant-";
 
 export function statuslineScriptPath(): string {
   return join(aiServantRoot(), "claude", "statusline.sh");

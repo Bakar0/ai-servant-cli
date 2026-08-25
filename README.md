@@ -13,7 +13,7 @@
 
 ---
 
-`servant` puts coding agents to work in the engineer's service. Every task gets its own workspace: a dedicated folder, git worktrees of the repos you're working in, and a coding agent (Claude Code or Codex) launched in a fresh terminal tab. Work is shaped and tracked with [mattpocock/skills](https://github.com/mattpocock/skills) against a local **board** — SQLite at the servant root, with a loopback viewer as a lens on it — so sessions are resumable, agents get smarter, and the backlog stays navigable across every workspace with no network and no GitHub login - the agent does the heavy lifting while you stay the architect. Like the compiler before it, servant raises the level you work at without taking your hands off the wheel.
+`servant` puts coding agents to work in the engineer's service. Every task gets its own workspace: a dedicated folder, git worktrees of the repos you're working in, and a coding agent (Claude Code or Codex) launched in a fresh terminal tab. Work is shaped and tracked by skills you choose against a local **board** — SQLite at the servant root, with a loopback viewer as a lens on it — so sessions are resumable, agents get smarter, and the backlog stays navigable across every workspace with no network and no GitHub login - the agent does the heavy lifting while you stay the architect. Like the compiler before it, servant raises the level you work at without taking your hands off the wheel.
 
 ```bash
 servant spawn -w add-rate-limiter -r    # -w names the workspace; -r picks repos + adds worktrees
@@ -24,10 +24,10 @@ servant insights --deep                 # render an offline HTML dashboard of ho
 servant fine-tune                       # insights analyst: read your metrics, then tune the instructions
 ```
 
-> **The everyday move - `/servant:handoff`.** From inside a session, take the work forward:
-> write a handoff doc, route to the next step of the flow, and spawn the continuation session(s) -
-> one per ready ticket. Specs and tickets live on the board - not in the repo - so
-> ongoing context is shared across sessions: each new agent picks up exactly where the last one
+> **The everyday move - `/servant-delegate`.** From inside a session, take the work forward:
+> comment the handoff onto the ticket, then spawn the continuation session(s) - one per
+> dispatchable ticket. Specs, tickets and the handoff itself live on the board - not in the repo -
+> so ongoing context is shared across sessions: each new agent picks up exactly where the last one
 > left off, instead of starting cold. This is how you keep command while the work fans out.
 
 ---
@@ -81,8 +81,8 @@ servant init
 `init` is idempotent and:
 - creates the servant root at `~/.ai_servant/`
 - writes `config.json` (your repo search roots + `hubRepo`)
-- syncs the bundled agent assets (workspace `CLAUDE.md`/`AGENTS.md`, `/servant:*` slash commands, the knowledge-capture hook)
-- clones the **hub** repo to `~/.ai_servant/majordomo/` and installs the [mattpocock/skills](https://github.com/mattpocock/skills) plugin (best-effort; skipped offline or without the `claude` CLI)
+- syncs the bundled agent assets (workspace `CLAUDE.md`/`AGENTS.md`, the seven core `servant-*` skills, the knowledge-capture hook)
+- clones the **hub** repo to `~/.ai_servant/majordomo/` (best-effort; skipped offline). It installs **no** skill beyond the core seven — everything else is `servant skills install`
 - offers to install the Claude Code status line
 
 ---
@@ -134,8 +134,8 @@ Everything servant manages lives under a single root, `~/.ai_servant/`:
 
 ## The workflow & the board
 
-servant embraces [mattpocock/skills](https://github.com/mattpocock/skills) for the engineering
-flow, and points them at one local **board**: a SQLite database at `~/.ai_servant/board.sqlite`
+servant does not own the engineering flow. Whichever skills you install to shape and break down
+work, it points them at one local **board**: a SQLite database at `~/.ai_servant/board.sqlite`
 (ADR-0011). Every workspace is a board on it, and every task, spec and ticket is a row — so the
 whole backlog is navigable in one place (`servant tasks`, or `servant board` to watch it live)
 with no network, no GitHub account, and no `gh`.
@@ -157,8 +157,9 @@ The idea → ship flow (skills you reach for by name in a session):
 /to-spec       publish a spec               →  a board ticket  [spec]
 /to-tickets    break it into tracer-bullet tickets  →  board tickets with blocking edges
 /implement     build a ticket (drives /tdd, closes with /code-review)
-/servant:handoff   take it forward          →  writes a handoff doc, then spawns the next session(s),
-                                               one per ready ticket (see servant tasks --frontier)
+/servant-delegate  take it forward          →  comments the handoff onto the ticket, then spawns
+                                               one session per dispatchable ticket
+                                               (see servant tasks --frontier)
 ```
 
 Skills are opt-in tools, not a mandatory pipeline — a session opens in plain conversation, and you
@@ -198,7 +199,7 @@ Create a workspace under `~/.ai_servant/workspaces/<name>` and open a new termin
 servant spawn -w my-task                      # open an agent tab in the workspace
 servant spawn -w my-task -r                    # also pick repos + add a worktree per pick first
 servant spawn -w my-task -r --branch topic/x   # use a specific branch name for the worktrees
-servant spawn -w my-task -p "Read <handoff-doc> and continue"   # deliver a first prompt to the agent
+servant spawn -w my-task -p "Ticket #7 - read it; the last comment is your handoff"   # first prompt
 ```
 
 | Flag | Description |
@@ -248,7 +249,7 @@ there is nothing to be offline from and no cache tier.
 servant tasks                        # every workspace's open tickets
 servant tasks --ws add-rate-limiter  # just one workspace
 servant tasks --state all            # include closed
-servant tasks --frontier --ws foo    # ready / in-flight / stale / blocked — what /servant:handoff dispatches
+servant tasks --frontier --ws foo    # ready / in-flight / stale / blocked — what /servant-delegate dispatches
 ```
 
 ### `servant board`
@@ -285,17 +286,17 @@ servant memories                   # browse all notes in an fzf picker
 servant memories --digest          # non-interactive status digest
 ```
 
-In-session, agents use the `/servant:recall` and `/servant:extract-memories` slash commands.
+In-session, agents use the `/servant-recall` and `/servant-extract-memories` core skills.
 
 ### `servant insights`
 
 A feedback loop on how well servant's setup is steering your agents. It mines the Claude Code session transcripts servant already produces - no extra instrumentation - and reports across three areas:
 
 - **Tokens / context window** - peak & final context occupancy, cache-hit ratio, output volume, which tools eat the window, and the static instruction footprint servant imposes per session.
-- **Instructions** - `/servant:*` command usage, checkable rule violations (e.g. writing a plan *inside* a repo worktree), tool errors, permission denials, and user-correction turns.
+- **Instructions** - `/servant-*` skill usage, checkable rule violations (e.g. writing a plan *inside* a repo worktree), tool errors, permission denials, and user-correction turns.
 - **Knowledge base** - recall usage and whether results were actually read, plus a store-health scan (note counts, confidence, stale/rotted/orphan/**dead** notes that are never recalled).
 
-Sessions are grouped by a **setup fingerprint** (CLAUDE.md + command bodies + a knowledge signature + the Claude Code version) and aligned to a change ledger, so the digest reads as a **before/after timeline** - change an instruction or fine-tune an overlay, and you can see how the metrics moved.
+Sessions are grouped by a **setup fingerprint** (CLAUDE.md + the core skills + a knowledge signature + the Claude Code version) and aligned to a change ledger, so the digest reads as a **before/after timeline** - change an instruction or fine-tune an overlay, and you can see how the metrics moved.
 
 ```bash
 servant insights                       # all workspaces, rolling 30 days, all three areas
@@ -318,7 +319,7 @@ Metrics live in a git-tracked store at `~/.ai_servant/insights/` (one cached rec
 
 The **insights analyst** and the way you tune servant. Run bare and it closes the loop *observe → understand → act*: it pulls your insights (rendering the dashboard), narrates the takeaways, helps you investigate - drilling a flagged metric back into the exact moment in the transcript that produced it - and then tunes servant's instructions based on what you found.
 
-Tuning is per *aspect* (the root `CLAUDE.md`, each `/servant:*` command, the headless memory extractor). Changes are written as **overlays** layered on top of the shipped assets, so they **survive CLI updates**, and each write is recorded in the insights change ledger - so the next dashboard shows the before/after.
+Tuning is per *aspect* (the root `CLAUDE.md`, each core `servant-*` skill, the headless memory extractor). Changes are written as **overlays** layered on top of the shipped assets, so they **survive CLI updates**, and each write is recorded in the insights change ledger - so the next dashboard shows the before/after.
 
 ```bash
 servant fine-tune              # interactive analyst session (investigate, then tune)
@@ -330,21 +331,23 @@ servant fine-tune <aspect> --reset    # revert an aspect to the shipped default
 
 ---
 
-## In-session slash commands
+## In-session core skills
 
-Every workspace ships with a set of `/servant:*` slash commands for Claude Code (synced into the workspace's `.claude/commands/`). Use them from inside the agent session:
+Servant's own instruction units ship **inside the binary** as core skills, written to `~/.ai_servant/.claude/skills/servant-<name>/`. They are listed and scored like any installed skill, and never disableable. Use them from inside the agent session:
 
-| Command | What it does |
-|---------|--------------|
-| `/servant:goal` | Interview you to define (or amend) `GOAL.md` — a short statement of what the workspace is for. |
-| `/servant:handoff` | Take the work forward: write a handoff doc, route to the next flow step, and spawn the continuation session(s) — one per ready ticket. |
-| `/servant:recall` | Search the durable knowledge base for what prior servants learned about a project or topic. |
-| `/servant:extract-memories` | Distill durable knowledge from the current session into the knowledge base (projects + topics). |
-| `/servant:fine-tune` | Insights analyst: read servant's own metrics, investigate them, then tune an instruction aspect via the overlay path. |
+| Skill | What it does |
+|-------|--------------|
+| `/servant-goal` | Interview you to define (or amend) `GOAL.md` — a short statement of what the workspace is for. |
+| `/servant-delegate` | Take the work forward: comment the handoff onto the ticket, then spawn one session per dispatchable ticket. |
+| `/servant-lead` | Report where the whole initiative stands — in flight, ready, blocked, stale — and redirect a running session. |
+| `/servant-skills` | Manage installed skills: read a source's catalog, install, enable/disable, and check whether upstream moved. |
+| `/servant-recall` | Search the durable knowledge base for what prior servants learned about a project or topic. |
+| `/servant-extract-memories` | Distill durable knowledge from the current session into the knowledge base (projects + topics). |
+| `/servant-fine-tune` | Insights analyst: read servant's own metrics, investigate them, then tune an instruction aspect via the overlay path. |
 
-These stay in sync automatically - they're re-synced on every `spawn`/`resume`, so updating servant updates the commands in every workspace.
+These stay in sync automatically - they're rewritten from the binary on every `spawn`/`resume`, so updating servant updates them everywhere. Codex has no skills mechanism, so the same bodies are installed as `~/.codex/prompts/servant-<name>.md`.
 
-Alongside these, every workspace has the **[mattpocock/skills](https://github.com/mattpocock/skills)** engineering skills installed (the `mattpocock-skills` plugin) — `/grill-me`, `/to-spec`, `/to-tickets`, `/implement`, `/tdd`, `/code-review`, and more. servant pre-configures them (via `docs/agents/`) to file tickets onto the board. See [The workflow & the board](#the-workflow--the-board).
+These seven are the only skills servant ships. The engineering flow — shaping specs, breaking work down, implementing, reviewing — is skills you install with `servant skills install <source>`; `/servant-skills` holds the source list and the judgment about what earns its place. What makes a foreign skill work here is the board's **public contract** in each workspace's `docs/agents/`, which tells a skill that has never seen servant how to file, label, block, claim and close on the board. See [The workflow & the board](#the-workflow--the-board).
 
 ---
 
@@ -423,10 +426,15 @@ export PATH="$HOME/.bun/bin:$PATH"
 
 The binary is fully self-contained: there is no source tree to read at runtime.
 
-- **Templates** (`src/templates/**` - the workspace `CLAUDE.md`, `/servant:*` slash commands,
+- **Templates** (`src/templates/**` - the workspace `CLAUDE.md`, the core `servant-*` skills,
   the status-line script) are embedded via a generated manifest, `src/templates/index.generated.ts`
   (`with { type: "text" }` imports). Regenerate it with `bun run gen:templates`; CI fails if it
   drifts from the files on disk. Never edit the generated file by hand.
+  - Template files are stored under **escaped** names - `CLAUDE.tmpl.md`, `_claude/` for
+    `.claude/` - so the tree is not itself discovered as an instruction surface by an agent
+    working in this repo. The manifest maps each name back to the path it means
+    (`scripts/template-paths.ts`), so consumers still read the real path. Add a template under
+    a name an agent auto-loads and `tests/templates-not-instruction-surface.test.ts` fails.
 - **Version** comes from `git describe --tags`, stamped into `src/version.generated.ts` by
   `bun run gen:version`. In dev (`bun run`) the live `git describe` is used; the compiled binary
   uses the value embedded at build time.

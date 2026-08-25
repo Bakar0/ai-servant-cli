@@ -5,18 +5,35 @@ import { TEMPLATES } from "../templates/index.generated.ts";
 import { composeAssetForRel, isFineTuneAsset } from "./fine-tune.ts";
 import { appendChange } from "./insights/changes.ts";
 import { aiServantRoot, claudeCommandsDir } from "./paths.ts";
+import { ensureCoreSkills } from "./skills.ts";
 
 // Templates synced into the servant root live under the `servant_root/` prefix in the
 // embedded manifest; the part after it is the path relative to `~/.ai_servant/`.
 const SERVANT_ROOT_PREFIX = "servant_root/";
 
 // Slash commands used to live flat at `.claude/commands/<name>.md` (un-prefixed `/goal`,
-// `/delegate`). They are now namespaced under `commands/servant/`. The sync below never deletes,
-// so on upgrade stale copies would linger and shadow current commands. Remove the specific files
-// we know we retired: the pre-namespace flat copies, plus `servant/delegate.md` — delegation is
-// now the mattpocock `/handoff` → `servant spawn` flow, so the bespoke command is gone.
+// `/delegate`), then namespaced under `commands/servant/`. The sync below never deletes, so on
+// upgrade stale copies would linger and shadow the skills that replaced them. Remove the specific
+// files we know we retired: the pre-namespace flat copies, then every namespaced one.
 const LEGACY_FLAT_COMMANDS = ["goal.md", "delegate.md"];
-const RETIRED_NAMESPACED_COMMANDS = ["servant/delegate.md"];
+// Servant ships no slash commands at all any more — every core unit is a core *skill*
+// (`servant-<name>`). Two copies of the same instructions, one of them stale, is worse than either
+// alone, so each conversion's command file is swept by name. `handoff.md` is the last entry this
+// list will ever need: with the directory empty there is nothing left to convert.
+const RETIRED_NAMESPACED_COMMANDS = [
+  "servant/delegate.md",
+  "servant/recall.md",
+  "servant/goal.md",
+  "servant/lead.md",
+  "servant/extract-memories.md",
+  "servant/fine-tune.md",
+  "servant/handoff.md",
+];
+
+// Core skills also live under `servant_root/`, but the generic sync below is not their writer:
+// `ensureCoreSkills` is, so that the `servant skills` commands can refresh them without dragging
+// the whole asset sync (and its change ledger) along.
+const CORE_SKILLS_PREFIX = "servant_root/.claude/skills/";
 
 /**
  * Sync the bundled servant-root templates into `~/.ai_servant/`. This includes
@@ -31,7 +48,9 @@ const RETIRED_NAMESPACED_COMMANDS = ["servant/delegate.md"];
  */
 export async function ensureServantAssets(): Promise<void> {
   const target = aiServantRoot();
-  const sources = TEMPLATES.filter((t) => t.rel.startsWith(SERVANT_ROOT_PREFIX));
+  const sources = TEMPLATES.filter(
+    (t) => t.rel.startsWith(SERVANT_ROOT_PREFIX) && !t.rel.startsWith(CORE_SKILLS_PREFIX),
+  );
   const changedAssets: string[] = [];
   for (const src of sources) {
     const rel = src.rel.slice(SERVANT_ROOT_PREFIX.length);
@@ -53,6 +72,7 @@ export async function ensureServantAssets(): Promise<void> {
     // an existing install, where the asset materially moved the effective setup.
     if (existing !== null) changedAssets.push(rel);
   }
+  for (const name of await ensureCoreSkills()) changedAssets.push(`.claude/skills/${name}`);
   await removeLegacyFlatCommands();
   // Record asset changes in the insights ledger (the before/after primitive). Best-effort.
   if (changedAssets.length > 0 && existsSync(join(target, "insights"))) {

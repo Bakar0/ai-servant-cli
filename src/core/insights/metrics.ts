@@ -4,6 +4,7 @@ import { readJsonlLinesWithLineNumbers } from "../claude-session.ts";
 import { renderWorkspaceKnowledgeSection } from "../knowledge.ts";
 import { workspacesRoot } from "../paths.ts";
 import { composeSetupParts, extractEmbeddedClaudeMd, fingerprintFromParts } from "./fingerprint.ts";
+import { type InstructionUnit, collectInstructionUnits } from "./instruction-units.ts";
 import { type RuleViolation, type ToolCall, checkRules } from "./rules.ts";
 
 // A per-session metrics record: deterministic, cheap, derived purely from one transcript. Every
@@ -18,7 +19,18 @@ import { type RuleViolation, type ToolCall, checkRules } from "./rules.ts";
 // v6 splits Bash tool buckets by command head (`Bash: git`, `Bash: npm`, …) so one catch-all "Bash"
 // bucket no longer swamps the spend chart, and captures friction samples (error/correction snippets)
 // so the dashboard can show *what* went wrong, not just how many.
-export const METRICS_SCHEMA_VERSION = 6;
+// v7 adds `instructionUnits` — the session's loaded skills and instruction docs, each with what it
+// cost and how often it was used. It is the deterministic half of "did this unit earn its place?";
+// the Tier-2 units axis judges the other half.
+// v8 makes a doc's `uses` mean what it says: reads through Bash (`cat`, `sed -n`, `grep`) count, not
+// only the `Read` tool, which touched a workspace doc zero times across every transcript on this
+// machine while Bash touched one 64 times. Knowledge-note reads count the same way, and a generated
+// region inside a doc is now its own unit.
+// v9 repoints the setup fingerprint at the core skills — it hashed four slash-command files deleted
+// in servant-skill-rework#8, so tuning a core skill moved nothing — and drops those bodies from the
+// footprint, which counts resident text only. Every cached record must recompute: leaving them would
+// mix two fingerprint compositions in one timeline, which reads as a change that never happened.
+export const METRICS_SCHEMA_VERSION = 9;
 
 /**
  * A stable pointer back into a transcript so a later (qualitative) pass can re-locate the exact
@@ -142,7 +154,7 @@ export interface SessionMetrics {
     topToolResults: LargeToolResult[];
     /** Per-turn context-window trajectory: how it grew, when, and what drove each jump. */
     contextCurve: ContextPoint[];
-    /** Static per-session overhead servant imposes (CLAUDE.md + commands + knowledge section). */
+    /** Resident per-session overhead: the conventions doc + the inlined knowledge section. */
     instructionFootprintTokens: number;
   };
 
@@ -166,7 +178,7 @@ export interface SessionMetrics {
   knowledge: {
     /** `/servant:recall` markers + `servant recall` Bash calls. */
     recallInvocations: number;
-    /** Knowledge note files (knowledge/**\/*.md) opened with Read. */
+    /** Knowledge note files (knowledge/**\/*.md) a session read, with `Read` or through Bash. */
     knowledgeReads: string[];
     /**
      * Distinct knowledge note paths a `servant recall` printed inline in its Bash result. Recall
@@ -190,6 +202,13 @@ export interface SessionMetrics {
    * (largest first) and capped per session (see `maxCandidates`).
    */
   candidates: Candidate[];
+
+  /**
+   * Every instruction unit this session ran with — skills and instruction docs alike — with its
+   * resident cost and its mechanical use count. Largest-cost first. The Tier-2 units axis reads
+   * this list; nothing here is a judgment.
+   */
+  instructionUnits: InstructionUnit[];
 }
 
 const TOP_TOOL_RESULTS = 5;
@@ -238,6 +257,7 @@ function repoFromCwd(workspace: string | null, cwd: string): string | null {
 
 interface AnyRecord {
   type?: string;
+  attachment?: unknown;
   uuid?: string;
   cwd?: string | null;
   version?: string;
@@ -327,17 +347,75 @@ const MAX_FRICTION_SAMPLES = 8;
  * Returns null when there's no clean program token (e.g. a bare subshell), so the caller falls back.
  */
 function bashHead(command: string): string | null {
-  const tokens = command.trim().split(/\s+/);
+  const { head } = splitShellSegment(command);
+  if (!head) return null;
+  const base = head.replace(/^.*\//, "");
+  return /^[\w.-]+$/.test(base) ? base : null;
+}
+
+/** A shell segment as its program token plus everything after it, past any `sudo` / `FOO=bar`. */
+function splitShellSegment(segment: string): { head: string | null; rest: string[] } {
+  const tokens = segment.trim().split(/\s+/).filter(Boolean);
   let i = 0;
   while (i < tokens.length) {
     const t = tokens[i] ?? "";
     if (t === "sudo" || /^[A-Za-z_][A-Za-z0-9_]*=/.test(t)) i += 1;
     else break;
   }
-  const tok = tokens[i];
-  if (!tok) return null;
-  const base = tok.replace(/^.*\//, "");
-  return /^[\w.-]+$/.test(base) ? base : null;
+  return { head: tokens[i] ?? null, rest: tokens.slice(i + 1) };
+}
+
+/** Shell programs whose operands are files being read into the session's context. */
+const READ_SHAPED_HEADS = new Set([
+  "cat",
+  "head",
+  "tail",
+  "less",
+  "more",
+  "bat",
+  "nl",
+  "sed",
+  "awk",
+  "grep",
+  "rg",
+  "egrep",
+  "fgrep",
+]);
+
+/**
+ * The file operands of every read-shaped command in a shell line — `cat GOAL.md`,
+ * `sed -n 1,40p CLAUDE.md`, `grep -n claim docs/agents/issue-tracker.md`.
+ *
+ * This exists because a `Read`-only use count is a lie about docs. Across all 35 transcripts in the
+ * workspace that measured it, the `Read` tool touched a workspace instruction doc **0** times and
+ * Bash touched one **64** times — so every doc reached the judge as "used in 0", and the judge's own
+ * "a doc the session went and read again is not doing its job where it sits" rule could never fire.
+ *
+ * Operands come back unresolved and unfiltered: the caller resolves them against the record's cwd
+ * and keeps only the ones that name a doc it already knows about. That is what lets this stay a
+ * cheap tokenizer instead of a shell parser — a pattern token that happens to look like a path
+ * costs one failed map lookup.
+ */
+export function readShapedBashPaths(command: string): string[] {
+  const out: string[] = [];
+  for (const segment of command.split(/\|\||&&|[;|\n]/)) {
+    const { head, rest } = splitShellSegment(segment);
+    if (!head || !READ_SHAPED_HEADS.has(head)) continue;
+    // `sed -i` / `awk -i` rewrite the file rather than print it. Counting one as a read would let
+    // an edit masquerade as the re-read that tells the judge a doc's guidance did not stick.
+    if (rest.some((t) => t === "-i" || t === "--in-place" || /^-i[^-]/.test(t))) continue;
+    for (const raw of rest) {
+      // A redirect ends the operand list — what follows is a destination being written, not read.
+      if (/[<>]/.test(raw)) break;
+      if (raw.startsWith("-")) continue;
+      const tok = raw.replace(/^['"]/, "").replace(/['"]$/, "");
+      // Anything carrying shell syntax (a substitution, a glob) is not a path we can resolve, and
+      // guessing at one would attribute a read to the wrong file.
+      if (!tok || /[;&$()`*?]/.test(tok)) continue;
+      out.push(tok);
+    }
+  }
+  return out;
 }
 
 /**
@@ -420,6 +498,10 @@ export async function extractSessionMetrics(
   const errorSamples: FrictionSample[] = [];
   const correctionSamples: string[] = [];
   const readCounts = new Map<string, number>();
+  // Kept apart from `readCounts` on purpose: this feeds the doc-unit join only. `readCounts` also
+  // feeds the repeated-read friction candidate, and a session that greps the same file twice is not
+  // the "instruction did not stick" signal that list is about.
+  const bashReadCounts = new Map<string, number>();
 
   let recallInvocations = 0;
   const knowledgeReads = new Set<string>();
@@ -428,6 +510,20 @@ export async function extractSessionMetrics(
   let recallsConsumed = 0;
   let pendingRecall = false; // a recall awaiting a knowledge Read (feeds recallFollowedByRead)
   let recallAwaitingConsume = false; // a recall not yet counted consumed (surfaced ∪ read)
+
+  /** Record a knowledge note read, and settle any recall it consumes. */
+  const noteKnowledgeRead = (path: string): void => {
+    if (!KNOWLEDGE_PATH_RE.test(path)) return;
+    knowledgeReads.add(path);
+    if (pendingRecall) {
+      recallFollowedByRead += 1;
+      pendingRecall = false;
+    }
+    if (recallAwaitingConsume) {
+      recallsConsumed += 1;
+      recallAwaitingConsume = false;
+    }
+  };
 
   const reposSeen = new Set<string>();
   const allRecords: AnyRecord[] = [];
@@ -441,6 +537,8 @@ export async function extractSessionMetrics(
     if (typeof rec.cwd === "string" && rec.cwd.length > 0 && !launchCwd) {
       launchCwd = rec.cwd;
     }
+    // Per record, not per session: a session that cd's into a repo resolves `cat GOAL.md` there.
+    const recCwd = typeof rec.cwd === "string" && rec.cwd.length > 0 ? rec.cwd : launchCwd;
     if (!version && typeof rec.version === "string") version = rec.version;
 
     if (
@@ -524,10 +622,18 @@ export async function extractSessionMetrics(
               const skill = asString(input.skill ?? input.command) || "Skill";
               commandUses.push({ name: skill, anchor: callAnchor });
             }
-            if (block.name === "Bash" && /\bservant recall\b/.test(asString(input.command))) {
-              recallInvocations += 1;
-              pendingRecall = true;
-              recallAwaitingConsume = true;
+            if (block.name === "Bash") {
+              const command = asString(input.command);
+              if (/\bservant recall\b/.test(command)) {
+                recallInvocations += 1;
+                pendingRecall = true;
+                recallAwaitingConsume = true;
+              }
+              for (const operand of readShapedBashPaths(command)) {
+                const p = resolve(recCwd ?? "", operand);
+                bashReadCounts.set(p, (bashReadCounts.get(p) ?? 0) + 1);
+                noteKnowledgeRead(p);
+              }
             }
           }
         }
@@ -582,21 +688,7 @@ export async function extractSessionMetrics(
               errorSamples.push({ tool: bucket, snippet: oneLine(text, 120), permission });
             }
           }
-          // A recall is "consumed" if a knowledge note is Read after it.
-          if (tool === "Read") {
-            const p = asString(input.file_path ?? input.path);
-            if (p && KNOWLEDGE_PATH_RE.test(p)) {
-              knowledgeReads.add(p);
-              if (pendingRecall) {
-                recallFollowedByRead += 1;
-                pendingRecall = false;
-              }
-              if (recallAwaitingConsume) {
-                recallsConsumed += 1;
-                recallAwaitingConsume = false;
-              }
-            }
-          }
+          if (tool === "Read") noteKnowledgeRead(asString(input.file_path ?? input.path));
           // `servant recall` returns note bodies inline (each hit prints its absolute path), so the
           // surfaced notes are used without any Read. Attribute them off the Bash *result* text.
           if (tool === "Bash" && /\bservant recall\b/.test(asString(input.command))) {
@@ -706,18 +798,29 @@ export async function extractSessionMetrics(
   const fingerprint = fingerprintFromParts({
     version,
     claudeMd,
-    commands: composed.commands,
+    coreSkills: composed.coreSkills,
     knowledgeSection: composed.knowledgeSection,
   });
-  // Footprint is the *actual* static per-session overhead: CLAUDE.md + command bodies + the real
-  // inlined knowledge section for this session's repos (which the fingerprint deliberately omits).
+  // Only *resident* text counts here — in context every turn whether or not it is used. The core
+  // skills are in the fingerprint but deliberately not in this: Claude Code keeps a skill's
+  // description resident and loads its body on invocation, so charging seven bodies to every session
+  // would over-report by more than the whole conventions doc. Their resident descriptions are
+  // measured per session on the instruction-units axis instead, where each also carries a verdict.
   let knowledgeSectionChars = 0;
   try {
     knowledgeSectionChars = (await renderWorkspaceKnowledgeSection(repos)).length;
   } catch {
     // knowledge store may not exist yet
   }
-  const footprintChars = claudeMd.length + composed.commands.length + knowledgeSectionChars;
+  const footprintChars = claudeMd.length + knowledgeSectionChars;
+
+  const instructionUnits = await collectInstructionUnits({
+    records: allRecords,
+    invocations: commandUses.map((c) => c.name),
+    readCounts,
+    bashReadCounts,
+    workspace,
+  });
 
   const cacheDenom = cacheReadTokens + cacheCreationTokens + inputTokens;
   const s = await stat(jsonlPath);
@@ -765,6 +868,7 @@ export async function extractSessionMetrics(
       recallsConsumed,
     },
     candidates,
+    instructionUnits,
   };
 }
 

@@ -75,6 +75,7 @@ function rec(over: {
       recallsConsumed: 0,
     },
     candidates: [],
+    instructionUnits: [],
   };
 }
 
