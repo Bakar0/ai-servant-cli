@@ -6,9 +6,16 @@ import { flatten } from "../src/core/narrate-turn.ts";
 import type { Turn } from "../src/core/narrate-turn.ts";
 import { pickTurn, turnLabel, turnPickerLine } from "../src/ui/narrate-picker.ts";
 
-function turn(index: number, prompt: string, markdown: string, sessionId = "aaaaaaaa-1111"): Turn {
+function turn(
+  index: number,
+  prompt: string,
+  markdown: string,
+  sessionId = "aaaaaaaa-1111",
+  sessionName = "",
+): Turn {
   return {
     sessionId,
+    sessionName,
     jsonlPath: `/tmp/${sessionId}.jsonl`,
     uuid: `uuid-${index}`,
     index,
@@ -53,9 +60,19 @@ describe("what fzf is given", () => {
     expect(args).toContain("--query=Transport is impossible over a live socket");
   });
 
-  test("the label is short — the matching happens against the body behind it", () => {
+  test("the row names the session by its tab name when it has one", () => {
+    expect(turnLabel(turn(0, "go", "One.", "aaaaaaaa-1111", "new-spech-ability-t2"))).toContain(
+      "new-spech-ability-t2",
+    );
+  });
+
+  test("a session that never got a name falls back to its id", () => {
+    expect(turnLabel(turn(0, "go", "One.", "abcdef12-3456"))).toContain("abcdef12");
+  });
+
+  test("the label is short — the body it is matched against runs off to the right of it", () => {
     expect(turnLabel(TURNS[1] as Turn)).toContain("what did it cost?");
-    expect(turnLabel(TURNS[1] as Turn)).toContain("words");
+    expect(turnLabel(TURNS[1] as Turn).length).toBeLessThan(90);
   });
 
   test("matching is exact by default, with a key that makes it fuzzy", async () => {
@@ -70,7 +87,7 @@ describe("what fzf is given", () => {
     expect(args.some((arg) => arg.startsWith("--bind=ctrl-f:"))).toBe(true);
   });
 
-  test("what is shown and what is searched are different fields", async () => {
+  test("the body is inside what fzf searches, not merely on the line", async () => {
     let args: string[] = [];
     await pickTurn([...TURNS], {
       run: async (given) => {
@@ -78,8 +95,12 @@ describe("what fzf is given", () => {
         return { code: 1, stdout: "" };
       },
     });
-    expect(args).toContain("--with-nth=2");
-    expect(args).toContain("--nth=2..");
+    // The regression this guards: `--with-nth=2` does not hide field 3 from the search, it removes
+    // it. fzf matches against the string `--with-nth` builds, so the body was unsearchable and the
+    // picker could only find a reply by the question that prompted it — the one thing the ticket
+    // says the haystack must not be.
+    expect(args).toContain("--with-nth=2..");
+    expect(args).not.toContain("--with-nth=2");
   });
 });
 
@@ -90,10 +111,6 @@ describe("a haystack that spans sessions", () => {
     const theirs = turn(2, "theirs", "Two.", "bbbbbbbb-2222");
     expect(turnPickerLine(mine, 0).split("\t")[0]).toBe("0");
     expect(turnPickerLine(theirs, 1).split("\t")[0]).toBe("1");
-  });
-
-  test("the row says which session it came from", () => {
-    expect(turnLabel(turn(0, "go", "One.", "abcdef12-3456"))).toContain("abcdef12");
   });
 
   test("the row that comes back is the Turn at that position, whatever its own index says", async () => {

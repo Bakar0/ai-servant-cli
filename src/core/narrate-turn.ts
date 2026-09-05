@@ -15,6 +15,12 @@ import { readJsonlLines } from "./claude-session.ts";
 export interface Turn {
   /** Which session it was said in. Part of a Turn's identity, and half of its cache path. */
   sessionId: string;
+  /**
+   * The session's tab name, when it has one — what a person calls it, rather than what the
+   * filesystem does. A uuid prefix identifies a session and tells you nothing about it, and the
+   * picker's whole job is to be read.
+   */
+  sessionName: string;
   jsonlPath: string;
   /** The first assistant entry's uuid — stable across the Turn growing, so it keys the cache. */
   uuid: string;
@@ -48,6 +54,7 @@ interface Entry {
   isMeta?: boolean;
   isSidechain?: boolean;
   origin?: { kind?: string };
+  customTitle?: string;
   message?: { role?: string; content?: unknown; stop_reason?: string | null };
 }
 
@@ -68,6 +75,8 @@ export async function readTurns(jsonlPath: string): Promise<Turn[]> {
   const sessionId = sessionIdOf(jsonlPath);
   let prompt = "";
   let open: Entry[] = [];
+  // Renaming a tab appends another one of these, so the last is the name it goes by now.
+  let sessionName = "";
 
   const close = (): void => {
     if (open.length === 0) return;
@@ -78,6 +87,9 @@ export async function readTurns(jsonlPath: string): Promise<Turn[]> {
 
   for await (const record of readJsonlLines(jsonlPath)) {
     const entry = record as Entry;
+    if (entry.type === "custom-title" && typeof entry.customTitle === "string") {
+      sessionName = entry.customTitle;
+    }
     if (entry.isSidechain) continue;
     if (entry.type === "user" && !entry.isMeta && isSpokenByTheUser(entry)) {
       close();
@@ -87,7 +99,9 @@ export async function readTurns(jsonlPath: string): Promise<Turn[]> {
     if (entry.type === "assistant") open.push(entry);
   }
   close();
-  return turns;
+  // Stamped after the sweep rather than during it: a tab named halfway through a session is still
+  // that session's name for the Turns before it.
+  return turns.map((turn) => ({ ...turn, sessionName }));
 }
 
 /** The newest Turn, which is what a bare `servant narrate` means. */
@@ -175,6 +189,7 @@ function buildTurn(
   const startedAt = entries.find((entry) => entry.timestamp)?.timestamp;
   return {
     sessionId,
+    sessionName: "",
     jsonlPath,
     uuid,
     index,

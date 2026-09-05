@@ -53,14 +53,22 @@ export function turnPickerLine(turn: Turn, at: number): string {
   return `${at}\t${turnLabel(turn)}\t${haystack(turn)}`;
 }
 
-/** What is displayed. Short, because the matching is done against the body behind it. */
+/** The session, as something to read: its tab name, or its id when it never got one. */
+export function sessionLabel(turn: Turn): string {
+  return turn.sessionName || turn.sessionId.slice(0, 8);
+}
+
+/** What is read. Short and left-most, because the body it is matched against runs off to the right. */
 export function turnLabel(turn: Turn, now: number = Date.now()): string {
-  const age = relativeAge(turn.startedAtMs || now, now).padEnd(4);
+  const age = relativeAge(turn.startedAtMs || now, now).padEnd(3);
   const asked = flatten(turn.prompt) || "(no prompt)";
-  const words = turn.markdown.split(/\s+/).filter(Boolean).length;
   // The session, because a list that spans them has to say which reply came from where — two
   // sessions in one directory ask each other's questions all the time.
-  return `${age}  ${turn.sessionId.slice(0, 8)}  ${asked.slice(0, 62).padEnd(62)}  ${String(words).padStart(5)} words`;
+  return `${age} ${pad(sessionLabel(turn), 22)} ${asked.slice(0, 56)}`;
+}
+
+function pad(text: string, width: number): string {
+  return (text.length > width ? `${text.slice(0, width - 1)}…` : text).padEnd(width);
 }
 
 export async function pickTurn(turns: Turn[], options: PickTurnOptions = {}): Promise<Turn | null> {
@@ -75,12 +83,15 @@ export async function pickTurn(turns: Turn[], options: PickTurnOptions = {}): Pr
       [
         "--exact",
         "--delimiter=\t",
-        // Shown: the label. Searched: the label and the whole body behind it.
-        "--with-nth=2",
-        "--nth=2..",
+        // Fields 2 and 3 both, and this is not a detail. `--with-nth` does not hide a field from
+        // the search, it removes it: fzf matches against the string `--with-nth` builds, so
+        // `--with-nth=2` made the body unsearchable and the picker could only ever find a reply by
+        // the question that prompted it. The body is shown too, therefore — it simply runs off the
+        // right-hand edge behind the label, which is what the label is for.
+        "--with-nth=2..",
         `--bind=${FUZZY_TOGGLE}`,
         `--preview=cat ${previews}/{1}`,
-        "--preview-window=right,55%,wrap",
+        "--preview-window=right,50%,wrap",
         ...(options.query ? [`--query=${flatten(options.query)}`] : []),
         `--prompt=${options.prompt ?? "narrate> "}`,
         "--header=paste a fragment of the reply · ^F fuzzy · every session in this directory",
@@ -99,7 +110,10 @@ export async function pickTurn(turns: Turn[], options: PickTurnOptions = {}): Pr
 }
 
 function preview(turn: Turn): string {
-  const where = `session ${turn.sessionId} · turn ${turn.index + 1}`;
+  // How long a listen this is, in the pane that has room to say so. The row itself is the body
+  // running off the right-hand edge, and anything appended to the label is never on screen.
+  const words = turn.markdown.split(/\s+/).filter(Boolean).length;
+  const where = `${sessionLabel(turn)} · turn ${turn.index + 1} · ${words} words\n${turn.sessionId}`;
   return `${where}\n\n${turn.prompt}\n${"─".repeat(40)}\n${turn.markdown}\n`;
 }
 
