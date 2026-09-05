@@ -6,8 +6,10 @@ import { flatten } from "../src/core/narrate-turn.ts";
 import type { Turn } from "../src/core/narrate-turn.ts";
 import { pickTurn, turnLabel, turnPickerLine } from "../src/ui/narrate-picker.ts";
 
-function turn(index: number, prompt: string, markdown: string): Turn {
+function turn(index: number, prompt: string, markdown: string, sessionId = "aaaaaaaa-1111"): Turn {
   return {
+    sessionId,
+    jsonlPath: `/tmp/${sessionId}.jsonl`,
     uuid: `uuid-${index}`,
     index,
     prompt,
@@ -26,14 +28,14 @@ const TURNS = [
 
 describe("what fzf is given", () => {
   test("the line carries a hidden key, a label, and the whole body", () => {
-    const [key, label, body] = turnPickerLine(TURNS[0] as Turn).split("\t");
+    const [key, label, body] = turnPickerLine(TURNS[0] as Turn, 0).split("\t");
     expect(key).toBe("0");
     expect(label).toContain("why a pipeline?");
     expect(body).toBe("why a pipeline? Because Transport is impossible over a live socket.");
   });
 
   test("the haystack is one line, so a wrapped paste can match it", () => {
-    const body = turnPickerLine(TURNS[0] as Turn).split("\t")[2] ?? "";
+    const body = turnPickerLine(TURNS[0] as Turn, 0).split("\t")[2] ?? "";
     expect(body).not.toContain("\n");
     // What lands in the query when a wrapped fragment is pasted, normalized the same way.
     expect(body).toContain(flatten("Transport is impossible over\na live socket"));
@@ -81,10 +83,35 @@ describe("what fzf is given", () => {
   });
 });
 
+describe("a haystack that spans sessions", () => {
+  test("the hidden key is the row, not the Turn's index in its own session", () => {
+    // Every session numbers its Turns from zero, so two sessions' third replies both claim "2".
+    const mine = turn(2, "mine", "One.", "aaaaaaaa-1111");
+    const theirs = turn(2, "theirs", "Two.", "bbbbbbbb-2222");
+    expect(turnPickerLine(mine, 0).split("\t")[0]).toBe("0");
+    expect(turnPickerLine(theirs, 1).split("\t")[0]).toBe("1");
+  });
+
+  test("the row says which session it came from", () => {
+    expect(turnLabel(turn(0, "go", "One.", "abcdef12-3456"))).toContain("abcdef12");
+  });
+
+  test("the row that comes back is the Turn at that position, whatever its own index says", async () => {
+    const rows = [
+      turn(2, "mine", "One.", "aaaaaaaa-1111"),
+      turn(2, "theirs", "Two.", "bbbbbbbb-2222"),
+    ];
+    const picked = await pickTurn(rows, {
+      run: async () => ({ code: 0, stdout: `${turnPickerLine(rows[1] as Turn, 1)}\n` }),
+    });
+    expect(picked?.sessionId).toBe("bbbbbbbb-2222");
+  });
+});
+
 describe("what comes back", () => {
   test("the selected line maps back to its Turn by the hidden key", async () => {
     const picked = await pickTurn([...TURNS], {
-      run: async () => ({ code: 0, stdout: `${turnPickerLine(TURNS[1] as Turn)}\n` }),
+      run: async () => ({ code: 0, stdout: `${turnPickerLine(TURNS[1] as Turn, 1)}\n` }),
     });
     expect(picked?.index).toBe(1);
   });

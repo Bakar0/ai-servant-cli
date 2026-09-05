@@ -41,9 +41,16 @@ export interface PickTurnOptions {
   run?: (args: string[], input: string) => Promise<{ code: number; stdout: string }>;
 }
 
-/** The line fzf sees: a hidden key, what is shown, and everything that is searchable. */
-export function turnPickerLine(turn: Turn): string {
-  return `${turn.index}\t${turnLabel(turn)}\t${haystack(turn)}`;
+/**
+ * The line fzf sees: a hidden key, what is shown, and everything that is searchable.
+ *
+ * The key is the Turn's place in the list handed to the picker, not `turn.index`. The list spans
+ * sessions and every session numbers its Turns from zero, so the index is not a key at all — two
+ * sessions' third replies would both claim to be "2" and the picker would return whichever it
+ * found first.
+ */
+export function turnPickerLine(turn: Turn, at: number): string {
+  return `${at}\t${turnLabel(turn)}\t${haystack(turn)}`;
 }
 
 /** What is displayed. Short, because the matching is done against the body behind it. */
@@ -51,7 +58,9 @@ export function turnLabel(turn: Turn, now: number = Date.now()): string {
   const age = relativeAge(turn.startedAtMs || now, now).padEnd(4);
   const asked = flatten(turn.prompt) || "(no prompt)";
   const words = turn.markdown.split(/\s+/).filter(Boolean).length;
-  return `${age}  ${asked.slice(0, 70).padEnd(70)}  ${String(words).padStart(5)} words`;
+  // The session, because a list that spans them has to say which reply came from where — two
+  // sessions in one directory ask each other's questions all the time.
+  return `${age}  ${turn.sessionId.slice(0, 8)}  ${asked.slice(0, 62).padEnd(62)}  ${String(words).padStart(5)} words`;
 }
 
 export async function pickTurn(turns: Turn[], options: PickTurnOptions = {}): Promise<Turn | null> {
@@ -60,7 +69,7 @@ export async function pickTurn(turns: Turn[], options: PickTurnOptions = {}): Pr
   const previews = await mkdtemp(join(tmpdir(), "servant-narrate-pick-"));
   try {
     await Promise.all(
-      turns.map((turn) => Bun.write(join(previews, String(turn.index)), preview(turn))),
+      turns.map((turn, at) => Bun.write(join(previews, String(at)), preview(turn))),
     );
     const { code, stdout } = await run(
       [
@@ -74,7 +83,7 @@ export async function pickTurn(turns: Turn[], options: PickTurnOptions = {}): Pr
         "--preview-window=right,55%,wrap",
         ...(options.query ? [`--query=${flatten(options.query)}`] : []),
         `--prompt=${options.prompt ?? "narrate> "}`,
-        "--header=paste a fragment of the reply · ^F fuzzy",
+        "--header=paste a fragment of the reply · ^F fuzzy · every session in this directory",
         "--height=90%",
         "--layout=reverse",
         "--border",
@@ -83,15 +92,15 @@ export async function pickTurn(turns: Turn[], options: PickTurnOptions = {}): Pr
     );
     if (code !== 0) return null;
     const chosen = stdout.split("\n").find((line) => line.length > 0);
-    const index = Number(chosen?.split("\t")[0]);
-    return turns.find((turn) => turn.index === index) ?? null;
+    return turns[Number(chosen?.split("\t")[0])] ?? null;
   } finally {
     await rm(previews, { recursive: true, force: true });
   }
 }
 
 function preview(turn: Turn): string {
-  return `${turn.prompt}\n${"─".repeat(40)}\n${turn.markdown}\n`;
+  const where = `session ${turn.sessionId} · turn ${turn.index + 1}`;
+  return `${where}\n\n${turn.prompt}\n${"─".repeat(40)}\n${turn.markdown}\n`;
 }
 
 async function runFzf(args: string[], input: string): Promise<{ code: number; stdout: string }> {

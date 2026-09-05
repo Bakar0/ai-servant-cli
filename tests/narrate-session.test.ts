@@ -6,7 +6,11 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { narrateTurnStream, newestSessionForCwd } from "../src/core/narrate-session.ts";
+import {
+  narrateTurnStream,
+  newestSessionForCwd,
+  turnsForCwd,
+} from "../src/core/narrate-session.ts";
 import { readTurns } from "../src/core/narrate-turn.ts";
 import type { NarrationEvent } from "../src/core/narrate.ts";
 
@@ -73,6 +77,61 @@ describe("which transcript", () => {
 
   test("a directory with no sessions answers nothing rather than throwing", async () => {
     expect(await newestSessionForCwd("/nowhere/at/all")).toBeNull();
+  });
+});
+
+describe("what the picker can reach", () => {
+  test("every session in the directory, not only the newest", async () => {
+    const slug = join(projects, "-two-sessions");
+    await write(join(slug, "aaaaaaaa-0000-0000-0000-000000000000.jsonl"), [
+      said("older question"),
+      replied("Older answer."),
+    ]);
+    await Bun.sleep(10);
+    await write(join(slug, "bbbbbbbb-0000-0000-0000-000000000000.jsonl"), [
+      said("newer question"),
+      replied("Newer answer."),
+    ]);
+    const turns = await turnsForCwd("/two/sessions");
+    expect(turns.map((turn) => turn.markdown)).toEqual(["Newer answer.", "Older answer."]);
+  });
+
+  test("newest first, so the reply you just saw is at the top", async () => {
+    const slug = join(projects, "-ordered");
+    await write(join(slug, "cccccccc-0000-0000-0000-000000000000.jsonl"), [
+      said("first"),
+      replied("One."),
+      said("second"),
+      replied("Two."),
+    ]);
+    expect((await turnsForCwd("/ordered")).map((turn) => turn.markdown)).toEqual(["Two.", "One."]);
+  });
+
+  test("each Turn knows the session it was said in", async () => {
+    const slug = join(projects, "-stamped");
+    await write(join(slug, "dddddddd-0000-0000-0000-000000000000.jsonl"), [
+      said("go"),
+      replied("Answer."),
+    ]);
+    expect((await turnsForCwd("/stamped"))[0]?.sessionId).toBe(
+      "dddddddd-0000-0000-0000-000000000000",
+    );
+  });
+
+  test("it reaches back only so far", async () => {
+    const slug = join(projects, "-many");
+    for (let i = 0; i < 5; i++) {
+      await write(join(slug, `0000000${i}-0000-0000-0000-000000000000.jsonl`), [
+        said(`q${i}`),
+        replied(`A${i}.`),
+      ]);
+      await Bun.sleep(5);
+    }
+    expect(await turnsForCwd("/many", { limit: 2 })).toHaveLength(2);
+  });
+
+  test("a directory with nothing in it is not an error", async () => {
+    expect(await turnsForCwd("/nothing/here")).toEqual([]);
   });
 });
 

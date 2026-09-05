@@ -108,6 +108,35 @@ describe("what counts as one Turn", () => {
     expect(await readTurns(path)).toHaveLength(1);
   });
 
+  test("a background task reporting back does not cut the answer in half", async () => {
+    const path = await transcript([
+      said("go"),
+      replied([{ type: "text", text: "Starting." }], "tool_use"),
+      {
+        type: "user",
+        uuid: uuid(),
+        origin: { kind: "task-notification" },
+        promptSource: "system",
+        message: { role: "user", content: "<task-notification>done</task-notification>" },
+      },
+      replied([{ type: "text", text: "Finished." }]),
+    ]);
+    const turns = await readTurns(path);
+    expect(turns).toHaveLength(1);
+    expect(turns[0]?.markdown).toBe("Starting.\n\nFinished.");
+  });
+
+  test("an entry that says nothing about where it came from is still the user", async () => {
+    // Older transcripts carry no `origin` at all, and they are mostly people typing.
+    const path = await transcript([
+      said("first"),
+      replied([{ type: "text", text: "One." }]),
+      said("second"),
+      replied([{ type: "text", text: "Two." }]),
+    ]);
+    expect(await readTurns(path)).toHaveLength(2);
+  });
+
   test("thinking is dropped, because it is collapsed on screen too", async () => {
     const path = await transcript([
       said("go"),

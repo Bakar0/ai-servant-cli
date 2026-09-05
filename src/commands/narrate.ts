@@ -5,7 +5,7 @@ import { openNarrationCache, sweepNarrationCache } from "../core/narrate-cache.t
 import { acquirePlayerLock, playerLockHolder } from "../core/narrate-lock.ts";
 import { createOpenAiEarCopyModel } from "../core/narrate-model.ts";
 import { createNarrationPlayer } from "../core/narrate-player.ts";
-import { narrateTurnStream, newestSessionForCwd } from "../core/narrate-session.ts";
+import { narrateTurnStream, newestSessionForCwd, turnsForCwd } from "../core/narrate-session.ts";
 import { type Turn, readTurns } from "../core/narrate-turn.ts";
 import { createNarrationView } from "../core/narrate-view.ts";
 import {
@@ -96,16 +96,10 @@ export const narrateCommand = defineCommand({
     // life when nothing is playing and a few file deletions cost nothing.
     await sweepNarrationCache();
 
-    const session = await resolveSession(args.session);
-    const turns = await readTurns(session.jsonlPath);
-    if (turns.length === 0) throw new Error(`No turns to narrate in ${session.jsonlPath}.`);
-
-    const turn = await chooseTurn(turns, args);
+    const turn = await chooseTurn(args);
     // Said out loud, always. A Player narrating the wrong session sounds exactly like one narrating
-    // the right session, so the id it locked onto is the only way a mismatch is ever visible.
-    console.log(
-      `servant: narrating turn ${turn.index + 1}/${turns.length} of session ${session.sessionId}`,
-    );
+    // the right session, so the session it locked onto is the only way a mismatch is ever visible.
+    console.log(`servant: narrating turn ${turn.index + 1} of session ${turn.sessionId}`);
 
     const held = await playerLockHolder();
     if (held !== null) {
@@ -150,13 +144,13 @@ export const narrateCommand = defineCommand({
         console.error(`servant narrate: ${message}`);
 
       const player = createNarrationPlayer({
-        events: narrateTurnStream(session.jsonlPath, turn, {
+        events: narrateTurnStream(turn.jsonlPath, turn, {
           ...(model ? { model } : {}),
           ...(args.follow ? { follow: true } : {}),
         }),
         speech,
         speaker: createSoxSpeaker({ onLost: (message) => speakerDied(message) }),
-        ...(args.cache ? { cache: openNarrationCache(session.sessionId, turn.uuid) } : {}),
+        ...(args.cache ? { cache: openNarrationCache(turn.sessionId, turn.uuid) } : {}),
         onState: (state) => view?.update(state),
       });
 
@@ -168,7 +162,7 @@ export const narrateCommand = defineCommand({
         ? createNarrationView({
             screen: terminal.screen,
             transport: player,
-            title: { sessionId: session.sessionId, turn: turn.index, prompt: turn.prompt },
+            title: { sessionId: turn.sessionId, turn: turn.index, prompt: turn.prompt },
             width: () => terminal.width(),
           })
         : undefined;
@@ -193,40 +187,53 @@ export const narrateCommand = defineCommand({
   },
 });
 
-async function resolveSession(id: unknown): Promise<{ sessionId: string; jsonlPath: string }> {
-  if (typeof id === "string" && id.length > 0) {
-    assertValidSessionId(id);
-    const jsonlPath = await findSessionJsonl(id);
-    if (!jsonlPath) throw new Error(`No transcript found for session ${id}.`);
-    return { sessionId: id, jsonlPath };
-  }
-  const newest = await newestSessionForCwd(process.cwd());
-  if (!newest) {
-    throw new Error(
-      `No Claude sessions found for ${process.cwd()}. Pass --session <id> to narrate one from elsewhere.`,
-    );
-  }
-  return newest;
-}
-
-async function chooseTurn(
-  turns: Turn[],
-  args: { pick?: boolean; find?: string; turn?: string },
-): Promise<Turn> {
+/**
+ * Which Turn to narrate.
+ *
+ * Three gestures, and they want different haystacks. Bare `narrate` means "read that back": the
+ * newest Turn of the newest session for this directory, no questions. `--turn` and `--session` name
+ * one directly. `--pick` and `--find` are the other gesture — you remember a reply and not which
+ * session it was in — so they search every session in the directory, newest first.
+ */
+async function chooseTurn(args: {
+  session?: string;
+  turn?: string;
+  pick?: boolean;
+  find?: string;
+}): Promise<Turn> {
   if (args.pick || args.find) {
+    const turns = await turnsForCwd(process.cwd());
+    if (turns.length === 0) throw new Error(noSessions());
     const picked = await pickTurn(turns, args.find ? { query: args.find } : {});
     if (!picked) throw new Error("Nothing picked.");
     return picked;
   }
+
+  const turns = await readTurns(await resolveSessionPath(args.session));
+  if (turns.length === 0) throw new Error("That session has no turns to narrate.");
   if (args.turn) {
     const wanted = Number(args.turn);
     const turn = turns[wanted - 1];
-    if (!turn) throw new Error(`No turn ${wanted} — this session has ${turns.length}.`);
+    if (!turn) throw new Error(`No turn ${wanted} — that session has ${turns.length}.`);
     return turn;
   }
-  const last = turns[turns.length - 1];
-  if (!last) throw new Error("No turns to narrate.");
-  return last;
+  return turns[turns.length - 1] as Turn;
+}
+
+async function resolveSessionPath(id: string | undefined): Promise<string> {
+  if (id) {
+    assertValidSessionId(id);
+    const jsonlPath = await findSessionJsonl(id);
+    if (!jsonlPath) throw new Error(`No transcript found for session ${id}.`);
+    return jsonlPath;
+  }
+  const newest = await newestSessionForCwd(process.cwd());
+  if (!newest) throw new Error(noSessions());
+  return newest.jsonlPath;
+}
+
+function noSessions(): string {
+  return `No Claude sessions found for ${process.cwd()}. Pass --session <id> to narrate one from elsewhere.`;
 }
 
 /**

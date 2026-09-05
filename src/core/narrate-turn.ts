@@ -13,6 +13,9 @@ import { readJsonlLines } from "./claude-session.ts";
 
 /** One answer as it appears on screen, ready to narrate. */
 export interface Turn {
+  /** Which session it was said in. Part of a Turn's identity, and half of its cache path. */
+  sessionId: string;
+  jsonlPath: string;
   /** The first assistant entry's uuid — stable across the Turn growing, so it keys the cache. */
   uuid: string;
   /** 0-based position in the session. What `servant narrate --turn 3` means. */
@@ -44,6 +47,7 @@ interface Entry {
   timestamp?: string;
   isMeta?: boolean;
   isSidechain?: boolean;
+  origin?: { kind?: string };
   message?: { role?: string; content?: unknown; stop_reason?: string | null };
 }
 
@@ -61,12 +65,13 @@ interface ContentBlock {
  */
 export async function readTurns(jsonlPath: string): Promise<Turn[]> {
   const turns: Turn[] = [];
+  const sessionId = sessionIdOf(jsonlPath);
   let prompt = "";
   let open: Entry[] = [];
 
   const close = (): void => {
     if (open.length === 0) return;
-    const turn = buildTurn(open, prompt, turns.length);
+    const turn = buildTurn(open, prompt, turns.length, sessionId, jsonlPath);
     if (turn) turns.push(turn);
     open = [];
   };
@@ -150,7 +155,18 @@ export function haystack(turn: Turn): string {
   return flatten(`${turn.prompt} ${turn.markdown}`);
 }
 
-function buildTurn(entries: Entry[], prompt: string, index: number): Turn | null {
+/** A transcript is named for its session, so the id is in the path and nowhere in the entries. */
+export function sessionIdOf(jsonlPath: string): string {
+  return (jsonlPath.split("/").pop() ?? "").replace(/\.jsonl$/, "");
+}
+
+function buildTurn(
+  entries: Entry[],
+  prompt: string,
+  index: number,
+  sessionId: string,
+  jsonlPath: string,
+): Turn | null {
   const uuid = entries.find((entry) => typeof entry.uuid === "string")?.uuid;
   if (!uuid) return null;
   const blocks = foldEntries(entries);
@@ -158,6 +174,8 @@ function buildTurn(entries: Entry[], prompt: string, index: number): Turn | null
   if (!markdown.trim()) return null;
   const startedAt = entries.find((entry) => entry.timestamp)?.timestamp;
   return {
+    sessionId,
+    jsonlPath,
     uuid,
     index,
     prompt,
@@ -294,10 +312,25 @@ function blocksOf(entry: Entry): ContentBlock[] {
 }
 
 /**
+ * Kinds of "user" entry that are not the user.
+ *
+ * A background task reporting back arrives as an ordinary user message with ordinary text in it,
+ * and reading it as a prompt cuts one answer in half — the Player would offer you the tail of a
+ * reply as though it were its own, labelled with a chunk of XML as the question that prompted it.
+ *
+ * Surveyed across every transcript on this machine: `origin.kind` is "human" (1617), or
+ * "task-notification" (439), or absent (782, on older transcripts). So this names what to exclude
+ * rather than what to allow — an entry that says nothing about where it came from is the user,
+ * which is what it was before the field existed.
+ */
+const NOT_THE_USER = new Set(["task-notification"]);
+
+/**
  * Whether a "user" entry is the user. A tool result wears the same type, and reading it as a new
  * prompt is what splits one answer into a dozen Turns.
  */
 function isSpokenByTheUser(entry: Entry): boolean {
+  if (entry.origin?.kind && NOT_THE_USER.has(entry.origin.kind)) return false;
   const content = entry.message?.content;
   if (typeof content === "string") return content.trim().length > 0;
   if (!Array.isArray(content)) return false;

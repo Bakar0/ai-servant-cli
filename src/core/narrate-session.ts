@@ -1,7 +1,7 @@
 import { stat } from "node:fs/promises";
 import { join } from "node:path";
 import { claudeProjectsRoot, encodeProjectDir } from "./claude-session.ts";
-import { type Turn, followTurn } from "./narrate-turn.ts";
+import { type Turn, followTurn, readTurns } from "./narrate-turn.ts";
 import { type NarrateOptions, type NarrationEvent, narrateMarkdown } from "./narrate.ts";
 
 // Which transcript, and how a Turn that is still being written becomes one continuous stream of
@@ -12,6 +12,15 @@ export interface ResolvedSession {
   sessionId: string;
   jsonlPath: string;
 }
+
+/**
+ * How many of a directory's sessions the picker reaches back over.
+ *
+ * The reply you want to hear again is nearly always from today or yesterday, and each session read
+ * is a whole transcript parsed. Twenty is weeks of work in a busy directory and still opens the
+ * picker instantly.
+ */
+export const PICKER_SESSION_LIMIT = 20;
 
 /**
  * The newest transcript for a directory, which is what "narrate what just happened" means when you
@@ -42,6 +51,37 @@ export async function newestSessionForCwd(cwd: string): Promise<ResolvedSession 
         ?.replace(/\.jsonl$/, "") ?? "",
     jsonlPath: newest.path,
   };
+}
+
+/**
+ * Every Turn worth picking from in a directory, newest first — across its sessions, not just the
+ * newest one.
+ *
+ * Narrating defaults to the newest Turn of the newest session, which is right for "read me that
+ * back". Picking is the other gesture: you remember a reply and not which session it was in, and a
+ * picker that could only reach the session you happen to be sitting in would be unable to find most
+ * of what you would ask it for.
+ */
+export async function turnsForCwd(cwd: string, options: { limit?: number } = {}): Promise<Turn[]> {
+  const dir = join(claudeProjectsRoot(), encodeProjectDir(cwd));
+  const found: { path: string; mtimeMs: number }[] = [];
+  try {
+    for await (const name of new Bun.Glob("*.jsonl").scan({ cwd: dir, onlyFiles: true })) {
+      const path = join(dir, name);
+      found.push({ path, mtimeMs: (await stat(path)).mtimeMs });
+    }
+  } catch {
+    return [];
+  }
+  found.sort((a, b) => b.mtimeMs - a.mtimeMs);
+
+  const turns: Turn[] = [];
+  for (const session of found.slice(0, options.limit ?? PICKER_SESSION_LIMIT)) {
+    // Newest Turn first within each session, so the whole list reads newest-first without needing
+    // timestamps that a transcript does not always carry.
+    turns.push(...(await readTurns(session.path)).reverse());
+  }
+  return turns;
 }
 
 export interface TurnStreamOptions extends NarrateOptions {
