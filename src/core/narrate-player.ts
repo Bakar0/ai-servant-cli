@@ -80,6 +80,17 @@ export interface NarrationPlayerOptions {
   cache?: NarrationCache | undefined;
   now?: () => number;
   wait?: (ms: number) => Promise<void>;
+  /**
+   * How often to redraw while a Segment is being spoken. Off unless a screen asked for it.
+   *
+   * The position is arithmetic over the wall clock, so it is always right when it is *asked* for —
+   * but it only reaches a screen when something publishes it, and everything that publishes is an
+   * event: a sentence arriving, a key, a halt. Synthesis runs about four times faster than speech,
+   * so those events all happen in the first quarter of a Narration and then stop. Without a clock
+   * of its own the live position moves in lurches while the Turn is being written and then sits
+   * still for the rest of it, several Segments behind the voice.
+   */
+  redrawMs?: number | undefined;
   onState?: (state: PlayerState) => void;
   onDebug?: (message: string) => void;
 }
@@ -647,10 +658,20 @@ export function createNarrationPlayer(options: NarrationPlayerOptions): Narratio
     done,
   };
 
+  /** The screen's own clock. Only while something is actually being spoken — a paused Player, a
+   * halted one and a finished one all show something that is not changing. */
+  async function redraw(every: number): Promise<void> {
+    while (!stopped) {
+      await wait(every);
+      if (sounding && playing) publish();
+    }
+  }
+
   // Both halves start at once: the rewrite is already streaming, and the synthesizer must not wait
   // for it to finish (ADR 0001 — sequential is ~4s to the first word and misses the budget).
   void readEvents();
   void synthesize();
+  if (options.redrawMs) void redraw(options.redrawMs);
   playing = true;
   reanchor(0);
   void pump(generation);

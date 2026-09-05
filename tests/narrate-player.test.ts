@@ -313,6 +313,77 @@ describe("playback", () => {
   });
 });
 
+describe("the live position on screen", () => {
+  test("keeps being drawn after everything has been synthesized", async () => {
+    const clock = fakeClock();
+    const drawn: number[] = [];
+    const player = createNarrationPlayer({
+      // Half a minute of speech, which synthesis finishes long before the voice does — that stretch
+      // is the whole point, and it is where the screen used to sit still.
+      events: scripted(
+        Array.from({ length: 30 }, (_, i) => ({
+          type: "sentence" as const,
+          segment: 0,
+          text: `S${i}.`,
+        })),
+      ),
+      speech: fakeSpeech(),
+      speaker: fakeSpeaker().speaker,
+      redrawMs: 100,
+      onState: (state) => drawn.push(state.positionMs),
+      ...clock,
+    });
+    for (let i = 0; i < 100 && !player.state().synthesized; i++) await clock.wait(20);
+    expect(player.state().synthesized).toBe(true);
+    expect(player.state().playing).toBe(true);
+
+    const whileSynthesizing = drawn.length;
+    const wasAt = drawn[whileSynthesizing - 1] ?? 0;
+    for (let i = 0; i < 20; i++) await clock.wait(50);
+
+    expect(drawn.length).toBeGreaterThan(whileSynthesizing);
+    // And it is the position that moved, not the same frame drawn twice.
+    expect(drawn[drawn.length - 1]).toBeGreaterThan(wasAt);
+    await player.stop();
+  });
+
+  test("stops being drawn once nothing is being spoken", async () => {
+    const clock = fakeClock();
+    const drawn: number[] = [];
+    const player = createNarrationPlayer({
+      events: scripted(twoSegments()),
+      speech: fakeSpeech(),
+      speaker: fakeSpeaker().speaker,
+      redrawMs: 100,
+      onState: (state) => drawn.push(state.positionMs),
+      ...clock,
+    });
+    for (let i = 0; i < 10; i++) await clock.wait(50);
+    player.toggle();
+    const whilePaused = drawn.length;
+    for (let i = 0; i < 20; i++) await clock.wait(50);
+    expect(drawn.length).toBe(whilePaused);
+    await player.stop();
+  });
+
+  test("nothing is drawn on a clock nobody asked for", async () => {
+    const clock = fakeClock();
+    const drawn: number[] = [];
+    const player = createNarrationPlayer({
+      events: scripted(twoSegments()),
+      speech: fakeSpeech(),
+      speaker: fakeSpeaker().speaker,
+      onState: (state) => drawn.push(state.positionMs),
+      ...clock,
+    });
+    await settle(player, clock);
+    const afterEverything = drawn.length;
+    for (let i = 0; i < 20; i++) await clock.wait(50);
+    expect(drawn.length).toBe(afterEverything);
+    await player.stop();
+  });
+});
+
 describe("the Transport", () => {
   async function playing() {
     const clock = fakeClock();

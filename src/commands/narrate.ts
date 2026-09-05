@@ -151,6 +151,9 @@ export const narrateCommand = defineCommand({
         speech,
         speaker: createSoxSpeaker({ onLost: (message) => speakerDied(message) }),
         ...(args.cache ? { cache: openNarrationCache(turn.sessionId, turn.uuid) } : {}),
+        // Ten times a second, and only while there is a screen to draw on: the live position is the
+        // one thing on it that moves on its own.
+        ...(terminal ? { redrawMs: 100 } : {}),
         onState: (state) => view?.update(state),
       });
 
