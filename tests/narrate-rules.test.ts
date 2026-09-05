@@ -115,17 +115,17 @@ describe("the guarantee, over a whole Turn", () => {
     }
   });
 
-  test("every skip is cued, and every cue that stands in for content speaks", () => {
+  test("every skip is cued, in reading order, and every cue that stands in for content speaks", () => {
     const cues = blocks.flatMap((block) => block.cues);
-    expect(cues.map((cue) => cue.node).toSorted()).toEqual([
-      "code",
+    expect(cues.map((cue) => cue.node)).toEqual([
       "emoji",
-      "hash",
       "path",
+      "hash",
+      "url",
+      "code",
+      "table",
       "path",
       "rule",
-      "table",
-      "url",
     ]);
     for (const cue of cues) {
       if (cue.fate === "drop") expect(cue.say).toBe("");

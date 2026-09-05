@@ -42,10 +42,42 @@ describe("nodes the rules replace outright", () => {
     expect(findLeaks(text)).toBeEmpty();
   });
 
+  test("a lead-in the phrase already says is not said twice", () => {
+    expect(speakInline("The base contains commit 21d1608 already.").text).toBe(
+      "The base contains a commit hash already.",
+    );
+  });
+
+  test("and the sentence keeps its own article when it had one", () => {
+    expect(speakInline("Open the file src/core/narrate.ts now.").text).toBe(
+      "Open the narrate file now.",
+    );
+    expect(speakInline("The link https://bun.sh/docs is there.").text).toBe("The link is there.");
+  });
+
+  test("an ordinary word in front of a substitution is left alone", () => {
+    expect(speakInline("See src/core/narrate.ts for the rest.").text).toBe(
+      "See the narrate file for the rest.",
+    );
+  });
+
   test("punctuation around a replaced token stays put", () => {
     expect(speakInline("It moved (to src/core/narrate.ts), quietly.").text).toBe(
       "It moved (to the narrate file), quietly.",
     );
+  });
+});
+
+describe("the order Cues come back in", () => {
+  test("they read in source order, not in the order the passes ran", () => {
+    const { cues } = speakInline(
+      "At 21d1608 see [the ADR](docs/adr/0001.md) and open `src/core/narrate.ts`.",
+    );
+    expect(cues.map((cue) => cue.source)).toEqual([
+      "21d1608",
+      "docs/adr/0001.md",
+      "src/core/narrate.ts",
+    ]);
   });
 });
 

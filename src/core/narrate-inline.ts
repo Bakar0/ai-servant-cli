@@ -31,6 +31,37 @@ function nounPhrase(kind: UnspeakableKind, token: string): string {
  * *which* file. Only when the name reads as words, though: a stem with a digit in it is as
  * unspeakable as the path was.
  */
+const ARTICLES = new Set(["a", "an", "the"]);
+
+function bareWord(token: string): string {
+  return token.replace(LEADING_PUNCTUATION, "").replace(TRAILING_PUNCTUATION, "").toLowerCase();
+}
+
+/**
+ * "at commit 21d1608" must not become "at commit a commit hash". When the word in front of a
+ * substitution already names the thing, the lead-in goes — and if the sentence already had an
+ * article for it, the phrase drops its own rather than stranding the sentence's.
+ *
+ * Mutates the lead-in out of `parts`; returns the phrase to put in its place.
+ */
+function swallowRedundantLeadIn(parts: string[], at: number, phrase: string): string {
+  const words = phrase.toLowerCase().split(" ");
+  const previous = at - 2;
+  if (previous < 0 || !words.includes(bareWord(parts[previous] ?? ""))) return phrase;
+  parts[previous] = "";
+  parts[previous + 1] = "";
+  const article = previous - 2;
+  const sentenceHasTheArticle =
+    article >= 0 && ARTICLES.has(words[0] ?? "") && ARTICLES.has(bareWord(parts[article] ?? ""));
+  return sentenceHasTheArticle ? phrase.slice((words[0] ?? "").length + 1) : phrase;
+}
+
+/** Where a Cue's node sits in the source, so Cues read in the order the eye meets them. */
+function positionIn(raw: string, cue: Cue): number {
+  const at = raw.indexOf(cue.source);
+  return at < 0 ? raw.length : at;
+}
+
 function namedFile(token: string): string | null {
   const base = token.split("/").pop() ?? "";
   const dot = base.lastIndexOf(".");
@@ -85,19 +116,19 @@ export function speakInline(raw: string): { text: string; cues: Cue[] } {
     return cue.say;
   });
 
-  text = text
-    .split(/(\s+)/)
-    .map((token) => {
-      const lead = LEADING_PUNCTUATION.exec(token)?.[0] ?? "";
-      const trail = TRAILING_PUNCTUATION.exec(token.slice(lead.length))?.[0] ?? "";
-      const core = token.slice(lead.length, token.length - trail.length);
-      const kind = core ? classifyUnspeakable(core) : null;
-      if (!kind) return token;
-      const cue = reference(kind, core);
-      cues.push(cue);
-      return `${lead}${cue.say}${trail}`;
-    })
-    .join("");
+  const parts = text.split(/(\s+)/);
+  for (let at = 0; at < parts.length; at++) {
+    const token = parts[at] ?? "";
+    const lead = LEADING_PUNCTUATION.exec(token)?.[0] ?? "";
+    const trail = TRAILING_PUNCTUATION.exec(token.slice(lead.length))?.[0] ?? "";
+    const core = token.slice(lead.length, token.length - trail.length);
+    const kind = core ? classifyUnspeakable(core) : null;
+    if (!kind) continue;
+    const cue = reference(kind, core);
+    cues.push(cue);
+    parts[at] = `${lead}${swallowRedundantLeadIn(parts, at, cue.say)}${trail}`;
+  }
+  text = parts.join("");
 
   text = text.replace(/\p{Extended_Pictographic}(?:️|‍\p{Extended_Pictographic})*/gu, (match) => {
     cues.push(drop("emoji", match));
@@ -115,5 +146,8 @@ export function speakInline(raw: string): { text: string; cues: Cue[] } {
     .replace(/\s+/g, " ")
     .trim();
 
-  return { text, cues };
+  // Substitution order is badges, then links, then code, then bare tokens — nothing like the order
+  // they appear in. The Player shows Cues against the live position, so they have to read in source
+  // order. Two occurrences of the same token tie, and keep the order they were found in.
+  return { text, cues: cues.toSorted((a, b) => positionIn(raw, a) - positionIn(raw, b)) };
 }
