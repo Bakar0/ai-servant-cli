@@ -64,6 +64,28 @@ export function discoveryCachePath(): string {
 }
 
 /**
+ * Synthesized Narration audio, one directory per Turn. Under `.cache/` and not in the insights or
+ * knowledge stores because it is regenerable: losing it costs a few seconds and a few cents.
+ *
+ * Not `.cache/voice/`, which has sat empty since June with nothing writing it — a different
+ * feature's leftover, left where it is rather than quietly reused under a name that would then
+ * mean two things.
+ */
+export function narrateCacheDir(): string {
+  return join(cacheDir(), "narrate");
+}
+
+/** One Turn's Segments. The session and Turn are the path; the Ear-copy and voice are the filename. */
+export function narrateTurnDir(sessionId: string, turnUuid: string): string {
+  return join(narrateCacheDir(), sessionId, turnUuid);
+}
+
+/** Held for as long as a Player is speaking. Two players means two voices. */
+export function narrateLockPath(): string {
+  return join(cacheDir(), "narrate.lock");
+}
+
+/**
  * The board: servant's task tracker, and the contract every command reads and writes directly
  * (ADR-0011). One file at the servant root — no cache tier, because there is no network to be
  * offline from.

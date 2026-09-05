@@ -10,6 +10,7 @@ import { initCommand } from "./commands/init.ts";
 import { insightsJudgeCommand } from "./commands/insights-judge.ts";
 import { insightsCommand } from "./commands/insights.ts";
 import { memoriesCommand } from "./commands/memories.ts";
+import { narrateCommand } from "./commands/narrate.ts";
 import { recallCommand } from "./commands/recall.ts";
 import { repoCommand } from "./commands/repo/index.ts";
 import { resumeCommand } from "./commands/resume.ts";
@@ -31,6 +32,7 @@ const main = defineCommand({
     init: initCommand,
     spawn: spawnCommand,
     summon: summonCommand,
+    narrate: narrateCommand,
     "call-log": callLogCommand,
     repo: repoCommand,
     resume: resumeCommand,
