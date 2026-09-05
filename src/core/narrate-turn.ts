@@ -19,7 +19,17 @@ export interface Turn {
   index: number;
   /** What was asked. The Player prints it, so you can hear which answer you are about to hear. */
   prompt: string;
-  /** Narratable markdown: text blocks as written, tool calls folded into beats, thinking dropped. */
+  /**
+   * Narratable markdown, in the pieces it was folded from: text blocks as written, tool calls as
+   * beats, thinking dropped.
+   *
+   * Kept as pieces and not only as the joined string, because a follower has to know what it has
+   * already narrated and re-splitting the join on blank lines is not the same question. A text
+   * block can contain blank lines of its own — inside a fenced code block, most obviously — and
+   * splitting there would hand the pipeline half a fence.
+   */
+  blocks: readonly string[];
+  /** The pieces, joined. What the pipeline is handed. */
   markdown: string;
   startedAtMs: number;
   /** Assistant entries folded in so far. What tells a follower that the Turn has grown. */
@@ -112,10 +122,9 @@ export async function* followTurn(
   while (!options.signal?.aborted) {
     const turn = (await readTurns(jsonlPath)).find((candidate) => candidate.uuid === turnUuid);
     if (!turn) return;
-    const blocks = turn.markdown.split(BLOCK_SEPARATOR);
-    if (blocks.length > emitted) {
-      yield blocks.slice(emitted).join(BLOCK_SEPARATOR);
-      emitted = blocks.length;
+    if (turn.blocks.length > emitted) {
+      yield turn.blocks.slice(emitted).join(BLOCK_SEPARATOR);
+      emitted = turn.blocks.length;
     }
     if (turn.complete) return;
     await wait(pollMs);
@@ -144,13 +153,15 @@ export function haystack(turn: Turn): string {
 function buildTurn(entries: Entry[], prompt: string, index: number): Turn | null {
   const uuid = entries.find((entry) => typeof entry.uuid === "string")?.uuid;
   if (!uuid) return null;
-  const markdown = foldEntries(entries);
+  const blocks = foldEntries(entries);
+  const markdown = blocks.join(BLOCK_SEPARATOR);
   if (!markdown.trim()) return null;
   const startedAt = entries.find((entry) => entry.timestamp)?.timestamp;
   return {
     uuid,
     index,
     prompt,
+    blocks,
     markdown,
     startedAtMs: startedAt ? Date.parse(startedAt) : 0,
     entries: entries.length,
@@ -166,7 +177,7 @@ function buildTurn(entries: Entry[], prompt: string, index: number): Turn | null
  * eleven Bash calls are a clause rather than eleven clauses. Thinking is dropped, because it is
  * collapsed on screen too and narrating it would describe a screen the listener is not looking at.
  */
-function foldEntries(entries: Entry[]): string {
+function foldEntries(entries: Entry[]): string[] {
   const chunks: string[] = [];
   let tools: string[] = [];
 
@@ -186,7 +197,7 @@ function foldEntries(entries: Entry[]): string {
     }
   }
   flushTools();
-  return chunks.join(BLOCK_SEPARATOR);
+  return chunks;
 }
 
 /** How a tool run is described. Grouped, because the listener wants the shape and not the log. */

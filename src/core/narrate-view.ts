@@ -196,21 +196,27 @@ export function createNarrationView(options: NarrationViewOptions): NarrationVie
   return {
     key(action) {
       const transport = options.transport;
-      if (action === "quit") {
-        void transport.stop();
-        return;
+      switch (action) {
+        case "toggle":
+          return transport.toggle();
+        case "back":
+          return transport.back();
+        case "forward":
+          return transport.forward();
+        case "next":
+          return transport.nextSegment();
+        case "prev":
+          return transport.prevSegment();
+        case "slower":
+          return transport.slower();
+        case "faster":
+          return transport.faster();
+        case "retry":
+          return transport.retry();
+        case "quit":
+          void transport.stop();
+          return;
       }
-      const run: Record<Exclude<NarrationAction, "quit">, () => void> = {
-        toggle: () => transport.toggle(),
-        back: () => transport.back(),
-        forward: () => transport.forward(),
-        next: () => transport.nextSegment(),
-        prev: () => transport.prevSegment(),
-        slower: () => transport.slower(),
-        faster: () => transport.faster(),
-        retry: () => transport.retry(),
-      };
-      run[action]();
     },
     update(state) {
       options.screen.body(renderNarration(state, options.width?.() ?? 80));

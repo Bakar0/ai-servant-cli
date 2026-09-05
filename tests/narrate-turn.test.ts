@@ -249,6 +249,37 @@ describe("following a Turn while it grows", () => {
   });
 });
 
+describe("following a Turn while it grows, when a block has blank lines in it", () => {
+  test("a fenced code block is one piece, not three", async () => {
+    const fence = "Here it is:\n\n```sh\nfirst\n\nsecond\n```";
+    const path = await transcript([said("go"), replied([{ type: "text", text: fence }])]);
+    const turn = (await readTurns(path))[0];
+    // One assistant text block is one piece, whatever blank lines it contains. Splitting the joined
+    // markdown on blank lines instead would hand the pipeline half a fence.
+    expect(turn?.blocks).toEqual([fence]);
+  });
+
+  test("a follower yields whole pieces, so half a fence never reaches the pipeline", async () => {
+    const path = join(dir, "fenced.jsonl");
+    const user = said("go");
+    const fence = replied([{ type: "text", text: "Look:\n\n```sh\none\n\ntwo\n```" }], "tool_use");
+    await Bun.write(path, `${[user, fence].map((r) => JSON.stringify(r)).join("\n")}\n`);
+    const turn = (await readTurns(path))[0];
+    const seen: string[] = [];
+    for await (const chunk of followTurn(path, turn?.uuid ?? "", {
+      wait: async () => {
+        await Bun.write(
+          path,
+          `${[user, fence, replied([{ type: "text", text: "Done." }])].map((r) => JSON.stringify(r)).join("\n")}\n`,
+        );
+      },
+    })) {
+      seen.push(chunk);
+    }
+    expect(seen).toEqual(["Look:\n\n```sh\none\n\ntwo\n```", "Done."]);
+  });
+});
+
 describe("what the picker matches against", () => {
   test("a copied fragment and the haystack are flattened the same way", () => {
     const pasted = "the rewrite is\nstreamed and cut at\nsentence boundaries";

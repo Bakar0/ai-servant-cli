@@ -123,8 +123,8 @@ interface CachedSegment {
 async function listSegments(): Promise<CachedSegment[]> {
   const root = narrateCacheDir();
   const found: CachedSegment[] = [];
-  // `<session>/<turn>/<i>-<digest>.pcm` — the shape is the filter, so a stray file at any other
-  // depth is invisible to the sweep rather than being judged by its name alone.
+  // `<session>/<turn>/<segment>-<sentence>-<digest>.pcm` — the shape is the filter, so a stray file
+  // at any other depth is invisible to the sweep rather than being judged by its name alone.
   const glob = new Bun.Glob("*/*/*.pcm");
   try {
     for await (const relative of glob.scan({ cwd: root, onlyFiles: true })) {

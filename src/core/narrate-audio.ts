@@ -9,6 +9,10 @@ import { NARRATION_SAMPLE_RATE } from "./narrate-voice.ts";
 // long-lived process being steered — is a process that has already buffered the seconds you just
 // asked it to skip. Killing it is what makes ← feel immediate instead of feeling like a request.
 
+// Spelled out again rather than shared with `summons-audio.ts`, whose numbers are identical today.
+// They are two independent contracts that happen to agree: that one is the Realtime socket's wire
+// format, this one is what `/v1/audio/speech` returns for `response_format: "pcm"`. Either endpoint
+// could move without the other, and a shared constant would carry the change silently.
 const RAW_PCM_ARGS = [
   "-t",
   "raw",
@@ -22,12 +26,7 @@ const RAW_PCM_ARGS = [
   "1",
 ];
 
-/**
- * Bun hands a child a socket for stdin, and `fstat` on a socket reports what is *currently
- * buffered* as the size — so `sox` sizes the whole narration as whatever happened to be written
- * when it opened, plays that, and exits 0 mid-sentence with no stderr. Found the expensive way in
- * servant-summon#5; kept here because the same stdin is the same trap.
- */
+/** The fstat-on-a-socket trap, in full in `summons-audio.ts`. The same stdin is the same trap. */
 const IGNORE_INPUT_LENGTH = "--ignore-length";
 
 /**

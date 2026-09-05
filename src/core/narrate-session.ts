@@ -73,8 +73,7 @@ export async function* narrateTurnStream(
   const speak = async function* (markdown: string): AsyncGenerator<NarrationEvent> {
     let highest = -1;
     for await (const event of narrateMarkdown(markdown, { model: options.model })) {
-      const index = event.type === "segment" ? event.segment.index : event.segment;
-      highest = Math.max(highest, index);
+      highest = Math.max(highest, segmentOf(event));
       yield shift(event, offset);
     }
     offset += highest + 1;
@@ -90,6 +89,11 @@ export async function* narrateTurnStream(
   })) {
     yield* speak(markdown);
   }
+}
+
+/** Which Segment an event is about, whatever kind it is. */
+function segmentOf(event: NarrationEvent): number {
+  return event.type === "segment" ? event.segment.index : event.segment;
 }
 
 function shift(event: NarrationEvent, by: number): NarrationEvent {

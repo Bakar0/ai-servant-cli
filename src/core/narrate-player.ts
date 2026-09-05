@@ -1,6 +1,12 @@
 import { type NarrationCache, earCopyDigest } from "./narrate-cache.ts";
 import type { NarrationSpeaker, PlaybackRun } from "./narrate-audio.ts";
-import { type Position, SEEK_STEP_MS, type Timeline, createTimeline } from "./narrate-timeline.ts";
+import {
+  type Position,
+  SEEK_STEP_MS,
+  type Timeline,
+  clamp,
+  createTimeline,
+} from "./narrate-timeline.ts";
 import type { BlockKind, Cue, NarrationEvent } from "./narrate.ts";
 import { type SpeechModel, bytesToMs, msToBytes } from "./narrate-voice.ts";
 
@@ -116,8 +122,17 @@ export function createNarrationPlayer(options: NarrationPlayerOptions): Narratio
   const closed = new Set<number>();
   /** Sentences whose synthesis threw. Held so `r` can put them back rather than losing them. */
   const failed: PendingSentence[] = [];
-  /** Per Segment, its sentences' PCM in order. The Segment's audio is these, concatenated. */
-  const audio: Uint8Array[][] = [];
+  /** Sentences owed audio: queued, in flight, or held after a failure. Keyed `segment:sentence`. */
+  const owed = new Set<string>();
+  /**
+   * Per Segment, per sentence, that sentence's PCM chunks. `audio[segment][sentence]`.
+   *
+   * A slot per sentence rather than one flat list per Segment, because `r` has to be able to replace
+   * a sentence rather than append one. Flat, a synthesis that threw halfway left its truncated audio
+   * in place and the retry landed at the end of the Segment — so the listener heard the fragment
+   * where it belonged and the whole sentence again after everything that follows it.
+   */
+  const audio: Uint8Array[][][] = [];
   /** Segments whose notice the listener has already seen and chosen to go past. */
   const acknowledged = new Set<number>();
 
@@ -175,8 +190,7 @@ export function createNarrationPlayer(options: NarrationPlayerOptions): Narratio
    * failed synthesis is usually found several Segments ahead of the voice. Stopping immediately
    * would cut off a paragraph that is perfectly fine, and stopping silently would speak a Cue where
    * a description should have been with nothing to say so. "Do not surprise the ears."
-   */
-  /**
+   *
    * Measured from the anchor rather than from the live position, which is what makes it a barrier
    * at all. Asked "is there a bad Segment ahead of where I am *now*", it answers no the instant the
    * position steps over one — so the position steps over one. Asked from the anchor, which only
@@ -342,19 +356,25 @@ export function createNarrationPlayer(options: NarrationPlayerOptions): Narratio
     const out = new Uint8Array(Math.max(0, to - from));
     let written = 0;
     let base = 0;
-    for (let index = 0; index < audio.length && written < out.length; index++) {
-      for (const chunk of audio[index] ?? []) {
-        const chunkStart = base;
-        base += chunk.length;
-        if (base <= from) continue;
-        const take = chunk.subarray(
-          Math.max(0, from - chunkStart),
-          Math.max(0, Math.min(chunk.length, to - chunkStart)),
-        );
-        if (take.length === 0) continue;
-        out.set(take, written);
-        written += take.length;
-        if (written >= out.length) break;
+    for (let index = 0; index < audio.length; index++) {
+      let inSegment = 0;
+      const playable = timeline.lengthOf(index);
+      for (const chunks of audio[index] ?? []) {
+        if (inSegment >= playable) break;
+        for (const chunk of chunks ?? []) {
+          inSegment += chunk.length;
+          const chunkStart = base;
+          base += chunk.length;
+          if (base <= from) continue;
+          const take = chunk.subarray(
+            Math.max(0, from - chunkStart),
+            Math.max(0, Math.min(chunk.length, to - chunkStart)),
+          );
+          if (take.length === 0) continue;
+          out.set(take, written);
+          written += take.length;
+          if (written >= out.length) return out;
+        }
       }
     }
     return written === out.length ? out : out.subarray(0, written);
@@ -368,6 +388,7 @@ export function createNarrationPlayer(options: NarrationPlayerOptions): Narratio
 
   const enqueue = (item: PendingSentence): void => {
     queue.push(item);
+    owed.add(`${item.segment}:${item.sentence}`);
     // Synchronously, before the worker gets a turn. `r` re-queues a failed sentence and then
     // restarts the pump in the same tick; a `synthesized` still reading true for that one tick is
     // enough for the pump to decide the Narration is over and stop for good.
@@ -459,6 +480,26 @@ export function createNarrationPlayer(options: NarrationPlayerOptions): Narratio
     }
   }
 
+  /**
+   * How much of a Segment can be played: its sentences, in order, stopping at the first one that has
+   * no audio yet and is still owed some.
+   *
+   * The stop is what keeps the timeline honest while a Segment is being filled in out of order —
+   * which is what `r` does, re-synthesizing sentence two while three and four already have audio.
+   * Summing every slot instead would quietly pull the later sentences into the gap, so playback
+   * would speak sentence four where two belongs and then shift under itself when two arrived.
+   */
+  function playableLength(index: number): number {
+    let total = 0;
+    const sentences = audio[index] ?? [];
+    for (let at = 0; at < sentences.length; at++) {
+      const chunks = sentences[at] ?? [];
+      if (chunks.length === 0 && owed.has(`${index}:${at}`)) break;
+      for (const chunk of chunks) total += chunk.length;
+    }
+    return total;
+  }
+
   /** A Segment is ready when it has closed and nothing of it is still waiting to be spoken. */
   function markReady(index: number): void {
     const segment = segments[index];
@@ -469,19 +510,27 @@ export function createNarrationPlayer(options: NarrationPlayerOptions): Narratio
 
   async function speakOne(item: PendingSentence): Promise<void> {
     const digest = earCopyDigest(item.text, options.speech.voice, options.speech.engine);
-    const append = (pcm: Uint8Array): void => {
-      const bucket = (audio[item.segment] = audio[item.segment] ?? []);
-      bucket.push(pcm);
-      timeline.setLength(
-        item.segment,
-        bucket.reduce((sum, chunk) => sum + chunk.length, 0),
-      );
+    /** This sentence's slot, emptied first so a retry replaces what failed rather than following it. */
+    const slot = (): Uint8Array[] => {
+      const sentences = (audio[item.segment] = audio[item.segment] ?? []);
+      return (sentences[item.sentence] = sentences[item.sentence] ?? []);
+    };
+    const measure = (): void => {
+      timeline.setLength(item.segment, playableLength(item.segment));
       nudge();
       publish();
     };
+    const append = (pcm: Uint8Array): void => {
+      slot().push(pcm);
+      measure();
+    };
+
+    slot().length = 0;
+    measure();
 
     const cached = await options.cache?.read(item.segment, item.sentence, digest);
     if (cached && cached.length > 0) {
+      owed.delete(`${item.segment}:${item.sentence}`);
       append(cached);
       return;
     }
@@ -494,6 +543,10 @@ export function createNarrationPlayer(options: NarrationPlayerOptions): Narratio
         append(chunk);
       }
     } catch (error) {
+      // Whatever arrived before it threw is thrown away with it. Half a sentence is not something
+      // to speak, and leaving it would make the retry a second copy rather than the sentence.
+      slot().length = 0;
+      measure();
       // Held, not dropped: `r` puts it back on the queue, and the Segment is not spoken meanwhile.
       failed.push(item);
       ensureSegment(item.segment, {
@@ -503,6 +556,8 @@ export function createNarrationPlayer(options: NarrationPlayerOptions): Narratio
       publish();
       return;
     }
+    owed.delete(`${item.segment}:${item.sentence}`);
+    measure();
     await options.cache?.write(item.segment, item.sentence, digest, concat(chunks));
   }
 
@@ -612,10 +667,6 @@ function concat(chunks: readonly Uint8Array[]): Uint8Array {
     at += chunk.length;
   }
   return out;
-}
-
-function clamp(value: number, low: number, high: number): number {
-  return Math.min(Math.max(value, low), high);
 }
 
 function round(value: number): number {

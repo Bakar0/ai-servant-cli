@@ -106,7 +106,8 @@ export function createTimeline(): Timeline {
   };
 }
 
-function clamp(value: number, low: number, high: number): number {
+/** Shared with the Player, whose position is clamped against this module's own answers. */
+export function clamp(value: number, low: number, high: number): number {
   return Math.min(Math.max(value, low), high);
 }
 

@@ -511,6 +511,51 @@ describe("when a Segment cannot be spoken", () => {
     await player.stop();
   });
 
+  test("a retried sentence replaces what failed, in its own place", async () => {
+    const clock = fakeClock();
+    const audio = fakeSpeaker();
+    let attempts = 0;
+    // "Second." streams half a sentence and then throws; the retry produces the whole thing.
+    const speech = fakeSpeech({
+      async *speak(text: string) {
+        if (text !== "Second.") {
+          yield pcm(1);
+          return;
+        }
+        attempts += 1;
+        if (attempts === 1) {
+          yield pcm(7, SECOND / 2);
+          throw new Error("500 from the endpoint");
+        }
+        yield pcm(2);
+      },
+    });
+    const player = createNarrationPlayer({
+      events: scripted([
+        ...twoSegments(),
+        { type: "sentence", segment: 1, text: "Third." },
+        { type: "segment", segment: segment(1, "Second. Third.") },
+      ]),
+      speech,
+      speaker: audio.speaker,
+      ...clock,
+    });
+    for (let i = 0; i < 200 && !player.state().halted; i++) await clock.wait(20);
+    const runsAtHalt = audio.runs.length;
+    player.retry();
+    await settle(player, clock);
+
+    // What the retry actually plays: everything opened after `r`, which restarts at the head of the
+    // failed Segment. The half-sentence is gone from it, not sitting in place with the retried
+    // sentence appended after the sentence that follows it.
+    const afterRetry = concat(audio.runs.slice(runsAtHalt).flatMap((run) => run.written));
+    expect(afterRetry.length).toBe(2 * SECOND);
+    expect(afterRetry[10]).toBe(2);
+    expect(afterRetry[SECOND + 10]).toBe(1);
+    expect(afterRetry.includes(7)).toBe(false);
+    await player.stop();
+  });
+
   test("r retries the synthesis that failed", async () => {
     const clock = fakeClock();
     let attempts = 0;

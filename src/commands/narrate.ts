@@ -46,6 +46,12 @@ export const narrateCommand = defineCommand({
       description:
         "Choose the turn in an fzf picker. Paste a fragment copied off the terminal to find it; matching is exact, ^F makes it fuzzy.",
     },
+    find: {
+      type: "string",
+      required: false,
+      description:
+        "Open the picker on a fragment of the reply. Paste it here, in quotes, and the line breaks a terminal put through it are ironed out before it is searched for.",
+    },
     follow: {
       type: "boolean",
       required: false,
@@ -57,7 +63,7 @@ export const narrateCommand = defineCommand({
       type: "string",
       required: false,
       default: DEFAULT_NARRATION_VOICE,
-      description: `Speech voice (default: ${DEFAULT_NARRATION_VOICE}).`,
+      description: `Speech-API voice (default: ${DEFAULT_NARRATION_VOICE}). Not a \`say\` voice: --offline uses the system one.`,
     },
     offline: {
       type: "boolean",
@@ -66,11 +72,16 @@ export const narrateCommand = defineCommand({
       description:
         "Use macOS `say` and skip the rewrite. Chosen up front for the whole narration, never mid-stream: a voice that changed halfway would sound like a fault.",
     },
-    "no-cache": {
+    // Declared as `cache`, not `no-cache`, because citty reads `--no-x` as the negation of `x`: an
+    // arg literally named "no-cache" is set by `--no-no-cache` and is left alone by `--no-cache`,
+    // which quietly sets `cache: false` on an arg that does not exist. The flag on the command line
+    // is `--no-cache` either way; this is the declaration that makes it do something.
+    cache: {
       type: "boolean",
       required: false,
-      default: false,
-      description: "Synthesize everything afresh. For hearing a rewrite-prompt change immediately.",
+      default: true,
+      description:
+        "--no-cache synthesizes everything afresh. For hearing a rewrite-prompt change immediately.",
     },
     root: {
       type: "string",
@@ -118,8 +129,8 @@ export const narrateCommand = defineCommand({
     if (offline) {
       console.log(
         key
-          ? "servant: --offline — `say`, and the rules' own words rather than a rewrite."
-          : "servant: no OPENAI_API_KEY — falling back to `say` and the rules' own words.",
+          ? "servant: --offline — `say` in the system voice, and the rules' own words rather than a rewrite."
+          : "servant: no OPENAI_API_KEY — falling back to `say` in the system voice, and the rules' own words.",
       );
     }
 
@@ -145,7 +156,7 @@ export const narrateCommand = defineCommand({
         }),
         speech,
         speaker: createSoxSpeaker({ onLost: (message) => speakerDied(message) }),
-        ...(args["no-cache"] ? {} : { cache: openNarrationCache(session.sessionId, turn.uuid) }),
+        ...(args.cache ? { cache: openNarrationCache(session.sessionId, turn.uuid) } : {}),
         onState: (state) => view?.update(state),
       });
 
@@ -198,9 +209,12 @@ async function resolveSession(id: unknown): Promise<{ sessionId: string; jsonlPa
   return newest;
 }
 
-async function chooseTurn(turns: Turn[], args: { pick?: boolean; turn?: string }): Promise<Turn> {
-  if (args.pick) {
-    const picked = await pickTurn(turns);
+async function chooseTurn(
+  turns: Turn[],
+  args: { pick?: boolean; find?: string; turn?: string },
+): Promise<Turn> {
+  if (args.pick || args.find) {
+    const picked = await pickTurn(turns, args.find ? { query: args.find } : {});
     if (!picked) throw new Error("Nothing picked.");
     return picked;
   }
