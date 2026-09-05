@@ -41,6 +41,21 @@ export const PRIME_BYTES = msToBytes(300);
 /** How often the pump looks at the world while a run is playing. Well under the 200 ms gap budget. */
 const TICK_MS = 40;
 
+/**
+ * The pause after a Segment — the beat #1 left to this ticket to size, since the text half owns no
+ * timing and a heading arrives carrying nothing but its kind.
+ *
+ * Every Segment gets one, because paragraphs on a screen are separated by white space and read out
+ * as one continuous stream they run together into exactly the wall of words the listener was trying
+ * to escape. A heading gets a shorter one: it has just announced a section and the section should
+ * follow it, not wait.
+ *
+ * Silence rather than a timer, so it is part of the timeline like everything else — it seeks, it
+ * rewinds, and ±5s counts it. A pause the Transport could not move through would be a hole.
+ */
+export const PAUSE_AFTER_SEGMENT_MS = 480;
+export const PAUSE_AFTER_BEAT_MS = 300;
+
 /** One Segment, as the screen and the Transport see it. */
 export interface PlayerSegment {
   index: number;
@@ -135,6 +150,8 @@ export function createNarrationPlayer(options: NarrationPlayerOptions): Narratio
   const failed: PendingSentence[] = [];
   /** Sentences owed audio: queued, in flight, or held after a failure. Keyed `segment:sentence`. */
   const owed = new Set<string>();
+  /** Segments whose closing pause has been added, so it is added once and not once per sentence. */
+  const rested = new Set<number>();
   /**
    * Per Segment, per sentence, that sentence's PCM chunks. `audio[segment][sentence]`.
    *
@@ -517,6 +534,20 @@ export function createNarrationPlayer(options: NarrationPlayerOptions): Narratio
     if (!segment || !closed.has(index)) return;
     if (queue.some((item) => item.segment === index)) return;
     segment.ready = !failed.some((item) => item.segment === index);
+    if (segment.ready) rest(index, segment.kind);
+  }
+
+  /** The Segment has said everything it is going to say; give the listener a moment before the next. */
+  function rest(index: number, kind: BlockKind): void {
+    if (rested.has(index)) return;
+    rested.add(index);
+    const sentences = (audio[index] = audio[index] ?? []);
+    const ms = kind === "beat" ? PAUSE_AFTER_BEAT_MS : PAUSE_AFTER_SEGMENT_MS;
+    // Its own slot at the end, so it is never confused for a sentence that could be re-synthesized.
+    sentences.push([new Uint8Array(msToBytes(ms))]);
+    timeline.setLength(index, playableLength(index));
+    nudge();
+    publish();
   }
 
   async function speakOne(item: PendingSentence): Promise<void> {

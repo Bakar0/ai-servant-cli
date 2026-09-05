@@ -7,6 +7,8 @@ import { describe, expect, test } from "bun:test";
 import type { NarrationCache } from "../src/core/narrate-cache.ts";
 import type { NarrationSpeaker, PlaybackRun } from "../src/core/narrate-audio.ts";
 import {
+  PAUSE_AFTER_BEAT_MS,
+  PAUSE_AFTER_SEGMENT_MS,
   TEMPO_MAX,
   TEMPO_MIN,
   TEMPO_STEP,
@@ -290,9 +292,13 @@ describe("playback", () => {
     });
     await settle(player, clock);
     const heard = concat(audio.runs.flatMap((run) => run.written));
-    expect(heard.length).toBe(2 * SECOND);
+    const pause = msToBytes(PAUSE_AFTER_SEGMENT_MS);
+    // Two seconds of speech, and a moment to breathe at the end of each paragraph.
+    expect(heard.length).toBe(2 * SECOND + 2 * pause);
     expect(heard[0]).toBe(1);
-    expect(heard[SECOND + 10]).toBe(2);
+    expect(heard[SECOND + pause + 10]).toBe(2);
+    // The pause is silence in the timeline, not a hole in it.
+    expect(heard[SECOND + 10]).toBe(0);
     await player.stop();
   });
 
@@ -380,6 +386,46 @@ describe("the live position on screen", () => {
     const afterEverything = drawn.length;
     for (let i = 0; i < 20; i++) await clock.wait(50);
     expect(drawn.length).toBe(afterEverything);
+    await player.stop();
+  });
+});
+
+describe("room to breathe", () => {
+  test("a heading is followed by a shorter pause than a paragraph", async () => {
+    const clock = fakeClock();
+    const audio = fakeSpeaker();
+    const player = createNarrationPlayer({
+      events: scripted([
+        { type: "sentence", segment: 0, text: "Where it stands." },
+        { type: "segment", segment: segment(0, "Where it stands.", { kind: "beat" }) },
+        { type: "sentence", segment: 1, text: "Some prose." },
+        { type: "segment", segment: segment(1, "Some prose.") },
+      ]),
+      speech: fakeSpeech(),
+      speaker: audio.speaker,
+      ...clock,
+    });
+    await settle(player, clock);
+    const heard = concat(audio.runs.flatMap((run) => run.written));
+    // A heading has just announced a section; the section should follow it, not wait on it.
+    expect(heard.length).toBe(
+      2 * SECOND + msToBytes(PAUSE_AFTER_BEAT_MS) + msToBytes(PAUSE_AFTER_SEGMENT_MS),
+    );
+    expect(PAUSE_AFTER_BEAT_MS).toBeLessThan(PAUSE_AFTER_SEGMENT_MS);
+    await player.stop();
+  });
+
+  test("the pause is inside the timeline, so seeking moves through it", async () => {
+    const clock = fakeClock();
+    const player = createNarrationPlayer({
+      events: scripted(twoSegments()),
+      speech: fakeSpeech(),
+      speaker: fakeSpeaker().speaker,
+      ...clock,
+    });
+    await settle(player, clock);
+    // A pause the Transport could not move through would be a hole in the Narration.
+    expect(player.state().totalMs).toBeCloseTo(2000 + 2 * PAUSE_AFTER_SEGMENT_MS, 0);
     await player.stop();
   });
 });
@@ -539,7 +585,8 @@ describe("when a Segment cannot be spoken", () => {
     expect(player.state().halted).toContain("segment 1");
     expect(player.state().halted).toContain("path");
     expect(player.state().position.segment).toBe(1);
-    expect(player.state().positionMs).toBeCloseTo(1000, 0);
+    // Segment 0 is a second of speech and then its closing pause; the barrier is after both.
+    expect(player.state().positionMs).toBeCloseTo(1000 + PAUSE_AFTER_SEGMENT_MS, 0);
     await player.stop();
   });
 

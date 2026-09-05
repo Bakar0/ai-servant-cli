@@ -43,16 +43,29 @@ const SPEECH_URL = "https://api.openai.com/v1/audio/speech";
 
 /** Measured on this machine: PCM TTFB 0.68–1.90s, 3.5–5.0s in total for ~20s of speech. */
 export const DEFAULT_SPEECH_MODEL = "gpt-4o-mini-tts";
-export const DEFAULT_NARRATION_VOICE = "alloy";
 
 /**
- * How the words are delivered, which `gpt-4o-mini-tts` takes as a separate instruction from the
- * text. It says "narrator", because the model's default register is customer-service bright and a
- * Narration is somebody reading you your own screen.
+ * The Summons' voice, deliberately. It is the one already chosen for servant speaking out loud in
+ * this house, and a second speech feature that sounded like a different product for no reason would
+ * be a decision nobody made. `alloy`, the endpoint's own default, is the flattest of the thirteen.
  */
-export const NARRATION_STYLE =
-  "Read this as a colleague narrating what is on screen: even, unhurried, matter-of-fact. " +
-  "No brightness, no salesmanship, no rising question intonation on statements.";
+export const DEFAULT_NARRATION_VOICE = "marin";
+
+/**
+ * How the words are delivered, which `gpt-4o-mini-tts` takes as a separate instruction from the text.
+ *
+ * The first version of this asked for "even, unhurried, matter-of-fact — no brightness", aiming at
+ * the model's default customer-service register, and got exactly what it asked for: a screen reader.
+ * Flat is not the opposite of salesy. What a Narration wants is someone who has *read* the thing and
+ * is telling you about it, and that person varies their pace and leans on the words that matter.
+ */
+export const NARRATION_STYLE = [
+  "You are reading a colleague their own screen out loud, because they have stopped reading it.",
+  "Sound like someone who has read it and is telling them about it — not like someone reading it cold.",
+  "Vary the pace: slow on the clause that carries the point, brisker through the scaffolding around it.",
+  "Lean on the words that mean something, and let each sentence actually land at the full stop.",
+  "Warm, interested, and direct. Never bright, never selling, and never the flat even tone of a screen reader.",
+].join(" ");
 
 export interface OpenAiSpeechOptions {
   apiKey: string;
