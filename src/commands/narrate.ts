@@ -5,7 +5,11 @@ import { openNarrationCache, sweepNarrationCache } from "../core/narrate-cache.t
 import { acquirePlayerLock, playerLockHolder } from "../core/narrate-lock.ts";
 import { createOpenAiEarCopyModel } from "../core/narrate-model.ts";
 import { createNarrationPlayer } from "../core/narrate-player.ts";
-import { narrateTurnStream, newestSessionForCwd, turnsForCwd } from "../core/narrate-session.ts";
+import {
+  narrateTurnStream,
+  newestSessionForCwd,
+  turnsToPickFrom,
+} from "../core/narrate-session.ts";
 import { type Turn, readTurns } from "../core/narrate-turn.ts";
 import { createNarrationView } from "../core/narrate-view.ts";
 import {
@@ -45,6 +49,13 @@ export const narrateCommand = defineCommand({
       default: false,
       description:
         "Choose the turn in an fzf picker. Paste a fragment copied off the terminal to find it; matching is exact, ^F makes it fuzzy.",
+    },
+    anywhere: {
+      type: "boolean",
+      required: false,
+      default: false,
+      description:
+        "Widen --pick and --find to every session on this machine, rather than this workspace's. Still the most recent sessions first.",
     },
     find: {
       type: "string",
@@ -203,11 +214,16 @@ async function chooseTurn(args: {
   turn?: string;
   pick?: boolean;
   find?: string;
+  anywhere?: boolean;
 }): Promise<Turn> {
   if (args.pick || args.find) {
-    const turns = await turnsForCwd(process.cwd());
+    const turns = await turnsToPickFrom(process.cwd(), { anywhere: args.anywhere ?? false });
     if (turns.length === 0) throw new Error(noSessions());
-    const picked = await pickTurn(turns, args.find ? { query: args.find } : {});
+    const sessions = new Set(turns.map((turn) => turn.sessionId)).size;
+    const picked = await pickTurn(turns, {
+      ...(args.find ? { query: args.find } : {}),
+      header: `${turns.length} replies from ${sessions} session(s) ${args.anywhere ? "anywhere" : "in this workspace"} · paste a fragment, or a tab name · ^F fuzzy`,
+    });
     if (!picked) throw new Error("Nothing picked.");
     return picked;
   }

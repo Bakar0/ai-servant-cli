@@ -35,6 +35,8 @@ const FUZZY_TOGGLE = `ctrl-f:transform-query:q={q}; case "$q" in \\'*) printf %s
 
 export interface PickTurnOptions {
   prompt?: string;
+  /** Says what is being searched, since the scope is the difference between finding it and not. */
+  header?: string;
   /** A fragment to open the picker on, flattened first. What `--find` hands over. */
   query?: string;
   /** Injected by the suite. The default spawns the real fzf. */
@@ -94,7 +96,7 @@ export async function pickTurn(turns: Turn[], options: PickTurnOptions = {}): Pr
         "--preview-window=right,50%,wrap",
         ...(options.query ? [`--query=${flatten(options.query)}`] : []),
         `--prompt=${options.prompt ?? "narrate> "}`,
-        "--header=paste a fragment of the reply · ^F fuzzy · every session in this directory",
+        `--header=${options.header ?? "paste a fragment of the reply, or a tab name · ^F fuzzy"}`,
         "--height=90%",
         "--layout=reverse",
         "--border",

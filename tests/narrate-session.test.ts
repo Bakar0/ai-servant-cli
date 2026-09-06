@@ -9,22 +9,28 @@ import { join } from "node:path";
 import {
   narrateTurnStream,
   newestSessionForCwd,
-  turnsForCwd,
+  turnsToPickFrom,
 } from "../src/core/narrate-session.ts";
 import { readTurns } from "../src/core/narrate-turn.ts";
+import { encodeProjectDir } from "../src/core/claude-session.ts";
+import { setRootOverride } from "../src/core/paths.ts";
 import type { NarrationEvent } from "../src/core/narrate.ts";
 
 let dir = "";
 let projects = "";
+let servantRoot = "";
 
 beforeEach(async () => {
   dir = await mkdtemp(join(tmpdir(), "servant-narrate-session-"));
   projects = join(dir, "projects");
+  servantRoot = join(dir, "ai_servant");
   process.env.CLAUDE_PROJECTS_ROOT = projects;
+  setRootOverride(servantRoot);
 });
 
 afterEach(async () => {
   process.env.CLAUDE_PROJECTS_ROOT = undefined;
+  setRootOverride(null);
   await rm(dir, { recursive: true, force: true });
 });
 
@@ -92,7 +98,7 @@ describe("what the picker can reach", () => {
       said("newer question"),
       replied("Newer answer."),
     ]);
-    const turns = await turnsForCwd("/two/sessions");
+    const turns = await turnsToPickFrom("/two/sessions");
     expect(turns.map((turn) => turn.markdown)).toEqual(["Newer answer.", "Older answer."]);
   });
 
@@ -104,7 +110,9 @@ describe("what the picker can reach", () => {
       said("second"),
       replied("Two."),
     ]);
-    expect((await turnsForCwd("/ordered")).map((turn) => turn.markdown)).toEqual(["Two.", "One."]);
+    expect(
+      (await turnsToPickFrom("/ordered")).map((turn: { markdown: string }) => turn.markdown),
+    ).toEqual(["Two.", "One."]);
   });
 
   test("each Turn knows the session it was said in", async () => {
@@ -113,7 +121,7 @@ describe("what the picker can reach", () => {
       said("go"),
       replied("Answer."),
     ]);
-    expect((await turnsForCwd("/stamped"))[0]?.sessionId).toBe(
+    expect((await turnsToPickFrom("/stamped"))[0]?.sessionId).toBe(
       "dddddddd-0000-0000-0000-000000000000",
     );
   });
@@ -127,11 +135,73 @@ describe("what the picker can reach", () => {
       ]);
       await Bun.sleep(5);
     }
-    expect(await turnsForCwd("/many", { limit: 2 })).toHaveLength(2);
+    expect(await turnsToPickFrom("/many", { limit: 2 })).toHaveLength(2);
   });
 
   test("a directory with nothing in it is not an error", async () => {
-    expect(await turnsForCwd("/nothing/here")).toEqual([]);
+    expect(await turnsToPickFrom("/nothing/here")).toEqual([]);
+  });
+
+  test("a workspace is every repo worktree under it, not just the directory you stand in", async () => {
+    // What a servant workspace actually looks like to Claude Code: the workspace root is one
+    // project directory and every mounted repo worktree is another.
+    const root = join(servantRoot, "workspaces", "loadtest");
+    await write(
+      join(projects, encodeProjectDir(root), "aaaaaaaa-0000-0000-0000-000000000000.jsonl"),
+      [said("at the workspace root"), replied("Root answer.")],
+    );
+    await Bun.sleep(10);
+    await write(
+      join(
+        projects,
+        encodeProjectDir(join(root, "repos", "lab__at-main")),
+        "bbbbbbbb-0000-0000-0000-000000000000.jsonl",
+      ),
+      [said("in a worktree"), replied("Worktree answer.")],
+    );
+    const turns = await turnsToPickFrom(root);
+    expect(turns.map((turn) => turn.markdown)).toEqual(["Worktree answer.", "Root answer."]);
+  });
+
+  test("standing in the worktree still reaches the whole workspace", async () => {
+    const root = join(servantRoot, "workspaces", "loadtest2");
+    const worktree = join(root, "repos", "lab__at-main");
+    await write(
+      join(projects, encodeProjectDir(root), "cccccccc-0000-0000-0000-000000000000.jsonl"),
+      [said("root"), replied("Root answer.")],
+    );
+    await write(
+      join(projects, encodeProjectDir(worktree), "dddddddd-0000-0000-0000-000000000000.jsonl"),
+      [said("worktree"), replied("Worktree answer.")],
+    );
+    expect(await turnsToPickFrom(worktree)).toHaveLength(2);
+  });
+
+  test("outside a workspace, a directory is just itself", async () => {
+    await write(
+      join(projects, encodeProjectDir("/some/repo"), "eeeeeeee-0000-0000-0000-000000000000.jsonl"),
+      [said("go"), replied("Mine.")],
+    );
+    await write(
+      join(projects, encodeProjectDir("/some/other"), "ffffffff-0000-0000-0000-000000000000.jsonl"),
+      [said("go"), replied("Not mine.")],
+    );
+    expect((await turnsToPickFrom("/some/repo")).map((t) => t.markdown)).toEqual(["Mine."]);
+  });
+
+  test("--anywhere reaches sessions from any directory at all", async () => {
+    await write(
+      join(
+        projects,
+        encodeProjectDir("/somewhere/else"),
+        "99999999-0000-0000-0000-000000000000.jsonl",
+      ),
+      [said("go"), replied("Elsewhere.")],
+    );
+    const here = await turnsToPickFrom("/nothing/here");
+    const everywhere = await turnsToPickFrom("/nothing/here", { anywhere: true });
+    expect(here).toEqual([]);
+    expect(everywhere.some((turn) => turn.markdown === "Elsewhere.")).toBe(true);
   });
 });
 

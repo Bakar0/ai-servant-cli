@@ -7,6 +7,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  asAsked,
   flatten,
   followTurn,
   haystack,
@@ -171,6 +172,28 @@ describe("what counts as one Turn", () => {
       replied([{ type: "text", text: "Two." }]),
     ]);
     expect((await latestTurn(path))?.markdown).toBe("Two.");
+  });
+});
+
+describe("the question, as it was asked", () => {
+  test("a slash command reads as the command, not as its expansion", () => {
+    expect(
+      asAsked(
+        "<command-message>investigate-run</command-message> <command-name>/investigate-run</command-name> <command-args>33953434749</command-args>",
+      ),
+    ).toBe("/investigate-run 33953434749");
+  });
+
+  test("a command with no arguments is just the command", () => {
+    expect(
+      asAsked("<command-message>x</command-message> <command-name>/unslop</command-name>"),
+    ).toBe("/unslop");
+  });
+
+  test("anything a person actually typed is left alone", () => {
+    expect(asAsked("why is the picker not finding <this>?")).toBe(
+      "why is the picker not finding <this>?",
+    );
   });
 });
 

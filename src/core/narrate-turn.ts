@@ -55,6 +55,7 @@ interface Entry {
   isSidechain?: boolean;
   origin?: { kind?: string };
   customTitle?: string;
+  aiTitle?: string;
   message?: { role?: string; content?: unknown; stop_reason?: string | null };
 }
 
@@ -75,8 +76,12 @@ export async function readTurns(jsonlPath: string): Promise<Turn[]> {
   const sessionId = sessionIdOf(jsonlPath);
   let prompt = "";
   let open: Entry[] = [];
-  // Renaming a tab appends another one of these, so the last is the name it goes by now.
-  let sessionName = "";
+  // Two kinds of title, and a session has one or the other: `custom-title` is a name somebody chose
+  // and `ai-title` is one Claude Code wrote for the tab. Both are what a person sees on the tab, so
+  // both count; a chosen name wins where a session somehow has both. Renaming appends another
+  // record rather than replacing, so the last of each kind is the one in force.
+  let chosenName = "";
+  let generatedName = "";
 
   const close = (): void => {
     if (open.length === 0) return;
@@ -88,12 +93,15 @@ export async function readTurns(jsonlPath: string): Promise<Turn[]> {
   for await (const record of readJsonlLines(jsonlPath)) {
     const entry = record as Entry;
     if (entry.type === "custom-title" && typeof entry.customTitle === "string") {
-      sessionName = entry.customTitle;
+      chosenName = entry.customTitle;
+    }
+    if (entry.type === "ai-title" && typeof entry.aiTitle === "string") {
+      generatedName = entry.aiTitle;
     }
     if (entry.isSidechain) continue;
     if (entry.type === "user" && !entry.isMeta && isSpokenByTheUser(entry)) {
       close();
-      prompt = flatten(textOf(entry));
+      prompt = asAsked(flatten(textOf(entry)));
       continue;
     }
     if (entry.type === "assistant") open.push(entry);
@@ -101,6 +109,7 @@ export async function readTurns(jsonlPath: string): Promise<Turn[]> {
   close();
   // Stamped after the sweep rather than during it: a tab named halfway through a session is still
   // that session's name for the Turns before it.
+  const sessionName = chosenName || generatedName;
   return turns.map((turn) => ({ ...turn, sessionName }));
 }
 
@@ -355,6 +364,20 @@ function isSpokenByTheUser(entry: Entry): boolean {
       typeof (block as ContentBlock).text === "string" &&
       String((block as ContentBlock).text).trim().length > 0,
   );
+}
+
+/**
+ * A prompt as the person put it, for the picker to show.
+ *
+ * Invoking a slash command records the harness's expansion of it rather than the keystrokes:
+ * `<command-message>…</command-message> <command-name>/x</command-name> <command-args>…`. Shown
+ * raw, that is a row of XML where the question should be, and the rows are the whole point.
+ */
+export function asAsked(prompt: string): string {
+  const name = /<command-name>([^<]*)<\/command-name>/.exec(prompt)?.[1]?.trim();
+  if (!name) return prompt;
+  const args = /<command-args>([^<]*)<\/command-args>/.exec(prompt)?.[1]?.trim();
+  return args ? `${name} ${args}` : name;
 }
 
 function textOf(entry: Entry): string {

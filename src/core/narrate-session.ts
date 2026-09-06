@@ -1,6 +1,7 @@
 import { stat } from "node:fs/promises";
 import { join } from "node:path";
 import { claudeProjectsRoot, encodeProjectDir } from "./claude-session.ts";
+import { workspacesRoot } from "./paths.ts";
 import { type Turn, followTurn, readTurns } from "./narrate-turn.ts";
 import { type NarrateOptions, type NarrationEvent, narrateMarkdown } from "./narrate.ts";
 
@@ -54,25 +55,73 @@ export async function newestSessionForCwd(cwd: string): Promise<ResolvedSession 
 }
 
 /**
- * Every Turn worth picking from in a directory, newest first — across its sessions, not just the
- * newest one.
+ * The project directories a picker should look in.
  *
- * Narrating defaults to the newest Turn of the newest session, which is right for "read me that
- * back". Picking is the other gesture: you remember a reply and not which session it was in, and a
- * picker that could only reach the session you happen to be sitting in would be unable to find most
- * of what you would ask it for.
+ * A servant workspace is not one project directory. Every mounted repo worktree under `repos/` is
+ * its own directory as far as Claude Code is concerned, so one workspace fans out into a dozen of
+ * them and a picker scoped to the directory you are standing in cannot see the session in the tab
+ * next door. Scoped to the workspace, it can.
+ *
+ * Matching is on the encoded prefix, because `encodeProjectDir` is lossy and there is nothing to
+ * decode back. The cost of that is a sibling workspace whose name extends this one's — `foo-2`
+ * alongside `foo` — coming along too. Its rows say which session they are, so it shows.
  */
-export async function turnsForCwd(cwd: string, options: { limit?: number } = {}): Promise<Turn[]> {
-  const dir = join(claudeProjectsRoot(), encodeProjectDir(cwd));
-  const found: { path: string; mtimeMs: number }[] = [];
+export async function projectDirsToPickFrom(
+  cwd: string,
+  options: { anywhere?: boolean } = {},
+): Promise<string[]> {
+  const root = claudeProjectsRoot();
+  const names: string[] = [];
   try {
-    for await (const name of new Bun.Glob("*.jsonl").scan({ cwd: dir, onlyFiles: true })) {
-      const path = join(dir, name);
-      found.push({ path, mtimeMs: (await stat(path)).mtimeMs });
+    for await (const name of new Bun.Glob("*").scan({ cwd: root, onlyFiles: false, dot: true })) {
+      names.push(name);
     }
   } catch {
     return [];
   }
+  if (options.anywhere) return names.map((name) => join(root, name));
+
+  const prefix = encodeProjectDir(workspaceRootOf(cwd) ?? cwd);
+  return names
+    .filter((name) => name === prefix || name.startsWith(`${prefix}-`))
+    .map((name) => join(root, name));
+}
+
+/** The workspace a path is inside, if it is inside one. Everywhere else, a directory is itself. */
+function workspaceRootOf(cwd: string): string | null {
+  const root = workspacesRoot();
+  if (!cwd.startsWith(`${root}/`)) return null;
+  const name = cwd.slice(root.length + 1).split("/")[0];
+  return name ? join(root, name) : null;
+}
+
+/**
+ * Every Turn worth picking from, newest first — across the sessions of a whole workspace, not just
+ * the newest session of the directory you happen to be standing in.
+ *
+ * Narrating defaults to the newest Turn of the newest session, which is right for "read me that
+ * back". Picking is the other gesture: you remember a reply and not which session it was in, and a
+ * picker that could only reach one session would be unable to find most of what you would ask it
+ * for.
+ */
+export async function turnsToPickFrom(
+  cwd: string,
+  options: { limit?: number; anywhere?: boolean } = {},
+): Promise<Turn[]> {
+  const dirs = await projectDirsToPickFrom(cwd, options);
+  const found: { path: string; mtimeMs: number }[] = [];
+  for (const dir of dirs) {
+    try {
+      for await (const name of new Bun.Glob("*.jsonl").scan({ cwd: dir, onlyFiles: true })) {
+        const path = join(dir, name);
+        found.push({ path, mtimeMs: (await stat(path)).mtimeMs });
+      }
+    } catch {
+      // A directory that went away between the listing and now.
+    }
+  }
+  // Capped by modification time before anything is parsed, so widening the scope costs a `stat` per
+  // session and not a transcript read. There are hundreds of them on this machine.
   found.sort((a, b) => b.mtimeMs - a.mtimeMs);
 
   const turns: Turn[] = [];
