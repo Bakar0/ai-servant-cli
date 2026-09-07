@@ -5,7 +5,12 @@ import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, rm, utimes } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { acquirePlayerLock, playerLockHolder } from "../src/core/narrate-lock.ts";
+import {
+  acquirePlayerLock,
+  endPlayerLockHolder,
+  playerLockDetail,
+  playerLockHolder,
+} from "../src/core/narrate-lock.ts";
 import { cacheDir, narrateLockPath, setRootOverride } from "../src/core/paths.ts";
 
 let root = "";
@@ -82,5 +87,66 @@ describe("the player lock", () => {
 
   test("nobody holding it reads as free", async () => {
     expect(await playerLockHolder()).toBeNull();
+  });
+});
+
+describe("who is holding it", () => {
+  test("says what the holder is, so a pid is a way back to the tab", async () => {
+    await acquirePlayerLock({ pid: 111, ...everybodyIsAlive });
+    const held = await playerLockDetail({
+      ...everybodyIsAlive,
+      describe: () => "servant narrate --pick",
+    });
+    expect(held).toMatchObject({ pid: 111, command: "servant narrate --pick" });
+    expect(held?.since).toBeGreaterThan(0);
+  });
+
+  test("a system that will not say is not an error, only a quieter message", async () => {
+    await acquirePlayerLock({ pid: 111, ...everybodyIsAlive });
+    const held = await playerLockDetail({ ...everybodyIsAlive, describe: () => "" });
+    expect(held).toMatchObject({ pid: 111, command: "" });
+  });
+
+  test("nobody holding it has no detail either", async () => {
+    expect(await playerLockDetail()).toBeNull();
+  });
+});
+
+describe("taking the player from a Player that is still running", () => {
+  test("asks the holder to stop, rather than shooting it", async () => {
+    await acquirePlayerLock({ pid: 111, ...everybodyIsAlive });
+    const signalled: number[] = [];
+    await endPlayerLockHolder({
+      ...everybodyIsAlive,
+      signal: (pid) => signalled.push(pid),
+      wait: async () => {},
+    });
+    // A Player asked to stop kills its sox, releases the lock and puts the terminal back. None of
+    // that happens to a process that is shot.
+    expect(signalled).toEqual([111]);
+  });
+
+  test("waits for the holder to actually let go", async () => {
+    await acquirePlayerLock({ pid: 111, ...everybodyIsAlive });
+    let alive = true;
+    const ended = await endPlayerLockHolder({
+      alive: () => alive,
+      signal: () => {},
+      wait: async () => {
+        alive = false;
+      },
+    });
+    expect(ended).toBe(true);
+  });
+
+  test("a holder that will not go is reported rather than pretended about", async () => {
+    await acquirePlayerLock({ pid: 111, ...everybodyIsAlive });
+    expect(
+      await endPlayerLockHolder({ ...everybodyIsAlive, signal: () => {}, wait: async () => {} }),
+    ).toBe(false);
+  });
+
+  test("nothing to end is not a failure", async () => {
+    expect(await endPlayerLockHolder()).toBe(true);
   });
 });

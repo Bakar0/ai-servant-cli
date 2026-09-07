@@ -17,6 +17,14 @@ export interface PlayerLock {
   release(): Promise<void>;
 }
 
+/** Who holds the lock, and since when. */
+export interface LockHolder {
+  pid: number;
+  since: number;
+  /** The holder's command line, where the system will say. Empty when it will not. */
+  command: string;
+}
+
 /**
  * How long an unreadable lockfile is given the benefit of the doubt.
  *
@@ -31,6 +39,12 @@ export interface AcquireOptions {
   /** Injected by the suite. The default asks the operating system. */
   alive?: (pid: number) => boolean;
   pid?: number;
+  /** Injected by the suite; the default shells out to `ps`. */
+  describe?: (pid: number) => string;
+  /** Injected by the suite, so waiting for a holder to go is not waiting. */
+  wait?: (ms: number) => Promise<void>;
+  /** Injected by the suite. The one call here that reaches out and touches another process. */
+  signal?: (pid: number) => void;
 }
 
 /**
@@ -61,6 +75,57 @@ function processAlive(pid: number): boolean {
   } catch {
     return false;
   }
+}
+
+/**
+ * Who is holding it, in enough detail to do something about it.
+ *
+ * "Another narration is already playing (pid 69427)" is true and useless: the Player is in some
+ * terminal tab you have lost, and a pid on its own is not a way back to it. What it was started
+ * with and how long ago says which tab, and the caller turns that into a way out.
+ */
+export async function playerLockDetail(options: AcquireOptions = {}): Promise<LockHolder | null> {
+  const pid = await playerLockHolder(options);
+  if (pid === null) return null;
+  const since = await Bun.file(narrateLockPath())
+    .json()
+    .then((data: unknown) => (data as LockData).since ?? 0)
+    .catch(() => 0);
+  return { pid, since, command: options.describe ? options.describe(pid) : describeProcess(pid) };
+}
+
+/** Best effort, and empty rather than an error: this is decoration on a message, not a decision. */
+function describeProcess(pid: number): string {
+  try {
+    const out = Bun.spawnSync(["ps", "-p", String(pid), "-o", "command="]);
+    return new TextDecoder().decode(out.stdout).trim();
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * Ask the holder to stop, and wait for it to let go.
+ *
+ * SIGTERM rather than SIGKILL: a Player asked to stop kills its `sox`, releases the lock and puts
+ * the terminal back, and none of that happens to a process that is shot. Only if it will not go is
+ * the file cleared out from under it, and by then its pid is dead so nothing is being stolen.
+ */
+export async function endPlayerLockHolder(options: AcquireOptions = {}): Promise<boolean> {
+  const alive = options.alive ?? processAlive;
+  const holder = await playerLockHolder(options);
+  if (holder === null) return true;
+  try {
+    (options.signal ?? ((pid: number) => process.kill(pid, "SIGTERM")))(holder);
+  } catch {
+    // Already gone between the read and the signal.
+  }
+  const wait = options.wait ?? ((ms: number) => Bun.sleep(ms));
+  for (let attempt = 0; attempt < 20; attempt++) {
+    if (!alive(holder)) return true;
+    await wait(100);
+  }
+  return !alive(holder);
 }
 
 /** The pid holding the lock, or null when it is free. Used to say *who* rather than just "no". */

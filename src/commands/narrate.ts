@@ -2,7 +2,7 @@ import { defineCommand } from "citty";
 import { assertValidSessionId, findSessionJsonl } from "../core/claude-session.ts";
 import { createSoxSpeaker } from "../core/narrate-audio.ts";
 import { openNarrationCache, sweepNarrationCache } from "../core/narrate-cache.ts";
-import { acquirePlayerLock, playerLockHolder } from "../core/narrate-lock.ts";
+import { acquirePlayerLock, endPlayerLockHolder, playerLockDetail } from "../core/narrate-lock.ts";
 import { createOpenAiEarCopyModel } from "../core/narrate-model.ts";
 import { createNarrationPlayer } from "../core/narrate-player.ts";
 import {
@@ -49,6 +49,13 @@ export const narrateCommand = defineCommand({
       default: false,
       description:
         "Choose the turn in an fzf picker. Paste a fragment copied off the terminal to find it; matching is exact, ^F makes it fuzzy.",
+    },
+    "take-over": {
+      type: "boolean",
+      required: false,
+      default: false,
+      description:
+        "Stop the narration that is already playing and take the player. For the one you left running in a tab you have since lost.",
     },
     anywhere: {
       type: "boolean",
@@ -112,11 +119,14 @@ export const narrateCommand = defineCommand({
     // the right session, so the session it locked onto is the only way a mismatch is ever visible.
     console.log(`servant: narrating turn ${turn.index + 1} of session ${turn.sessionId}`);
 
-    const held = await playerLockHolder();
-    if (held !== null) {
-      throw new Error(
-        `Another narration is already playing (pid ${held}). Two players means two voices — quit that one first.`,
-      );
+    const held = await playerLockDetail();
+    if (held && args["take-over"]) {
+      console.log(`servant: ending the narration in pid ${held.pid}.`);
+      if (!(await endPlayerLockHolder())) {
+        throw new Error(`Player ${held.pid} would not stop. Try \`kill -9 ${held.pid}\`.`);
+      }
+    } else if (held) {
+      throw new Error(alreadyPlaying(held));
     }
     const lock = await acquirePlayerLock();
     if (!lock)
@@ -249,6 +259,21 @@ async function resolveSessionPath(id: string | undefined): Promise<string> {
   const newest = await newestSessionForCwd(process.cwd());
   if (!newest) throw new Error(noSessions());
   return newest.jsonlPath;
+}
+
+/**
+ * Why you cannot start one, and what to do about it — including the case this exists for, which is
+ * a Player still running in a terminal tab you no longer have. A pid on its own is true and
+ * useless; what it was started with is what tells you which tab to go and look in.
+ */
+function alreadyPlaying(held: { pid: number; since: number; command: string }): string {
+  const minutes = held.since ? Math.round((Date.now() - held.since) / 60_000) : 0;
+  return [
+    `Another narration has the player${minutes ? ` (${minutes} minute(s) ago)` : ""} — two players means two voices.`,
+    `  pid ${held.pid}${held.command ? `: ${held.command}` : ""}`,
+    "Quit it where it is running (q), or take the player from here:",
+    "  servant narrate --take-over …",
+  ].join("\n");
 }
 
 function noSessions(): string {
