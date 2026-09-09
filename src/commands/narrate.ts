@@ -11,6 +11,7 @@ import {
   turnsToPickFrom,
 } from "../core/narrate-session.ts";
 import { type Turn, readTurns } from "../core/narrate-turn.ts";
+import type { NarrationTerminal } from "../core/narrate-terminal.ts";
 import { createNarrationView } from "../core/narrate-view.ts";
 import {
   DEFAULT_NARRATION_VOICE,
@@ -150,14 +151,19 @@ export const narrateCommand = defineCommand({
     }
 
     const interactive = Boolean(process.stdout.isTTY && process.stdin.isTTY);
-    // Imported here rather than at the top of the file: this is the one module with a native
-    // dependency behind it, and every other `servant` command would pay OpenTUI's FFI load at
-    // startup for something only a Player on a terminal needs (as `summon` does).
-    const terminal = interactive
-      ? await (await import("../core/narrate-terminal.ts")).openNarrationTerminal()
-      : undefined;
+    // Declared out here and opened inside the `try`, so that a renderer which fails to start — no
+    // binary for this platform, a terminal it cannot drive — releases the lock on the way out
+    // rather than leaving the player claimed by a process that never played anything.
+    let terminal: NarrationTerminal | undefined;
 
     try {
+      // Imported here rather than at the top of the file: this is the one module with a native
+      // dependency behind it, and every other `servant` command would pay OpenTUI's FFI load at
+      // startup for something only a Player on a terminal needs (as `summon` does).
+      terminal = interactive
+        ? await (await import("../core/narrate-terminal.ts")).openNarrationTerminal()
+        : undefined;
+
       // Both halves are late-bound against each other: the view is built on the Player it drives,
       // and the Player publishes its first state while it is still being constructed.
       let view: ReturnType<typeof createNarrationView> | undefined;
@@ -182,18 +188,26 @@ export const narrateCommand = defineCommand({
       // and the room is silent. Turned into an ordinary halt, which is a thing on screen with an `r`.
       speakerDied = (message) => player.note(message);
 
-      view = terminal
+      // Held as a const so the closures below keep hold of the terminal that exists, rather than
+      // re-reading a binding that is allowed to be undefined.
+      const screen = terminal;
+      view = screen
         ? createNarrationView({
-            screen: terminal.screen,
+            screen: screen.screen,
             transport: player,
             title: { sessionId: turn.sessionId, turn: turn.index, prompt: turn.prompt },
-            width: () => terminal.width(),
+            width: () => screen.width(),
           })
         : undefined;
-      terminal?.attach((action) => view?.key(action));
+      screen?.attach((action) => view?.key(action));
       view?.update(player.state());
 
-      process.on("SIGINT", () => void player.stop());
+      // SIGHUP above all: it is what a closing terminal sends, and it is how a Player ends up
+      // holding the lock from a tab nobody can find any more. Without these the process dies before
+      // the `finally` below, leaving its lockfile behind and the terminal in raw mode.
+      for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {
+        process.on(signal, () => void player.stop());
+      }
 
       if (terminal) {
         // The Player stays up at the end of the Narration, so the last paragraph can be heard again
@@ -271,9 +285,24 @@ function alreadyPlaying(held: { pid: number; since: number; command: string }): 
   return [
     `Another narration has the player${minutes ? ` (${minutes} minute(s) ago)` : ""} — two players means two voices.`,
     `  pid ${held.pid}${held.command ? `: ${held.command}` : ""}`,
-    "Quit it where it is running (q), or take the player from here:",
-    "  servant narrate --take-over …",
+    "Quit it where it is running (press q), or run this to stop it and take the player:",
+    `  ${takeOverCommand()}`,
   ].join("\n");
+}
+
+/**
+ * The command the user just ran, with `--take-over` in it.
+ *
+ * Spelled out rather than left as "add --take-over": every other flag has to come along, and a
+ * hint you have to reassemble by hand is a hint about a hint. Read off argv, so it says `--pick`
+ * or `--find "…"` or whatever was actually asked for.
+ */
+function takeOverCommand(): string {
+  // Compiled, argv is [binary, "narrate", ...flags]; from source it is [bun, script, "narrate", …].
+  const at = process.argv.indexOf("narrate");
+  const flags = at >= 0 ? process.argv.slice(at + 1) : [];
+  const quoted = flags.map((flag) => (/[\s"']/.test(flag) ? JSON.stringify(flag) : flag));
+  return ["servant narrate --take-over", ...quoted].join(" ");
 }
 
 function noSessions(): string {
