@@ -87,6 +87,7 @@ export async function getOrComputeMetrics(
   if (cached && cached.mtimeMs === mtimeMs) return cached;
   const record = await extractSessionMetrics(jsonlPath, {
     sessionId,
+    backend: source.backend,
     readRecords: (file) => source.readRecords(file),
   });
   await writeMetric(record);

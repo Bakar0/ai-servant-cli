@@ -1,6 +1,7 @@
 import { existsSync } from "node:fs";
 import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { dirname, join, relative, resolve, sep } from "node:path";
+import { ensureCodexHooks, toCodexInstructions } from "./codex-setup.ts";
 import { ensureProjectIndex, renderWorkspaceKnowledgeSection } from "./knowledge.ts";
 import { aiServantRoot, workspacePath, workspacesRoot } from "./paths.ts";
 import {
@@ -173,6 +174,7 @@ export async function ensureWorkspaceDir(name: string): Promise<string> {
   // ADRs live here (created lazily by /domain-modeling); seed the dir so the layout is visible.
   await mkdir(join(dir, "docs", "adr"), { recursive: true });
   await ensureWorkspaceSettings(dir);
+  await ensureCodexHooks(dir);
   await syncWorkspaceConventions(name);
   return dir;
 }
@@ -305,9 +307,11 @@ async function buildWorkspaceAgentsMd(
   const agentSkills = renderAgentSkillsBlock(workspace).trim();
   const knowledge = await renderWorkspaceKnowledgeSection(repoSubdirs);
   const sections = [WORKSPACE_AGENTS_MD_HEADER];
-  if (rootConventions) sections.push(rootConventions);
-  if (goal) sections.push(`# Workspace goal (GOAL.md)\n\n${goal}`);
-  sections.push(agentSkills);
+  if (rootConventions) sections.push(toCodexInstructions(rootConventions));
+  // Translate the stock placeholder, but preserve user-authored goals and knowledge verbatim.
+  const renderedGoal = goal === GOAL_PLACEHOLDER.trim() ? toCodexInstructions(goal) : goal;
+  if (renderedGoal) sections.push(`# Workspace goal (GOAL.md)\n\n${renderedGoal}`);
+  sections.push(toCodexInstructions(agentSkills));
   sections.push(knowledge.trimEnd());
   return `${sections.join("\n\n")}\n`;
 }
@@ -351,9 +355,41 @@ export async function readWorkspaceAgent(workspace: string): Promise<string | nu
 /** Record the backend name this workspace is being driven with (idempotent). */
 export async function writeWorkspaceAgent(workspace: string, agent: string): Promise<void> {
   const path = workspaceAgentMarkerPath(workspace);
+  // The Claude registry cannot prove that a Codex claim is stale, even after switching back.
+  if (agent === "codex" || (await readWorkspaceAgent(workspace)) === "codex") {
+    await mkdir(dirname(path), { recursive: true });
+    await writeFile(join(dirname(path), "untracked-sessions"), "codex\n");
+  }
   if ((await readWorkspaceAgent(workspace)) === agent) return;
   await mkdir(dirname(path), { recursive: true });
   await writeFile(path, `${agent}\n`);
+}
+
+/** Workspaces where absence from Claude's registry cannot prove that a worker has ended. */
+export async function untrackedSessionWorkspaces(): Promise<string[]> {
+  let entries: string[];
+  try {
+    entries = await readdir(workspacesRoot());
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw err;
+  }
+  const untracked: string[] = [];
+  for (const entry of entries) {
+    const name = entry;
+    try {
+      assertValidWorkspaceName(name);
+    } catch {
+      continue;
+    }
+    if (
+      (await readWorkspaceAgent(name)) === "codex" ||
+      existsSync(join(workspacePath(name), ".servant", "untracked-sessions"))
+    ) {
+      untracked.push(name);
+    }
+  }
+  return untracked;
 }
 
 // True when the workspace's goal has not been defined yet (GOAL.md still carries the

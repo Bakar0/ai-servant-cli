@@ -62,7 +62,7 @@ describe("load/save round trip", () => {
     };
     await saveConfig(cfg);
     const loaded = await loadConfig();
-    expect(loaded).toEqual(cfg);
+    expect(loaded).toEqual({ ...cfg, defaultAgent: "claude-code" });
   });
 
   test("loadConfig defaults showTips to true when absent", async () => {

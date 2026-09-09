@@ -10,6 +10,7 @@ import { listWorkspaceSessions } from "./claude-session.ts";
 import { workspacePath } from "./paths.ts";
 import { type LiveSession, readLiveSessions } from "./session-registry.ts";
 import { handsSessionName, sessionNameSlug } from "./session-name.ts";
+import { untrackedSessionWorkspaces } from "./workspace.ts";
 
 export type WorkspaceSessionKind = "worker" | "hands" | "other";
 
@@ -67,6 +68,8 @@ export async function readWorkspaceSessions(
   workspace: string,
   deps: WorkspaceSessionsDeps = {},
 ): Promise<WorkspaceSessionsReport> {
+  if (!deps.live && (await untrackedSessionWorkspaces()).includes(workspace))
+    return { known: false };
   const live = await (deps.live ?? readLiveSessions)();
   if (!live.known || unreadable(live.sessions)) return { known: false };
   const root = workspacePath(workspace);
@@ -104,6 +107,8 @@ export async function readSessionLatest(
   name: string,
   deps: WorkspaceSessionsDeps & { transcripts?: typeof listWorkspaceSessions } = {},
 ): Promise<SessionLatestReport> {
+  if (!deps.live && (await untrackedSessionWorkspaces()).includes(workspace))
+    return { known: false };
   const live = await (deps.live ?? readLiveSessions)();
   if (!live.known) return { known: false };
   const root = workspacePath(workspace);

@@ -1,6 +1,8 @@
 import { existsSync, realpathSync } from "node:fs";
+import { mkdir } from "node:fs/promises";
 import { defineCommand } from "citty";
-import { DEFAULT_AGENT, getBackend } from "../agents/index.ts";
+import { getBackend } from "../agents/index.ts";
+import { sessionBackend } from "../core/session-backend.ts";
 import { getSessionSource } from "../core/session-source.ts";
 import { buildExtractionPrompt } from "../core/extract-prompt.ts";
 import {
@@ -17,9 +19,9 @@ import {
 import { readOverlayBody } from "../core/fine-tune.ts";
 import { headlessModelArgs } from "../core/headless-model.ts";
 import { commitKnowledge, reconcileAllIndexes } from "../core/knowledge.ts";
-import { applyRootOverride, knowledgeRoot, workspacesRoot } from "../core/paths.ts";
+import { aiServantRoot, applyRootOverride, knowledgeRoot, workspacesRoot } from "../core/paths.ts";
 import { servantReinvokeArgv } from "../core/self-exec.ts";
-import { detectWorkspaceNameFromCwd, readWorkspaceAgent } from "../core/workspace.ts";
+import { detectWorkspaceNameFromCwd } from "../core/workspace.ts";
 
 // Minimum transcript entries before a session is worth extracting from. A handful of
 // turns rarely contains a durable fact and isn't worth a headless run.
@@ -50,16 +52,6 @@ interface HookPayload {
 }
 
 /**
- * The backend that drives a given workspace (from its `.servant/agent` marker), defaulting to
- * Claude. Codex and Claude use the same SessionEnd hook payload shape, so a Codex session's job
- * flows through the same queue; the backend only decides how the transcript is read/counted and
- * which CLI the headless drain spawns.
- */
-async function backendForWorkspace(workspace: string | null): Promise<string> {
-  return (workspace ? await readWorkspaceAgent(workspace) : null) ?? DEFAULT_AGENT;
-}
-
-/**
  * `--from-hook`: instant, dumb enqueue. Reads the SessionEnd JSON payload on stdin,
  * applies the loop/cwd/size guards, appends a job, and kicks the drainer. NEVER spawns
  * claude and NEVER blocks session close — always resolves quickly.
@@ -70,7 +62,10 @@ async function backendForWorkspace(workspace: string | null): Promise<string> {
  * `SERVANT_INSIGHTS` is honored the same way so the insight-judging headless run (which sets it)
  * never triggers a memory extraction of itself either.
  */
-export async function runFromHook(stdin: string, opts: { kick?: boolean } = {}): Promise<void> {
+export async function runFromHook(
+  stdin: string,
+  opts: { kick?: boolean; agent?: string } = {},
+): Promise<void> {
   if (process.env.SERVANT_EXTRACTION || process.env.SERVANT_INSIGHTS) return; // servant's own run
 
   let payload: HookPayload;
@@ -80,16 +75,20 @@ export async function runFromHook(stdin: string, opts: { kick?: boolean } = {}):
     return; // malformed payload — silently ignore
   }
 
-  const cwd = payload.cwd ?? "";
-  const transcriptPath = payload.transcript_path ?? "";
-  const sessionId = payload.session_id ?? "";
+  if (!payload || typeof payload !== "object") return;
+  const cwd = typeof payload.cwd === "string" ? payload.cwd : "";
+  const transcriptPath = typeof payload.transcript_path === "string" ? payload.transcript_path : "";
+  const sessionId = typeof payload.session_id === "string" ? payload.session_id : "";
+  if (!sessionId) return;
   if (!cwd || !isUnder(cwd, workspacesRoot())) return; // non-servant session
   if (!transcriptPath || !existsSync(transcriptPath)) return;
   const workspace = detectWorkspaceNameFromCwd(cwd, workspacesRoot());
-  const source = getSessionSource(await backendForWorkspace(workspace));
-  if ((await source.countRecords(transcriptPath)) < MIN_ENTRIES) return;
+  const backend = await sessionBackend(transcriptPath, opts.agent);
+  const source = getSessionSource(backend);
+  if ((await source.countRecords(transcriptPath, MIN_ENTRIES)) < MIN_ENTRIES) return;
 
   await enqueueJob({
+    backend,
     session_id: sessionId,
     transcript_path: transcriptPath,
     workspace,
@@ -103,12 +102,15 @@ export async function runFromHook(stdin: string, opts: { kick?: boolean } = {}):
 /** Spawn a detached drainer. Best-effort — failure to kick just means it drains next time. */
 function kickDrainer(): void {
   try {
-    Bun.spawn([...servantReinvokeArgv(), "extract-memories", "--drain"], {
-      stdin: "ignore",
-      stdout: "ignore",
-      stderr: "ignore",
-      env: { ...process.env },
-    }).unref();
+    Bun.spawn(
+      [...servantReinvokeArgv(), "extract-memories", "--drain", "--root", aiServantRoot()],
+      {
+        stdin: "ignore",
+        stdout: "ignore",
+        stderr: "ignore",
+        env: { ...process.env },
+      },
+    ).unref();
   } catch {
     // ignore — non-fatal
   }
@@ -137,21 +139,25 @@ export function extractionArgv(prompt: string, backendName = "claude-code"): str
 }
 
 const defaultRunner: ExtractionRunner = async (job, prompt) => {
-  const backendName = await backendForWorkspace(job.workspace);
+  const backendName = await sessionBackend(job.transcript_path, job.backend);
+  await mkdir(knowledgeRoot(), { recursive: true });
   const proc = Bun.spawn(extractionArgv(prompt, backendName), {
-    cwd: job.cwd,
+    cwd: backendName === "codex" ? knowledgeRoot() : job.cwd,
     stdin: "ignore",
     stdout: "pipe",
     stderr: "pipe",
     env: { ...process.env, SERVANT_EXTRACTION: "1" },
   });
-  const code = await proc.exited;
+  const [code, output, err] = await Promise.all([
+    proc.exited,
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+  ]);
   if (code !== 0) {
-    const err = await new Response(proc.stderr).text();
     throw new Error(`${backendName} extraction exited ${code}: ${err.trim().slice(0, 200)}`);
   }
   // The prompt asks the agent to end with a one-line summary ("added/updated N notes").
-  const out = (await new Response(proc.stdout).text()).trim();
+  const out = output.trim();
   const lastLine = out.split("\n").findLast(Boolean) ?? "";
   return lastLine.slice(0, 200);
 };
@@ -183,7 +189,7 @@ export async function runDrain(
     await clearQueue();
     for (const job of jobs) {
       try {
-        const source = getSessionSource(await backendForWorkspace(job.workspace));
+        const source = getSessionSource(await sessionBackend(job.transcript_path, job.backend));
         const total = await source.countRecords(job.transcript_path);
         const fromTurn = await getMarker(job.session_id);
         if (total - fromTurn < 1) continue; // nothing new since last extraction
@@ -232,6 +238,10 @@ export const extractMemoriesCommand = defineCommand({
       "Capture durable knowledge from servant sessions into ~/.ai_servant/knowledge/. Internal modes wire the SessionEnd hook; --reconcile rebuilds indexes and commits.",
   },
   args: {
+    agent: {
+      type: "string",
+      description: "Producing backend for --from-hook: claude-code | codex.",
+    },
     "from-hook": {
       type: "boolean",
       required: false,
@@ -266,7 +276,7 @@ export const extractMemoriesCommand = defineCommand({
   async run({ args }) {
     applyRootOverride(args.root);
     if (args["from-hook"]) {
-      await runFromHook(await Bun.stdin.text());
+      await runFromHook(await Bun.stdin.text(), { agent: args.agent });
       return;
     }
     if (args.drain) {

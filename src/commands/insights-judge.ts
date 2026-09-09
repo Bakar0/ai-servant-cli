@@ -1,7 +1,7 @@
 import { existsSync, realpathSync } from "node:fs";
 import { stat } from "node:fs/promises";
 import { defineCommand } from "citty";
-import { DEFAULT_AGENT } from "../agents/index.ts";
+import { sessionBackend } from "../core/session-backend.ts";
 import { getSessionSource } from "../core/session-source.ts";
 import {
   type JudgeJob,
@@ -27,14 +27,9 @@ import {
   readJudgment,
   writeJudgment,
 } from "../core/insights/store.ts";
-import { applyRootOverride, workspacesRoot } from "../core/paths.ts";
+import { aiServantRoot, applyRootOverride, workspacesRoot } from "../core/paths.ts";
 import { servantReinvokeArgv } from "../core/self-exec.ts";
-import { detectWorkspaceNameFromCwd, readWorkspaceAgent } from "../core/workspace.ts";
-
-/** The backend that drives a workspace (its `.servant/agent` marker), defaulting to Claude. */
-async function backendForWorkspace(workspace: string | null): Promise<string> {
-  return (workspace ? await readWorkspaceAgent(workspace) : null) ?? DEFAULT_AGENT;
-}
+import { detectWorkspaceNameFromCwd } from "../core/workspace.ts";
 
 // The judgment pass (Tier 2 of the insights model) mirrors memory extraction: the SessionEnd hook
 // enqueues a job (instant), a lockfile-serialized drainer runs a headless `claude -p` that reads
@@ -74,7 +69,7 @@ interface HookPayload {
  */
 export async function runJudgeFromHook(
   stdin: string,
-  opts: { kick?: boolean } = {},
+  opts: { kick?: boolean; agent?: string } = {},
 ): Promise<void> {
   if (process.env.SERVANT_INSIGHTS || process.env.SERVANT_EXTRACTION) return; // servant's own run
 
@@ -85,16 +80,20 @@ export async function runJudgeFromHook(
     return; // malformed payload — silently ignore
   }
 
-  const cwd = payload.cwd ?? "";
-  const transcriptPath = payload.transcript_path ?? "";
-  const sessionId = payload.session_id ?? "";
+  if (!payload || typeof payload !== "object") return;
+  const cwd = typeof payload.cwd === "string" ? payload.cwd : "";
+  const transcriptPath = typeof payload.transcript_path === "string" ? payload.transcript_path : "";
+  const sessionId = typeof payload.session_id === "string" ? payload.session_id : "";
+  if (!sessionId) return;
   if (!cwd || !isUnder(cwd, workspacesRoot())) return; // non-servant session
   if (!transcriptPath || !existsSync(transcriptPath)) return;
   const workspace = detectWorkspaceNameFromCwd(cwd, workspacesRoot());
-  const source = getSessionSource(await backendForWorkspace(workspace));
-  if ((await source.countRecords(transcriptPath)) < MIN_ENTRIES) return;
+  const backend = await sessionBackend(transcriptPath, opts.agent);
+  const source = getSessionSource(backend);
+  if ((await source.countRecords(transcriptPath, MIN_ENTRIES)) < MIN_ENTRIES) return;
 
   await enqueueJudgeJob({
+    backend,
     session_id: sessionId,
     transcript_path: transcriptPath,
     workspace,
@@ -108,7 +107,7 @@ export async function runJudgeFromHook(
 /** Spawn a detached drainer. Best-effort — failure to kick just means it drains next time. */
 function kickDrainer(): void {
   try {
-    Bun.spawn([...servantReinvokeArgv(), "insights-judge", "--drain"], {
+    Bun.spawn([...servantReinvokeArgv(), "insights-judge", "--drain", "--root", aiServantRoot()], {
       stdin: "ignore",
       stdout: "ignore",
       stderr: "ignore",
@@ -147,7 +146,10 @@ export async function runJudgeDrain(
     for (const job of jobs) {
       try {
         const { mtimeMs } = await stat(job.transcript_path);
-        const record = await getOrComputeMetrics(job.transcript_path, mtimeMs);
+        const record = await getOrComputeMetrics(job.transcript_path, mtimeMs, {
+          source: getSessionSource(await sessionBackend(job.transcript_path, job.backend)),
+          sessionId: job.session_id,
+        });
         const existing = (await readJudgment(job.session_id))?.judgments ?? [];
         const toJudge = selectCandidatesToJudge(record.candidates, existing, cap);
         if (toJudge.length === 0) continue; // already judged (or no candidates) — idempotent no-op
@@ -186,6 +188,10 @@ export const insightsJudgeCommand = defineCommand({
       "Qualitatively judge a session's deterministic insight candidates (Tier 2). Internal modes wire the SessionEnd hook (--from-hook enqueues, --drain runs the headless pass).",
   },
   args: {
+    agent: {
+      type: "string",
+      description: "Producing backend for --from-hook: claude-code | codex.",
+    },
     "from-hook": {
       type: "boolean",
       required: false,
@@ -208,7 +214,7 @@ export const insightsJudgeCommand = defineCommand({
   async run({ args }) {
     applyRootOverride(args.root);
     if (args["from-hook"]) {
-      await runJudgeFromHook(await Bun.stdin.text());
+      await runJudgeFromHook(await Bun.stdin.text(), { agent: args.agent });
       return;
     }
     if (args.drain) {

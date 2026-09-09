@@ -28,7 +28,7 @@ export interface LaunchOptions {
   /**
    * Permission mode the session runs under. Read-only delegation uses this to spawn a session that
    * *cannot* write, which is what makes launching it without a spoken confirmation safe.
-   * Backends with no equivalent flag ignore it.
+   * Backends must enforce this constraint or reject an unsupported mode.
    */
   permissionMode?: string;
 }
@@ -54,7 +54,7 @@ export interface PromptsSpec {
   /**
    * Turn a servant command id (`goal`, `handoff`, …) into the filename the agent expects. Claude
    * namespaces via directory (`goal.md` → `/servant:goal`); Codex is flat and has no `:` namespace,
-   * so it prefixes the filename (`servant-goal.md` → `/servant-goal`).
+   * so it prefixes the filename (`servant-goal.md` -> `/prompts:servant-goal`).
    */
   filename(commandId: string): string;
 }

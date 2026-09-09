@@ -23,7 +23,11 @@ const DEFAULT_HEADLESS_MODEL: Record<string, string> = {
  */
 export function headlessModelArgs(backend = "claude-code"): string[] {
   const fallback = DEFAULT_HEADLESS_MODEL[backend] ?? "";
-  const raw = (process.env.SERVANT_HEADLESS_MODEL ?? fallback).trim();
+  const specific =
+    backend === "codex"
+      ? process.env.SERVANT_CODEX_HEADLESS_MODEL
+      : process.env.SERVANT_CLAUDE_HEADLESS_MODEL;
+  const raw = (specific ?? process.env.SERVANT_HEADLESS_MODEL ?? fallback).trim();
   if (raw === "" || raw === "default") return [];
   return ["--model", raw];
 }

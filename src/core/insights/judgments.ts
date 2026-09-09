@@ -1,10 +1,10 @@
-import { rm } from "node:fs/promises";
+import { mkdir, rm } from "node:fs/promises";
 import { join } from "node:path";
-import { DEFAULT_AGENT, getBackend } from "../../agents/index.ts";
+import { getBackend } from "../../agents/index.ts";
 import { headlessModelArgs } from "../headless-model.ts";
 import { registerHeadlessSession } from "../headless-sessions.ts";
-import { cacheDir, workspacesRoot } from "../paths.ts";
-import { detectWorkspaceNameFromCwd, readWorkspaceAgent } from "../workspace.ts";
+import { cacheDir } from "../paths.ts";
+import { sessionBackend } from "../session-backend.ts";
 import type { Candidate, CandidateKind, TranscriptAnchor } from "./metrics.ts";
 
 // Tier 2 of the insights model: a headless agent reads ONLY the anchored spans of a session's
@@ -185,7 +185,7 @@ Judge every candidate you can; omit any you genuinely cannot assess. Write ONLY 
  * can supply canned judgments without spawning `claude`.
  */
 export type JudgeRunner = (input: {
-  job: { transcript_path: string; cwd: string; session_id: string };
+  job: { transcript_path: string; cwd: string; session_id: string; backend?: string };
   candidates: Candidate[];
 }) => Promise<{ sessionId: string | null; judgments: Judgment[] }>;
 
@@ -212,8 +212,8 @@ export function judgeArgv(
 }
 
 export const defaultJudgeRunner: JudgeRunner = async ({ job, candidates }) => {
-  const workspace = detectWorkspaceNameFromCwd(job.cwd, workspacesRoot());
-  const backendName = (workspace ? await readWorkspaceAgent(workspace) : null) ?? DEFAULT_AGENT;
+  const backendName = await sessionBackend(job.transcript_path, job.backend);
+  await mkdir(cacheDir(), { recursive: true });
   const backend = getBackend(backendName);
   // `runId` names the temp output file. For `"session-id"` backends (Claude) it's also the headless
   // run's session id, registered up-front so the run is excluded from measurement even on a crash.
@@ -232,13 +232,13 @@ export const defaultJudgeRunner: JudgeRunner = async ({ job, candidates }) => {
     outPath,
   });
   const proc = Bun.spawn(judgeArgv(prompt, runId, backendName), {
-    cwd: job.cwd,
+    cwd: backendName === "codex" ? cacheDir() : job.cwd,
     stdin: "ignore",
     stdout: "ignore",
     stderr: "pipe",
     env: { ...process.env, SERVANT_INSIGHTS: "1" },
   });
-  const code = await proc.exited;
+  const [code, err] = await Promise.all([proc.exited, new Response(proc.stderr).text()]);
   let raw = "";
   try {
     raw = await Bun.file(outPath).text();
@@ -246,8 +246,7 @@ export const defaultJudgeRunner: JudgeRunner = async ({ job, candidates }) => {
     // agent wrote nothing
   }
   await rm(outPath, { force: true });
-  if (!raw) {
-    const err = await new Response(proc.stderr).text();
+  if (!raw || code !== 0) {
     throw new Error(`${backendName} judge exited ${code}: ${err.trim().slice(0, 200)}`);
   }
   return { sessionId: excludeId, judgments: parseJudgments(raw, candidates) };

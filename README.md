@@ -332,7 +332,7 @@ servant fine-tune <aspect> --reset    # revert an aspect to the shipped default
 
 ## In-session slash commands
 
-Every workspace ships with a set of `/servant:*` slash commands for Claude Code (synced into the workspace's `.claude/commands/`). Use them from inside the agent session:
+Every workspace uses the same servant command templates. Claude Code discovers `/servant:*` commands from the servant root; Codex receives `/prompts:servant-*` files in its prompts directory. Use them from inside the agent session:
 
 | Command | What it does |
 |---------|--------------|
@@ -344,7 +344,7 @@ Every workspace ships with a set of `/servant:*` slash commands for Claude Code 
 
 These stay in sync automatically - they're re-synced on every `spawn`/`resume`, so updating servant updates the commands in every workspace.
 
-Alongside these, every workspace has the **[mattpocock/skills](https://github.com/mattpocock/skills)** engineering skills installed (the `mattpocock-skills` plugin) — `/grill-me`, `/to-spec`, `/to-tickets`, `/implement`, `/tdd`, `/code-review`, and more. servant pre-configures them (via `docs/agents/`) to file tickets onto the board. See [The workflow & the board](#the-workflow--the-board).
+For Claude Code, initialization also installs the **[mattpocock/skills](https://github.com/mattpocock/skills)** engineering skills (the `mattpocock-skills` plugin): `/grill-me`, `/to-spec`, `/to-tickets`, `/implement`, `/tdd`, `/code-review`, and more. servant pre-configures them (via `docs/agents/`) to file tickets onto the board. See [The workflow & the board](#the-workflow--the-board).
 
 ---
 
@@ -355,6 +355,7 @@ Alongside these, every workspace has the **[mattpocock/skills](https://github.co
 ```jsonc
 {
   "version": 1,
+  "defaultAgent": "claude-code",      // claude-code | codex
   "repoSearchRoots": ["~"],            // where `repo add` looks for local git clones
   "hubRepo": "Barak-Zen/majordomo"     // the shared hub repo (the issue tracker)
 }
@@ -362,11 +363,70 @@ Alongside these, every workspace has the **[mattpocock/skills](https://github.co
 
 Narrow `repoSearchRoots` to the directories where you actually keep clones to make discovery faster and the picker shorter. Point `hubRepo` at your own `owner/name` to use a different hub. Edit the file directly — these values are never prompted for or clobbered on re-run.
 
+### Claude Code and Codex support
+
+Both backends use the same servant workflow templates, fine-tune overlays, board, worktrees,
+knowledge store, and insights queues. The adapters translate CLI flags, prompt references, and
+transcript formats. Choose the default once, or override it for a session:
+
+```bash
+servant init --agent codex
+servant spawn -w my-task -r
+servant spawn -w another-task --agent claude-code
+servant fine-tune --agent codex
+servant resume <session-id>
+```
+
+`defaultAgent` in `config.json` applies to new workspaces and global fine-tune sessions. Existing
+workspaces keep their last selected backend. Explicit `--agent` wins. Resuming a session records
+its actual backend for the next spawn. Workspace insights include history from both backends;
+use `--agent` to filter it.
+
+| Capability | Claude Code | Codex |
+|------------|-------------|-------|
+| Workspace instructions | `CLAUDE.md` with imports | `AGENTS.md` with translated, inlined content |
+| Servant commands | `/servant:goal`, `/servant:handoff`, etc. | `/prompts:servant-goal`, `/prompts:servant-handoff`, etc. |
+| Fine-tuning | Shared overlays | The same overlays, including existing workspace instructions after `--apply` |
+| Automatic capture and judgment | Workspace `SessionEnd` hooks | Workspace `.codex/hooks.json`, using the same queues |
+| History, resume, insights | Claude transcripts | Codex rollout JSONL, including current shell calls and token usage |
+| Read-only research | Claude plan mode | `read-only` sandbox with approval escalation disabled |
+| Named live workers and claim staleness | Claude registry | Unknown; held claims remain in flight until explicitly released |
+| Summons Hands and live steering | Implemented | Not implemented |
+| Engineering skills | Claude plugin installed during init | Install the same upstream skills separately for Codex |
+
+Codex hooks require a CLI that supports `SessionEnd`. Review and trust the generated hooks through
+Codex's `/hooks` interface. Servant does not bypass hook trust or edit global Codex configuration.
+Hook timing and trust are controlled by Codex, so a generated hooks file alone does not prove
+capture ran. See [Codex hooks](https://learn.chatgpt.com/docs/hooks).
+
+The current prompt-file integration is intentionally retained. OpenAI deprecates custom prompts
+in favor of skills, but still documents the `/prompts:<name>` syntax. Restart Codex or open a new
+chat after prompt updates. See [custom prompts](https://learn.chatgpt.com/docs/custom-prompts).
+For a throwaway `--root`, set `CODEX_HOME` to a throwaway directory too if you want prompts installed;
+otherwise servant writes fallback prompts under `<root>/codex/prompts/` for its launch prompts to read directly. Slash-menu discovery still requires `CODEX_HOME`.
+
+The upstream `mattpocock-skills` plugin is Claude-only. Its
+[installation guidance](https://github.com/mattpocock/skills/blob/main/.agents/install-block.md)
+uses `npx skills@latest add mattpocock/skills` for Codex. Select Codex and the required engineering
+skills, including `setup-matt-pocock-skills`. A Claude plugin installation does not install them
+for Codex.
+
+A workspace that has used Codex remains conservative about claim liveness even after switching
+back to Claude, because its older Codex workers may still be running. Finish or explicitly release
+those claims with `servant claim <n> --release --session <name>`; absence from Claude's registry is
+never treated as proof that they ended. Codex `--name` and fast mode are not implemented by servant.
+
+Codex headless passes run ephemerally inside a `workspace-write` sandbox, with the output store as
+their working directory and `--skip-git-repo-check` for servant's non-git directories. They inherit
+the user's Codex model unless a headless model override is set.
+
 ### Environment variables
 
 | Variable | Default | What it does |
 |----------|---------|--------------|
-| `SERVANT_HEADLESS_MODEL` | `sonnet` | Model for servant's two *headless* `claude -p` passes (memory extraction + insight judgment), which fire unattended on `SessionEnd`. Set to a model name to override, or to `default` (or empty) to inherit your Claude Code default. **Interactive spawns (`servant spawn`, `servant fine-tune`) always use your default model - this never touches them.** |
+| `SERVANT_HEADLESS_MODEL` | Claude: `sonnet`; Codex: configured model | Shared fallback for memory extraction and judgment. `default` or empty inherits the agent's model. Interactive sessions are unaffected. |
+| `SERVANT_CLAUDE_HEADLESS_MODEL` | Shared fallback | Claude-specific override, taking precedence over `SERVANT_HEADLESS_MODEL`. |
+| `SERVANT_CODEX_HEADLESS_MODEL` | Shared fallback | Codex-specific override. Set to `default` when the shared variable contains a Claude model alias. |
 
 ---
 

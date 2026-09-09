@@ -7,6 +7,8 @@ import { claimTicket, releaseTicketClaim } from "./claims.ts";
 import { type SessionLiveness, readSessionLiveness } from "./session-registry.ts";
 import { sessionNameSlug } from "./session-name.ts";
 import { launchWorkspaceSession } from "./spawn.ts";
+import { getSessionSource } from "./session-source.ts";
+import { untrackedSessionWorkspaces } from "./workspace.ts";
 import type {
   DelegationHandle,
   DelegationReport,
@@ -122,7 +124,15 @@ export function createSummonsActions(deps: SummonsActionsDeps): SummonsActions {
   const launch = deps.launch ?? launchWorkspaceSession;
   const claim = deps.claim ?? claimTicket;
   const release = deps.release ?? releaseTicketClaim;
-  const listSessions = deps.listSessions ?? listWorkspaceSessions;
+  const listSessions =
+    deps.listSessions ??
+    (async (opts) => {
+      const sessions = await Promise.all([
+        getSessionSource("claude-code").listWorkspaceSessions(opts),
+        getSessionSource("codex").listWorkspaceSessions(opts),
+      ]);
+      return sessions.flat().toSorted((a, b) => b.mtimeMs - a.mtimeMs);
+    });
   const liveness = deps.liveness ?? readSessionLiveness;
 
   return {
@@ -154,7 +164,10 @@ export function createSummonsActions(deps: SummonsActionsDeps): SummonsActions {
     },
 
     async observe(handle: DelegationHandle): Promise<DelegationReport> {
-      const live = await liveness(handle.sessionName);
+      const live =
+        !deps.liveness && (await untrackedSessionWorkspaces()).includes(deps.workspace)
+          ? { known: false as const }
+          : await liveness(handle.sessionName);
       const sessions = await listSessions({ workspaceName: deps.workspace });
       const meta = sessions.find((s) => s.firstUserMessage?.includes(marker(handle.sessionName)));
       const latest = meta?.lastAssistantMessage?.trim() ?? null;

@@ -1,5 +1,6 @@
 import { defineCommand } from "citty";
 import { getBackend } from "../agents/index.ts";
+import { loadConfig } from "../core/config.ts";
 import { ensureCodexAssets } from "../core/codex-setup.ts";
 import { ensureServantAssets } from "../core/claude-setup.ts";
 import { type CmuxLiveState, readCmuxLiveStates } from "../core/cmux-sessions.ts";
@@ -10,6 +11,7 @@ import {
   ensureWorkspaceDir,
   readWorkspaceAgent,
   resolveWorkspaceName,
+  writeWorkspaceAgent,
 } from "../core/workspace.ts";
 import { detectTerminal, getDriver } from "../terminals/index.ts";
 import { pickSession } from "../ui/resume-picker.ts";
@@ -99,6 +101,7 @@ export const resumeCommand = defineCommand({
   async run({ args }) {
     applyRootOverride(args.root);
     const explicitBackend = (args.agent as string | undefined)?.trim() || undefined;
+    if (explicitBackend) getBackend(explicitBackend);
     if (typeof args.preview === "string" && args.preview.length > 0) {
       await renderPreviewToStdout(args.preview, getSessionSource(explicitBackend));
       return;
@@ -117,6 +120,7 @@ export const resumeCommand = defineCommand({
       const backend =
         explicitBackend ??
         (workspaceName ? await readWorkspaceAgent(workspaceName) : null) ??
+        (await loadConfig()).defaultAgent ??
         "claude-code";
       source = getSessionSource(backend);
       const picked = await pickSession({ workspaceName: workspaceName ?? undefined, source });
@@ -148,10 +152,12 @@ export const resumeCommand = defineCommand({
     const prompt = args.prompt as string | undefined;
     const backend = getBackend(source.backend);
 
-    if (workspaceTitle && isUnderWorkspacesRoot(launchCwd)) {
-      await ensureWorkspaceDir(workspaceTitle);
-    }
     await ensureServantAssets();
+    const actualWorkspace = detectWorkspaceNameFromCwd(launchCwd, workspacesRoot());
+    if (actualWorkspace) {
+      await ensureWorkspaceDir(actualWorkspace);
+      await writeWorkspaceAgent(actualWorkspace, backend.name);
+    }
     if (backend.name === "codex") await ensureCodexAssets();
 
     const newTab = args["new-tab"];
