@@ -109,29 +109,29 @@ describe("codexAgent.launchCommand", () => {
   });
 
   test("appends prompt as a single-quoted positional argument", () => {
-    expect(codexAgent.launchCommand("/x", { prompt: "do a thing" })).toBe("codex 'do a thing'");
+    expect(codexAgent.launchCommand("/x", { prompt: "do a thing" })).toBe("codex -- 'do a thing'");
   });
 
   test("safely escapes prompts with shell metacharacters", () => {
     expect(
       codexAgent.launchCommand("/x", { prompt: `read briefs/foo.md; echo "hi" $(rm -rf /)` }),
-    ).toBe(`codex 'read briefs/foo.md; echo "hi" $(rm -rf /)'`);
+    ).toBe(`codex -- 'read briefs/foo.md; echo "hi" $(rm -rf /)'`);
   });
 
-  test("gives each dir its own repeatable --add-dir flag, no `--` terminator", () => {
+  test("gives each dir its own repeatable --add-dir flag and protects the positional prompt", () => {
     // Codex's `--add-dir <DIR>` is single-valued + repeatable (not variadic like Claude's), so
-    // the positional prompt can follow directly without a `--` separator.
+    // a `--` separator also protects prompts starting with a hyphen.
     expect(
       codexAgent.launchCommand("/x", {
         prompt: "analyze insights",
         addDirs: ["/home/u/.codex/sessions", "/other"],
       }),
-    ).toBe("codex --add-dir '/home/u/.codex/sessions' --add-dir '/other' 'analyze insights'");
+    ).toBe("codex --add-dir '/home/u/.codex/sessions' --add-dir '/other' -- 'analyze insights'");
   });
 
   test("ignores blank add-dir entries", () => {
     expect(codexAgent.launchCommand("/x", { prompt: "go", addDirs: ["", "  "] })).toBe(
-      "codex 'go'",
+      "codex -- 'go'",
     );
   });
 
@@ -214,11 +214,12 @@ describe("claudeCodeAgent backend surface", () => {
 describe("codexAgent backend surface", () => {
   test("resumeCommand / resumeArgv use `codex resume <id> [prompt]`", () => {
     expect(codexAgent.resumeCommand("abc-123")).toBe("codex resume 'abc-123'");
-    expect(codexAgent.resumeCommand("abc-123", "go on")).toBe("codex resume 'abc-123' 'go on'");
+    expect(codexAgent.resumeCommand("abc-123", "go on")).toBe("codex resume 'abc-123' -- 'go on'");
     expect(codexAgent.resumeArgv("abc-123", "go on")).toEqual([
       "codex",
       "resume",
       "abc-123",
+      "--",
       "go on",
     ]);
   });
@@ -240,9 +241,14 @@ describe("codexAgent backend surface", () => {
       "--model",
       "gpt-5.1-codex",
       "--ephemeral",
-      "--dangerously-bypass-approvals-and-sandbox",
+      "--skip-git-repo-check",
+      "--sandbox",
+      "workspace-write",
+      "-c",
+      'approval_policy="never"',
       "--add-dir",
       "/k",
+      "--",
       "PROMPT",
     ]);
     // prompt must be the final (positional) arg so it is not parsed as a flag value

@@ -1,3 +1,5 @@
+import { getAgent } from "../agents/index.ts";
+import { ensureCodexAssets } from "../core/codex-setup.ts";
 import { mkdir } from "node:fs/promises";
 import { defineCommand } from "citty";
 import { ensureServantAssets } from "../core/claude-setup.ts";
@@ -14,6 +16,7 @@ import { confirm } from "../ui/prompts.ts";
 import { STATUSLINE_EXAMPLE, installStatusline } from "./statusline.ts";
 
 export type InitOpts = {
+  agent?: string | undefined;
   /** Root directory (default: ~/.ai_servant). Supports a leading `~`. For throwaway/test roots. */
   root?: string | undefined;
   /** Non-interactive: accept defaults, don't prompt, skip statusline. */
@@ -34,6 +37,7 @@ export type InitOpts = {
  * optionally install the Claude Code status line. Safe to run multiple times.
  */
 export async function runInit(opts: InitOpts = {}): Promise<void> {
+  if (opts.agent) getAgent(opts.agent);
   const out = opts.output ?? process.stderr;
   const interactive = opts.interactive ?? (Boolean(process.stdin.isTTY) && !opts.yes);
   const confirmFn =
@@ -64,20 +68,30 @@ export async function runInit(opts: InitOpts = {}): Promise<void> {
     );
   }
 
+  if (opts.agent) {
+    cfg.defaultAgent = opts.agent as "claude-code" | "codex";
+    await saveConfig(cfg);
+  }
+
   // --- Deterministic assets (CLI-owned; self-heal on every spawn/resume too). ---
   await ensureServantAssets();
+  if (cfg.defaultAgent === "codex") await ensureCodexAssets();
   out.write(
-    "servant: synced workspace assets (CLAUDE.md, /servant:goal, /servant:recall, /servant:extract-memories, /servant:fine-tune, knowledge SessionEnd hook)\n",
+    "servant: synced shared conventions and command templates. Workspace instructions and SessionEnd hooks refresh on spawn/resume.\n",
   );
 
   // --- Hub + skills (network; only against the real root, best-effort). ---
   if (isDefaultRoot()) {
     await ensureHubClone(cfg.hubRepo, (s) => out.write(`${s}\n`));
-    await ensurePluginInstalled((s) => out.write(`${s}\n`));
+    if (cfg.defaultAgent !== "codex") await ensurePluginInstalled((s) => out.write(`${s}\n`));
+    else
+      out.write(
+        "servant: Codex prompts synced. Install any external engineering skills separately for Codex.\n",
+      );
   }
 
   // --- Status line (offered, with a preview). ---
-  if (interactive) {
+  if (interactive && cfg.defaultAgent !== "codex") {
     out.write(`\n${STATUSLINE_EXAMPLE}`);
     if (await confirmFn("Install it now?", false)) {
       await installStatusline((s) => out.write(`${s}\n`));
@@ -99,6 +113,11 @@ export const initCommand = defineCommand({
       "Set up servant: create the root (~/.ai_servant), write config.json, sync assets, and optionally install the status line. Idempotent.",
   },
   args: {
+    agent: {
+      type: "string",
+      description:
+        "Default backend: claude-code | codex. Preserves the current choice when omitted.",
+    },
     root: {
       type: "string",
       required: false,
@@ -121,6 +140,7 @@ export const initCommand = defineCommand({
   },
   async run({ args }) {
     await runInit({
+      agent: args.agent,
       root: args.root as string | undefined,
       yes: Boolean(args.yes),
       force: Boolean(args.force),

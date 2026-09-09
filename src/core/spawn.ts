@@ -2,7 +2,9 @@ import { DEFAULT_AGENT, getAgent } from "../agents/index.ts";
 import { detectTerminal, getDriver } from "../terminals/index.ts";
 import { ensureServantAssets } from "./claude-setup.ts";
 import { ensureCodexAssets } from "./codex-setup.ts";
+import { toCodexInstructions } from "./codex-setup.ts";
 import { requireInit } from "./config.ts";
+import { codexPromptsDir } from "./paths.ts";
 import {
   ensureWorkspaceDir,
   isGoalUnfilled,
@@ -52,7 +54,7 @@ export interface LaunchedWorkspaceSession {
 export async function launchWorkspaceSession(
   opts: LaunchWorkspaceSessionOptions,
 ): Promise<LaunchedWorkspaceSession> {
-  await requireInit();
+  const config = await requireInit();
   await ensureServantAssets();
   const workspace = await resolveWorkspaceName(opts.workspace);
   const cwd = await ensureWorkspaceDir(workspace);
@@ -64,7 +66,11 @@ export async function launchWorkspaceSession(
   // Resolve the backend: an explicit agent wins; otherwise reuse whatever this workspace was
   // last launched with (so a Codex workspace stays Codex), then fall back to the default. Record
   // the choice so future launches inherit it.
-  const agentName = opts.agent?.trim() || (await readWorkspaceAgent(workspace)) || DEFAULT_AGENT;
+  const agentName =
+    opts.agent?.trim() ||
+    (await readWorkspaceAgent(workspace)) ||
+    config.defaultAgent ||
+    DEFAULT_AGENT;
   const agent = getAgent(agentName);
   await writeWorkspaceAgent(workspace, agent.name);
   // Codex discovers its slash-command prompts from ~/.codex/prompts; install servant's there.
@@ -72,10 +78,16 @@ export async function launchWorkspaceSession(
   // A blank prompt counts as no task, not an empty first message — `servant spawn -repo`
   // parses as the short-flag cluster `-r -e -p -o`, which sets `-p` to "".
   const task = opts.prompt?.trim() ? opts.prompt : undefined;
-  const prompt = task ?? (goalUnfilled ? GOAL_BOOTSTRAP_PROMPT : undefined);
+  const prompt =
+    task ??
+    (goalUnfilled
+      ? agent.name === "codex"
+        ? `This servant workspace has no goal defined yet. Read ${codexPromptsDir()}/servant-goal.md and follow the /prompts:servant-goal workflow to interview me and define GOAL.md before doing anything else.`
+        : GOAL_BOOTSTRAP_PROMPT
+      : undefined);
   const sessionName = opts.sessionName?.trim() || undefined;
   const command = agent.launchCommand(cwd, {
-    prompt,
+    prompt: !task && prompt && agent.name === "codex" ? toCodexInstructions(prompt) : prompt,
     sessionName,
     permissionMode: opts.permissionMode,
     ...(opts.fastMode ? { fastMode: true } : {}),
@@ -86,5 +98,11 @@ export async function launchWorkspaceSession(
   // tab after the session would scatter every Worker into a cmux workspace of its own.
   await driver.openTab({ cwd, command, title: workspace });
 
-  return { workspace, cwd, terminal: driver.name, command, sessionName: sessionName ?? null };
+  return {
+    workspace,
+    cwd,
+    terminal: driver.name,
+    command,
+    sessionName: agent.name === "codex" ? null : (sessionName ?? null),
+  };
 }

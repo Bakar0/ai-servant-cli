@@ -1,7 +1,7 @@
 import { defineCommand } from "citty";
 import type { Ticket, TicketState } from "../core/board/store.ts";
 import { applyRootOverride } from "../core/paths.ts";
-import { readLiveSessionNames } from "../core/session-registry.ts";
+import { readClaimLiveness } from "../core/tasks.ts";
 import {
   type ClaimLiveness,
   blockerLabel,
@@ -73,10 +73,8 @@ export const tasksCommand = defineCommand({
       const all = readTasks();
       const byId = new Map(all.map((t) => [t.id, t]));
       // A directory scan, never a question put to a session (workspace ADR 0010, decision 3).
-      const live = await readLiveSessionNames();
-      const liveness: ClaimLiveness = live.known
-        ? { known: true, liveSessions: live.names }
-        : { known: false };
+      const live = await readClaimLiveness();
+      const liveness: ClaimLiveness = live;
       const { ready, stale, inFlight, blocked } = computeFrontier(all, liveness, {
         workspace: args.ws,
       });

@@ -8,6 +8,8 @@ import { cacheDir, judgeLockPath, judgeQueuePath, judgeStatusPath } from "../pat
 // per-session judgment record itself (an anchor is judged at most once), so this queue stays thin.
 
 export interface JudgeJob {
+  /** Producing backend, pinned at enqueue time. Optional for pre-upgrade queues. */
+  backend?: string;
   session_id: string;
   transcript_path: string;
   workspace: string | null;

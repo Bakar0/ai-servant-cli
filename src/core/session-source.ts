@@ -11,6 +11,7 @@ import {
   readSessionMeta,
 } from "./claude-session.ts";
 import { codexSessionSource } from "./codex-session.ts";
+import { getBackend } from "../agents/index.ts";
 
 // A backend-agnostic view over a coding agent's on-disk session store. Claude reads
 // `~/.claude/projects/<enc-cwd>/<uuid>.jsonl`; Codex reads `~/.codex/sessions/**/rollout-*.jsonl`.
@@ -43,7 +44,7 @@ export interface SessionSource {
    */
   readRecords(file: string): AsyncGenerator<{ record: unknown; line: number }>;
   /** Count parseable records (the unit the extraction turn-marker advances over). */
-  countRecords(file: string): Promise<number>;
+  countRecords(file: string, limit?: number): Promise<number>;
 }
 
 const claudeSessionSource: SessionSource = {
@@ -62,7 +63,8 @@ const claudeSessionSource: SessionSource = {
 // think in terms of "the session store" don't reach back into claude-session.ts directly.
 export { claudeProjectsRoot };
 
-/** Resolve the session source for a backend. Unknown backends fall back to Claude (back-compat). */
+/** Resolve a backend's transcript adapter. Reject typos instead of reading the wrong store. */
 export function getSessionSource(backend: string | null | undefined): SessionSource {
+  if (backend) getBackend(backend);
   return backend === "codex" ? codexSessionSource : claudeSessionSource;
 }

@@ -1,6 +1,7 @@
 import { stat } from "node:fs/promises";
 import { defineCommand } from "citty";
 import { DEFAULT_AGENT } from "../agents/index.ts";
+import { loadConfig } from "../core/config.ts";
 import { type SessionMeta, type SessionSource, getSessionSource } from "../core/session-source.ts";
 import { renderDashboard } from "../core/insights/dashboard.ts";
 import {
@@ -32,7 +33,11 @@ const KNOWN_BACKENDS = ["claude-code", "codex"] as const;
 
 /** The backend driving a workspace (its `.servant/agent` marker), defaulting to Claude. */
 async function backendForWorkspace(workspace: string | undefined): Promise<string> {
-  return (workspace ? await readWorkspaceAgent(workspace) : null) ?? DEFAULT_AGENT;
+  return (
+    (workspace ? await readWorkspaceAgent(workspace) : null) ??
+    (await loadConfig()).defaultAgent ??
+    DEFAULT_AGENT
+  );
 }
 
 /** Locate a session id across the candidate backends' stores (explicit backend, else all). */
@@ -213,13 +218,8 @@ export const insightsCommand = defineCommand({
     const { maxAgeMs, label: windowLabel } = resolveWindow(args, now);
     const workspaceLabel = args.workspace ? `workspace ${args.workspace}` : "all workspaces";
 
-    // Scope to the workspace's backend when given, else union every backend's store so a
-    // cross-workspace digest covers Claude and Codex sessions together.
-    const sourceBackends = explicitBackend
-      ? [explicitBackend]
-      : args.workspace
-        ? [await backendForWorkspace(args.workspace)]
-        : [...KNOWN_BACKENDS];
+    // Include both histories even after a workspace switches backend, unless explicitly filtered.
+    const sourceBackends = explicitBackend ? [explicitBackend] : [...KNOWN_BACKENDS];
     const sessions: { meta: SessionMeta; source: SessionSource }[] = [];
     for (const backend of sourceBackends) {
       const source = getSessionSource(backend);

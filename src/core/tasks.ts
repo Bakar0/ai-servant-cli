@@ -7,6 +7,8 @@
 import type { Claim, Ticket, TicketRef, TicketState } from "./board/store.ts";
 import { isOpenStatus, listTickets, recordSessionsSeen } from "./board/store.ts";
 import { readLiveSessions } from "./session-registry.ts";
+import { readLiveSessionNames } from "./session-registry.ts";
+import { untrackedSessionWorkspaces } from "./workspace.ts";
 
 export type { Ticket, TicketState, TicketStatus, Claim } from "./board/store.ts";
 
@@ -55,7 +57,28 @@ export interface ClaimedTicket {
  * ordinary answer — never an error — because liveness is the most valuable thing here and the
  * least safe to depend on (workspace ADR 0010, decision 3).
  */
-export type ClaimLiveness = { known: false } | { known: true; liveSessions: readonly string[] };
+export type ClaimLiveness =
+  | { known: false }
+  | {
+      known: true;
+      liveSessions: readonly string[];
+      unknownWorkspaces?: readonly string[];
+    };
+
+/** Shared by the CLI frontier and board so neither reclaims untracked Codex workers. */
+export async function readClaimLiveness(): Promise<ClaimLiveness> {
+  try {
+    const live = await readLiveSessionNames();
+    if (!live.known) return { known: false };
+    return {
+      known: true,
+      liveSessions: live.names,
+      unknownWorkspaces: await untrackedSessionWorkspaces(),
+    };
+  } catch {
+    return { known: false };
+  }
+}
 
 /**
  * The frontier, in four disjoint buckets. Only two of them are dispatchable, and which two is the
@@ -121,7 +144,8 @@ export function computeFrontier(
     // Staleness is the session being *absent*, never elapsed time — a session idle for days is
     // alive and still legitimately holds its ticket. So an unreadable registry cannot conclude
     // stale, and reports in-flight instead.
-    if (!liveness.known) inFlight.push({ ticket, claim, liveness: "unknown" });
+    if (!liveness.known || liveness.unknownWorkspaces?.includes(ticket.workspace))
+      inFlight.push({ ticket, claim, liveness: "unknown" });
     else if (live.has(claim.session)) inFlight.push({ ticket, claim, liveness: "alive" });
     else stale.push({ ticket, claim });
   }

@@ -7,11 +7,16 @@ import type {
   LaunchOptions,
 } from "./types.ts";
 
-// Shared flags for servant's own headless `codex exec` runs. `--ephemeral` keeps the run out of the
-// session store entirely (Codex has no `--session-id` pre-assignment), which is how servant excludes
-// itself from insights on the Codex side. `--dangerously-bypass-approvals-and-sandbox` matches the
-// Claude path's `--dangerously-skip-permissions`: unattended, only touches servant's own store.
-const HEADLESS_EXEC_FLAGS = ["--ephemeral", "--dangerously-bypass-approvals-and-sandbox"] as const;
+// Keep servant's own runs out of the session store, support non-git store directories, and
+// enforce workspace-write without interactive approvals. Runners use the output store as cwd.
+const HEADLESS_EXEC_FLAGS = [
+  "--ephemeral",
+  "--skip-git-repo-check",
+  "--sandbox",
+  "workspace-write",
+  "-c",
+  'approval_policy="never"',
+] as const;
 
 export const codexAgent: AgentBackend = {
   name: "codex",
@@ -19,27 +24,30 @@ export const codexAgent: AgentBackend = {
     const addDirs = (opts?.addDirs ?? []).filter((d) => d.trim().length > 0);
     const prompt = opts?.prompt?.trim();
     const parts = ["codex"];
-    // `opts.sessionName` and `opts.permissionMode` are deliberately dropped: Codex has neither
-    // flag, so a Codex workspace has no addressable sessions, and read-only delegation cannot be
-    // enforced there — the two things that depend on them do not work on this backend.
+    // Codex has no --name equivalent. Permission constraints must never be silently discarded.
+    const permissionMode = opts?.permissionMode?.trim();
+    if (permissionMode === "plan") {
+      parts.push("--sandbox", "read-only", "--ask-for-approval", "never");
+    } else if (permissionMode && permissionMode !== "default") {
+      throw new Error(`Unsupported Codex permission mode: ${permissionMode}. Use plan or default.`);
+    }
     // Unlike Claude's variadic `--add-dir`, Codex's `--add-dir <DIR>` takes a single directory
-    // and is repeatable — so each dir gets its own flag and no `--` terminator is needed before
-    // the positional prompt.
+    // and is repeatable. A terminator also protects prompts that start with a hyphen.
     for (const dir of addDirs) parts.push("--add-dir", shellSingleQuote(dir));
-    if (prompt) parts.push(shellSingleQuote(prompt));
+    if (prompt) parts.push("--", shellSingleQuote(prompt));
     return parts.join(" ");
   },
 
   resumeCommand(sessionId: string, prompt?: string): string {
     const base = `codex resume ${shellSingleQuote(sessionId)}`;
     const trimmed = prompt?.trim();
-    return trimmed ? `${base} ${shellSingleQuote(trimmed)}` : base;
+    return trimmed ? `${base} -- ${shellSingleQuote(trimmed)}` : base;
   },
 
   resumeArgv(sessionId: string, prompt?: string): string[] {
     const argv = ["codex", "resume", sessionId];
     const trimmed = prompt?.trim();
-    if (trimmed) argv.push(trimmed);
+    if (trimmed) argv.push("--", trimmed);
     return argv;
   },
 
@@ -50,7 +58,7 @@ export const codexAgent: AgentBackend = {
   prompts: {
     dir: () => codexPromptsDir(),
     // Codex prompts are flat top-level files with no `:` namespace, so the servant prefix lives in
-    // the filename: `servant-goal.md` → `/servant-goal`.
+    // the filename: `servant-goal.md` -> `/prompts:servant-goal`.
     filename: (commandId: string) => `servant-${commandId}.md`,
   },
 
@@ -66,6 +74,7 @@ export const codexAgent: AgentBackend = {
         ...HEADLESS_EXEC_FLAGS,
         "--add-dir",
         opts.addDir,
+        "--",
         prompt,
       ];
     },
@@ -79,6 +88,7 @@ export const codexAgent: AgentBackend = {
         ...HEADLESS_EXEC_FLAGS,
         "--add-dir",
         opts.addDir,
+        "--",
         prompt,
       ];
     },

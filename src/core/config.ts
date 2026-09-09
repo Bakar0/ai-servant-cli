@@ -12,6 +12,8 @@ export type Config = {
   showTips: boolean;
   /** Hub repo slug (owner/name) — the issue tracker. */
   hubRepo: string;
+  /** Backend used for new workspaces and global analyst sessions. */
+  defaultAgent?: "claude-code" | "codex";
 };
 
 /** Current config schema version. */
@@ -27,6 +29,7 @@ export function defaultConfig(): Config {
     scanMaxDepth: DEFAULT_SCAN_MAX_DEPTH,
     showTips: true,
     hubRepo: DEFAULT_HUB_REPO,
+    defaultAgent: "claude-code",
   };
 }
 
@@ -40,6 +43,9 @@ function coerce(raw: unknown): Config {
   const cfg = defaultConfig();
   if (raw && typeof raw === "object") {
     const obj = raw as Record<string, unknown>;
+    if (obj.defaultAgent === "codex" || obj.defaultAgent === "claude-code") {
+      cfg.defaultAgent = obj.defaultAgent;
+    }
     if (typeof obj.version === "number" && Number.isFinite(obj.version)) {
       cfg.version = Math.max(1, Math.floor(obj.version));
     }

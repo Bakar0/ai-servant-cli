@@ -14,6 +14,8 @@ import {
 // spawning concurrent extraction processes.
 
 export interface ExtractJob {
+  /** Producing backend, pinned at enqueue time. Optional for pre-upgrade queues. */
+  backend?: string;
   session_id: string;
   transcript_path: string;
   workspace: string | null;

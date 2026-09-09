@@ -16,7 +16,7 @@ import {
 } from "../core/board/view.ts";
 import { openInDefaultApp } from "../core/open.ts";
 import { applyRootOverride, BOARD_VIEWER_PORT } from "../core/paths.ts";
-import { readLiveSessions } from "../core/session-registry.ts";
+import { readClaimLiveness } from "../core/tasks.ts";
 import type { ClaimLiveness } from "../core/tasks.ts";
 import { resolveWorkspaceName } from "../core/workspace.ts";
 
@@ -36,15 +36,7 @@ function createLivenessCache(everyMs: number) {
   let current: ClaimLiveness = { known: false };
   let timer: ReturnType<typeof setInterval> | null = null;
   const refresh = async () => {
-    const live = await readLiveSessions();
-    current = live.known
-      ? {
-          known: true,
-          liveSessions: live.sessions
-            .map((s) => s.name)
-            .filter((name): name is string => name !== null),
-        }
-      : { known: false };
+    current = await readClaimLiveness();
   };
   return {
     get: () => current,

@@ -18,7 +18,7 @@ import { type RuleViolation, type ToolCall, checkRules } from "./rules.ts";
 // v6 splits Bash tool buckets by command head (`Bash: git`, `Bash: npm`, …) so one catch-all "Bash"
 // bucket no longer swamps the spend chart, and captures friction samples (error/correction snippets)
 // so the dashboard can show *what* went wrong, not just how many.
-export const METRICS_SCHEMA_VERSION = 6;
+export const METRICS_SCHEMA_VERSION = 7;
 
 /**
  * A stable pointer back into a transcript so a later (qualitative) pass can re-locate the exact
@@ -237,6 +237,7 @@ function repoFromCwd(workspace: string | null, cwd: string): string | null {
 // --- content helpers ---
 
 interface AnyRecord {
+  contextWindow?: number;
   type?: string;
   uuid?: string;
   cwd?: string | null;
@@ -372,7 +373,12 @@ type ReadRecords = (file: string) => AsyncIterable<{ record: unknown; line: numb
 
 export async function extractSessionMetrics(
   jsonlPath: string,
-  opts: { maxCandidates?: number; sessionId?: string; readRecords?: ReadRecords } = {},
+  opts: {
+    maxCandidates?: number;
+    sessionId?: string;
+    backend?: string;
+    readRecords?: ReadRecords;
+  } = {},
 ): Promise<SessionMetrics> {
   const maxCandidates = opts.maxCandidates ?? DEFAULT_MAX_CANDIDATES;
   const readRecords = opts.readRecords ?? readJsonlLinesWithLineNumbers;
@@ -386,6 +392,7 @@ export async function extractSessionMetrics(
   let userTurns = 0;
   let assistantTurns = 0;
 
+  let reportedContextWindow: number | null = null;
   let peakContext = 0;
   let finalContext = 0;
   let totalOutput = 0;
@@ -436,6 +443,8 @@ export async function extractSessionMetrics(
   for await (const { record, line: lineNo } of readRecords(jsonlPath)) {
     const rec = record as AnyRecord;
     allRecords.push(rec);
+    if (typeof rec.contextWindow === "number" && rec.contextWindow > 0)
+      reportedContextWindow = rec.contextWindow;
     const recUuid = typeof rec.uuid === "string" ? rec.uuid : null;
 
     if (typeof rec.cwd === "string" && rec.cwd.length > 0 && !launchCwd) {
@@ -625,7 +634,7 @@ export async function extractSessionMetrics(
             name,
             anchor: { turnUuid: recUuid, toolUseId: null, line: lineNo },
           });
-          if (/\/servant:recall\b/.test(name) || name === "/recall") {
+          if (/\/(?:servant:|prompts:servant-|servant-)recall\b/.test(name) || name === "/recall") {
             recallInvocations += 1;
             pendingRecall = true;
             recallAwaitingConsume = true;
@@ -701,7 +710,7 @@ export async function extractSessionMetrics(
   );
 
   const embeddedClaudeMd = extractEmbeddedClaudeMd(allRecords);
-  const composed = await composeSetupParts();
+  const composed = await composeSetupParts(opts.backend);
   const claudeMd = embeddedClaudeMd ?? composed.claudeMd;
   const fingerprint = fingerprintFromParts({
     version,
@@ -735,7 +744,7 @@ export async function extractSessionMetrics(
     tokens: {
       peakContext,
       finalContext,
-      contextWindowSize: contextWindowFor(model),
+      contextWindowSize: reportedContextWindow ?? contextWindowFor(model),
       totalOutput,
       inputTokens,
       cacheReadTokens,

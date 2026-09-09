@@ -7,7 +7,7 @@ import { toCodexPrompt } from "../src/core/codex-setup.ts";
 describe("toCodexPrompt", () => {
   test("renames the servant slash-command namespace from `:` to `-`", () => {
     expect(toCodexPrompt("run /servant:goal then /servant:delegate")).toBe(
-      "run /servant-goal then /servant-delegate",
+      "run /prompts:servant-goal then /prompts:servant-delegate",
     );
   });
 
@@ -41,7 +41,7 @@ describe("ensureCodexAssets", () => {
         "servant-recall.md",
       ]);
       const goal = await readFile(join(home, "prompts", "servant-goal.md"), "utf8");
-      expect(goal).toContain("/servant-goal");
+      expect(goal).toContain("/prompts:servant-goal");
       expect(goal).not.toContain("/servant:goal");
     } finally {
       if (prevHome === undefined) delete process.env.CODEX_HOME;

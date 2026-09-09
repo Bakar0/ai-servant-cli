@@ -261,8 +261,11 @@ export function userCodexDir(): string {
   return join(homedir(), ".codex");
 }
 
-/** Where Codex discovers custom slash-command prompt files (top-level `*.md`). */
+/** Prompt files. Isolated roots use a local fallback unless CODEX_HOME is explicitly selected. */
 export function codexPromptsDir(): string {
+  if (!isDefaultRoot() && !process.env.CODEX_HOME) {
+    return join(aiServantRoot(), "codex", "prompts");
+  }
   return join(userCodexDir(), "prompts");
 }
 

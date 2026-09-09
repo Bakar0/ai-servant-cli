@@ -1,4 +1,6 @@
 import { stat } from "node:fs/promises";
+import { createReadStream } from "node:fs";
+import { createInterface } from "node:readline";
 import { join, relative, resolve, sep } from "node:path";
 import type { ClaudeSessionMeta, ListSessionsOpts } from "./claude-session.ts";
 import { codexSessionsDir, workspacesRoot } from "./paths.ts";
@@ -10,7 +12,7 @@ import { assertValidWorkspaceName } from "./workspace.ts";
 // and (2) `readRecords`, which re-shapes each rollout line into the *Claude* record model so
 // `metrics.ts` parses either backend through one code path.
 //
-// Every field name below was verified against real rollout files (Codex 0.42–0.77). The parser must
+// Legacy rollout layouts and current exec_command/token_count layouts are handled here. The parser must
 // never throw on malformed/partial data — it degrades to empty/nulls, matching claude-session.ts.
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -38,21 +40,28 @@ interface RolloutLine {
 }
 
 async function* readRollout(path: string): AsyncGenerator<{ rec: RolloutLine; line: number }> {
-  let text: string;
+  const input = createReadStream(path, { encoding: "utf8" });
+  const lines = createInterface({ input, crlfDelay: Number.POSITIVE_INFINITY });
+  let line = 0;
   try {
-    text = await Bun.file(path).text();
-  } catch {
-    return; // missing/unreadable file — yield nothing
-  }
-  const lines = text.split("\n");
-  for (let i = 0; i < lines.length; i++) {
-    const trimmed = (lines[i] ?? "").trim();
-    if (!trimmed) continue;
-    try {
-      yield { rec: JSON.parse(trimmed) as RolloutLine, line: i + 1 };
-    } catch {
-      // skip malformed lines (line numbers stay physical, matching readJsonlLinesWithLineNumbers)
+    for await (const raw of lines) {
+      line += 1;
+      const trimmed = raw.trim();
+      if (!trimmed) continue;
+      try {
+        const parsed: unknown = JSON.parse(trimmed);
+        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+          yield { rec: parsed as RolloutLine, line };
+        }
+      } catch {
+        // Skip malformed lines without shifting physical transcript anchors.
+      }
     }
+  } catch {
+    // Missing or unreadable transcript.
+  } finally {
+    lines.close();
+    input.destroy();
   }
 }
 
@@ -87,7 +96,11 @@ function workspaceNameFromCwd(cwd: string): string | null {
 }
 
 function isEnvironmentContext(text: string): boolean {
-  return text.trimStart().startsWith("<environment_context>");
+  const trimmed = text.trimStart();
+  return (
+    trimmed.startsWith("<environment_context>") ||
+    (trimmed.startsWith("# AGENTS.md instructions") && trimmed.includes("<INSTRUCTIONS>"))
+  );
 }
 
 /** Text of a Codex message's content array (input_text/output_text/text blocks). */
@@ -332,7 +345,7 @@ function patchFilePath(patch: string): string | null {
  * script; otherwise join the argv. Returns "" when there's no command.
  */
 function shellCommandString(args: Record<string, unknown>): string {
-  const cmd = args.command;
+  const cmd = args.command ?? args.cmd;
   if (Array.isArray(cmd)) {
     if (
       cmd.length >= 3 &&
@@ -357,13 +370,14 @@ function mapToolCall(
   codexName: string,
   rawArgs: unknown,
 ): { name: string; input: Record<string, unknown> } {
-  if (codexName === "shell") {
+  const name = codexName.replace(/^(?:functions|tools)\./, "");
+  if (["shell", "shell_command", "exec_command"].includes(name)) {
     const args = parseArgs(rawArgs);
     const input: Record<string, unknown> = { command: shellCommandString(args) };
     if (typeof args.workdir === "string") input.workdir = args.workdir;
     return { name: "Bash", input };
   }
-  if (codexName === "apply_patch" || codexName === "patch") {
+  if (name === "apply_patch" || name === "patch") {
     const patch = typeof rawArgs === "string" ? rawArgs : "";
     const fp = patchFilePath(patch);
     return { name: "Edit", input: fp ? { file_path: fp } : {} };
@@ -390,7 +404,7 @@ function parseToolOutput(output: unknown): { content: string; isError: boolean }
           ? o.content
           : fallback;
     const meta = o.metadata as { exit_code?: unknown } | undefined;
-    const ec = meta?.exit_code;
+    const ec = o.exit_code ?? meta?.exit_code;
     return { content: txt, isError: typeof ec === "number" && ec !== 0 };
   };
   if (typeof output === "string") {
@@ -400,7 +414,8 @@ function parseToolOutput(output: unknown): { content: string; isError: boolean }
     } catch {
       // not JSON — a plain output string
     }
-    return { content: output, isError: false };
+    const exit = /(?:Process exited with code|Exit code:)\s*(-?\d+)/.exec(output);
+    return { content: output, isError: exit !== null && Number(exit[1]) !== 0 };
   }
   if (output && typeof output === "object") {
     return fromObject(output as Record<string, unknown>, JSON.stringify(output));
@@ -413,13 +428,8 @@ function parseToolOutput(output: unknown): { content: string; isError: boolean }
  * Yield the rollout as Claude-shaped records with their 1-based physical line number. Emission rules
  * (see the mapping tables above):
  *  - session_meta/turn_context carry no content — they update `version`/`cwd`/`model` state only.
- *  - a `token_count` event's per-turn usage (`last_token_usage`, else `total_token_usage`) is held in
- *    `pendingUsage` and attached to the *next* assistant record, then cleared. Codex emits usage as
- *    its own event *before* the assistant item, and re-emits the previous total at turn start; the
- *    turn's real count always overwrites that echo before an assistant record consumes it, so each
- *    assistant/tool turn receives exactly its own usage. (Approximation: `last_token_usage` is the
- *    per-request snapshot — the right source for both context size and per-turn output, since
- *    `total_token_usage` is cumulative in newer versions and would inflate summed output.)
+ *  - token_count emits usage in a separate content-free assistant record, supporting counts
+ *    both before and after response items. Repeated cumulative totals are ignored.
  *  - response_item message(assistant) → assistant record with a text block (+ usage).
  *  - response_item message(user, non-env) → user record with a text block.
  *  - function_call / custom_tool_call → assistant record carrying a single tool_use block.
@@ -430,11 +440,13 @@ async function* readRecords(file: string): AsyncGenerator<{ record: unknown; lin
   let version: string | null = null;
   let cwd = "";
   let model: string | null = null;
-  let pendingUsage: ClaudeUsage | null = null;
+  let previousTotal: Record<string, unknown> | null = null;
+  let contextWindow: number | null = null;
 
   const base = (line: number) => ({
     uuid: `codex-${line}`,
     cwd,
+    ...(contextWindow ? { contextWindow } : {}),
     ...(version ? { version } : {}),
   });
 
@@ -467,10 +479,45 @@ async function* readRecords(file: string): AsyncGenerator<{ record: unknown; lin
         const info = p.info;
         if (info && typeof info === "object") {
           const i = info as Record<string, unknown>;
-          const u = (i.last_token_usage ?? i.total_token_usage) as
-            | Record<string, unknown>
-            | undefined;
-          if (u && typeof u === "object") pendingUsage = mapUsage(u);
+          if (num(i.model_context_window) > 0) contextWindow = num(i.model_context_window);
+          const total = i.total_token_usage as Record<string, unknown> | undefined;
+          const last = i.last_token_usage as Record<string, unknown> | undefined;
+          // Turn-start echoes repeat the previous cumulative totals. Count each request once.
+          if (
+            total &&
+            previousTotal &&
+            ["input_tokens", "cached_input_tokens", "output_tokens"].every(
+              (key) => num(total[key]) === num(previousTotal?.[key]),
+            )
+          )
+            continue;
+          let usage = last;
+          if (!usage && total) {
+            usage = Object.fromEntries(
+              ["input_tokens", "cached_input_tokens", "output_tokens"].map((key) => [
+                key,
+                Math.max(0, num(total[key]) - num(previousTotal?.[key])),
+              ]),
+            );
+          }
+          if (total) previousTotal = total;
+          if (usage) {
+            // Usage is its own record: modern rollouts emit it AFTER the final assistant item.
+            // Empty content carries no extra assistant turn and keeps the physical anchor exact.
+            yield {
+              record: {
+                type: "assistant",
+                ...base(line),
+                message: {
+                  role: "assistant",
+                  model,
+                  content: [],
+                  usage: mapUsage(usage),
+                },
+              },
+              line,
+            };
+          }
         }
       }
       continue; // agent_message/user_message are duplicates of the response_item stream
@@ -487,10 +534,6 @@ async function* readRecords(file: string): AsyncGenerator<{ record: unknown; lin
           model,
           content: [{ type: "text", text }],
         };
-        if (pendingUsage) {
-          message.usage = pendingUsage;
-          pendingUsage = null;
-        }
         yield { record: { type: "assistant", ...base(line), message }, line };
       } else if (p.role === "user" && !isEnvironmentContext(text)) {
         yield {
@@ -516,10 +559,6 @@ async function* readRecords(file: string): AsyncGenerator<{ record: unknown; lin
         model,
         content: [{ type: "tool_use", id: callId, name, input }],
       };
-      if (pendingUsage) {
-        message.usage = pendingUsage;
-        pendingUsage = null;
-      }
       yield { record: { type: "assistant", ...base(line), message }, line };
       continue;
     }
@@ -544,9 +583,12 @@ async function* readRecords(file: string): AsyncGenerator<{ record: unknown; lin
   }
 }
 
-async function countRecords(file: string): Promise<number> {
+async function countRecords(file: string, limit = Number.POSITIVE_INFINITY): Promise<number> {
   let n = 0;
-  for await (const _ of readRecords(file)) n += 1;
+  for await (const _ of readRollout(file)) {
+    n += 1;
+    if (n >= limit) break;
+  }
   return n;
 }
 

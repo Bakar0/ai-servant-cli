@@ -190,10 +190,9 @@ test("readRecords yields claude-shaped records (Bash tool_use, tool_result, assi
   expect(withUsage.version).toBe("0.77.0");
 });
 
-test("countRecords counts yielded records", async () => {
+test("countRecords counts source entries so extraction offsets match the raw transcript", async () => {
   const n = await codexSessionSource.countRecords(rolloutPath);
-  let manual = 0;
-  for await (const _ of codexSessionSource.readRecords(rolloutPath)) manual += 1;
+  const manual = (await Bun.file(rolloutPath).text()).trim().split("\n").length;
   expect(n).toBe(manual);
   expect(n).toBeGreaterThan(0);
 });
